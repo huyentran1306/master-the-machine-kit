@@ -1,0 +1,19 @@
+{
+  "name": "mtm-digital-project-team-kit",
+  "version": "0.3.2",
+  "private": true,
+  "type": "module",
+  "description": "Codex agent kit for the Master the Machine practical round: AGENTS.md, playbooks, the mtm CLI and a mock Game Master.",
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "mock": "node mock/gm-mock-server.mjs --remote rehearsal/remote.git --autostart",
+    "mock:training": "node mock/gm-mock-server.mjs --scenario mock/scenarios/training-02/scenario.json --remote rehearsal-02/remote.git --port 4020",
+    "rehearsal:autoplay": "node mock/rehearsal-autoplay.mjs",
+    "rehearsal:setup": "node mock/setup-rehearsal.mjs rehearsal",
+    "rehearsal:training:setup": "node mock/setup-rehearsal.mjs rehearsal-02",
+    "team-pack:help": "node official-team-pack/team-orchestrator.mjs --help",
+    "install:codex": "node install.mjs",
+    "uninstall:codex": "node install.mjs --uninstall"
+  },
+  "engines": { "node": ">=18" }
+}

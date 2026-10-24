@@ -1,0 +1,6 @@
+name = "business-analyst"
+role = "Clarify public requirements and acceptance scenarios"
+responsibilities = ["read-brief", "derive-public-edge-cases", "review-contract"]
+git_writer = false
+external_operation_owner = false
+

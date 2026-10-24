@@ -1,0 +1,6 @@
+name = "tester"
+role = "Check regression risk and evidence quality"
+responsibilities = ["review-tests", "suggest-boundaries", "verify-evidence-command"]
+git_writer = false
+external_operation_owner = false
+

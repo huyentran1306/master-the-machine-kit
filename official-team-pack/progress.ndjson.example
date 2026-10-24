@@ -1,0 +1,7 @@
+{"event":"MATCH_LOGIN","status":"PASS","requestId":"<request-id>","at":"<ISO-8601>","matchId":"<match-uuid>"}
+{"event":"ENVIRONMENT_READY","status":"ENVIRONMENT_READY","requestId":"<request-id>","repository":"<repository>","revision":"<git-sha>","build":"PASS","matchLogin":"PASS","at":"<ISO-8601>"}
+{"event":"PREPARED","status":"PREPARED","at":"<ISO-8601>"}
+{"event":"BACKLOG_SYNC","status":"DISCOVERED","backlogId":"<id>","title":"<title>","revision":null,"receiptId":null,"at":"<ISO-8601>"}
+{"event":"BACKLOG_START_REQUESTED","status":"REQUESTED","backlogItemKey":"TASK-01","at":"<ISO-8601>"}
+{"event":"BACKLOG_IN_PROGRESS","status":"IN_PROGRESS","backlogItemKey":"TASK-01","revision":"<git-sha>","at":"<ISO-8601>"}
+{"event":"SUBMIT_RECEIPT","status":"RECEIVED","backlogItemKey":"TASK-01","receiptId":"<official-receipt>","revision":"<git-sha>","at":"<ISO-8601>"}

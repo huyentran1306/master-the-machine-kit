@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "name": "mtm-codex-team",
+  "description": "Master the Machine team pack scaffold. Final registration keys must be aligned with the BTC example pack.",
+  "orchestrator": "team-orchestrator.mjs",
+  "progressLog": "progress.ndjson",
+  "agents": [
+    "agents/team-orchestrator.toml",
+    "agents/business-analyst.toml",
+    "agents/developer.toml",
+    "agents/cyber-security.toml",
+    "agents/tester.toml"
+  ],
+  "capabilities": ["prepare", "backlog-sync", "implement", "test", "review", "evidence", "submit"],
+  "ownership": {
+    "gitWriter": "team-orchestrator",
+    "startWorkCaller": "team-orchestrator",
+    "submitCaller": "team-orchestrator",
+    "specialistsReadOnlyByDefault": true
+  },
+  "integrationStatus": "PENDING_BTC_PACK_SCHEMA"
+}

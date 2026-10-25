@@ -1,0 +1,64 @@
+{
+  "login": {
+    "strategy": "auto",
+    "strategies": [
+      "nextauth",
+      "form",
+      "json"
+    ],
+    "nextAuthBasePath": "/api/auth",
+    "nextAuthProviders": [
+      "credentials"
+    ],
+    "loginPaths": [
+      "/login",
+      "/sign-in",
+      "/signin",
+      "/auth/login",
+      "/"
+    ],
+    "jsonLoginPaths": [
+      "/api/auth/login",
+      "/api/login",
+      "/api/v1/auth/login"
+    ]
+  },
+  "matchView": {
+    "pagePathTemplate": "{matchPageUrl}/{matchId}",
+    "extraJsonPaths": [],
+    "assignmentCheck": "block"
+  },
+  "polling": {
+    "successMs": 5000,
+    "errorMs": 10000,
+    "backgroundMs": 20000,
+    "maxWaitMs": 55000
+  },
+  "submit": {
+    "acceptedStatuses": [
+      "ACCEPTED",
+      "RECEIVED"
+    ],
+    "retryBudgetMs": 90000
+  },
+  "planner": {
+    "estMinutes": {
+      "PI": 10,
+      "BUG": 10,
+      "TASK": 8,
+      "CR": 14
+    },
+    "minFeasibleMinutes": {
+      "PI": 4,
+      "BUG": 5,
+      "CR": 7,
+      "TASK": 4
+    },
+    "urgentMinutes": 12,
+    "wrapUpMinutes": 5,
+    "budgetFactor": 1.5
+  },
+  "parallel": {
+    "maxWorkers": 2
+  }
+}

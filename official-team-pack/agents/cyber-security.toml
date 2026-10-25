@@ -1,6 +1,0 @@
-name = "cyber-security"
-role = "Check scope, secrets and unsafe operations"
-responsibilities = ["review-diff", "check-secret-exposure", "check-guardrails"]
-git_writer = false
-external_operation_owner = false
-

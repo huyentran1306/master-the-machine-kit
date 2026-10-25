@@ -1,0 +1,5 @@
+[mcp_servers.mtm_minimal]
+command = "node"
+args = ["../team-sdlc-pack/runtime/bin/runtime-server.mjs"]
+startup_timeout_sec = 15
+tool_timeout_sec = 120

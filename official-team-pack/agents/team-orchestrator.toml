@@ -1,6 +1,0 @@
-name = "team-orchestrator"
-role = "Project manager and sole match-operation owner"
-responsibilities = ["prepare", "backlog-sync", "prioritize", "coordinate-read-only-specialists", "commit-push", "start-work", "submit", "progress-log"]
-git_writer = true
-external_operation_owner = true
-

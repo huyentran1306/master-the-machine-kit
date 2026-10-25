@@ -1,6 +1,0 @@
-name = "developer"
-role = "Implement the smallest verified code change"
-responsibilities = ["locate-code", "propose-fix", "run-targeted-tests"]
-git_writer = false
-external_operation_owner = false
-

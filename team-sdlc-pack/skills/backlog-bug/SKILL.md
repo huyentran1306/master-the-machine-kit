@@ -1,0 +1,17 @@
+---
+name: backlog-bug
+description: Playbook for an MTM BUG-xx - fix a defect to the expected behaviour without breaking anything else; MVS must pass and evidence is mandatory.
+---
+
+# BUG: fix to expectation, break nothing
+
+MVS is the minimum; Grader runs more. Target ~10 minutes.
+
+1. `start_work <ID>`: description, MVS, template. Notes: expected behaviour (outcome); acceptance = every MVS scenario + 2-4 hidden ones: the same defect via another input/caller/page, exact boundaries, empty/null, case/whitespace, the neighbouring behaviour that must NOT change (e.g. mobile layout when fixing desktop, other statuses when fixing one).
+2. Tests first at the layer each MVS names (HTTP: status + fields; service/query: data; UI: component/DOM/CSS class). Watch them fail for the right reason.
+3. Root cause: search the function/query/style, read its callers. Fix where it lives so every path is correct, not only the reported example. Data bugs: fix the query/filter for every report/list that shows the data (e.g. voided/deleted/cancelled records excluded everywhere they must be), and consider existing data.
+4. If an existing test encodes the wrong behaviour, update it and name it in the answer. Never delete/skip/weaken tests.
+5. Targeted tests -> module/full suite once -> build/typecheck once. No NEW failures vs `<checkoutRoot>/.mtm-notes/baseline.md`. Report BACKLOG_TESTS.
+6. Review: spawn `team_quality_checker` (item, MVS, `git diff`, commands). Close every GAP with a test first.
+7. Answer + evidence (evidence-and-answer skill): one evidence file per MVS scenario + regression file. Root cause with file:line in the analysis.
+8. Commit `<ID>: fix <what>` (code + tests + answers together), push, `submit_work <ID>`.

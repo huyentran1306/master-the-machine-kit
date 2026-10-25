@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MTM Kit — Flow và giải pháp</title>
+<style>
+:root{
+  --bg:#f7f6f2; --paper:#ffffff; --ink:#1d1f23; --muted:#5d6470; --line:#dcdad3;
+  --accent:#1f5fbf; --accent-soft:#e6eefb; --ok:#1d7a46; --ok-soft:#e3f3ea;
+  --warn:#9a5b00; --warn-soft:#fbf0dc; --bad:#b3261e; --bad-soft:#fbe7e5; --code:#f0eee8;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#16181c; --paper:#1e2126; --ink:#e8e6e1; --muted:#a2a8b3; --line:#343841;
+    --accent:#7aa7ff; --accent-soft:#1f2a40; --ok:#6fcf97; --ok-soft:#173226;
+    --warn:#f2b45b; --warn-soft:#3a2c14; --bad:#ff8a80; --bad-soft:#3d1d1b; --code:#262a31;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#16181c; --paper:#1e2126; --ink:#e8e6e1; --muted:#a2a8b3; --line:#343841;
+  --accent:#7aa7ff; --accent-soft:#1f2a40; --ok:#6fcf97; --ok-soft:#173226;
+  --warn:#f2b45b; --warn-soft:#3a2c14; --bad:#ff8a80; --bad-soft:#3d1d1b; --code:#262a31;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif}
+main{max-width:960px;margin:0 auto;padding:32px 16px 64px}
+h1{font-size:30px;line-height:1.25;margin:0 0 8px;letter-spacing:-.01em}
+h2{font-size:23px;margin:48px 0 12px;padding-top:12px;border-top:1px solid var(--line)}
+h3{font-size:18px;margin:28px 0 8px}
+h4{font-size:15px;margin:0 0 6px}
+p{margin:8px 0 12px}
+a{color:var(--accent)}
+code{font:13.5px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--code);padding:1px 5px;border-radius:4px;word-break:break-word}
+.lead{color:var(--muted);font-size:17px;margin:0 0 20px}
+.meta{display:flex;flex-wrap:wrap;gap:8px;margin:16px 0 8px}
+.pill{display:inline-block;font-size:13px;padding:3px 10px;border-radius:999px;background:var(--paper);border:1px solid var(--line);color:var(--muted)}
+.pill.ok{background:var(--ok-soft);color:var(--ok);border-color:transparent}
+.pill.warn{background:var(--warn-soft);color:var(--warn);border-color:transparent}
+.card{background:var(--paper);border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin:12px 0}
+.toc{columns:2;column-gap:32px;padding-left:20px;margin:8px 0}
+.toc li{break-inside:avoid;margin:2px 0}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.stat{background:var(--paper);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+.stat b{display:block;font-size:26px;line-height:1.2}
+.stat span{color:var(--muted);font-size:14px}
+table{width:100%;border-collapse:collapse;font-size:14.5px;background:var(--paper);border:1px solid var(--line);border-radius:10px;overflow:hidden;margin:10px 0}
+th,td{text-align:left;vertical-align:top;padding:8px 10px;border-bottom:1px solid var(--line)}
+th{font-size:13px;color:var(--muted);font-weight:600;background:var(--code)}
+tr:last-child td{border-bottom:0}
+.tablewrap{overflow-x:auto}
+.flow{display:flex;flex-wrap:wrap;gap:6px;align-items:stretch;margin:12px 0}
+.step{flex:1 1 150px;background:var(--paper);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;padding:9px 11px;font-size:14px;position:relative}
+.step b{display:block;font-size:13px;color:var(--accent);margin-bottom:2px}
+.arrow{align-self:center;color:var(--muted);font-size:18px}
+.issue{background:var(--paper);border:1px solid var(--line);border-radius:10px;padding:14px 18px;margin:14px 0;break-inside:avoid}
+.issue header{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px;margin-bottom:6px}
+.issue header h4{margin:0;font-size:16px}
+.sev{font-size:12px;font-weight:700;padding:2px 8px;border-radius:5px}
+.sev.p1{background:var(--bad-soft);color:var(--bad)}
+.sev.p2{background:var(--warn-soft);color:var(--warn)}
+.sev.dk{background:var(--accent-soft);color:var(--accent)}
+.issue dl{display:grid;grid-template-columns:130px 1fr;gap:4px 12px;margin:6px 0 0;font-size:14.5px}
+.issue dt{color:var(--muted);font-weight:600}
+.issue dd{margin:0}
+.note{border-left:4px solid var(--warn);background:var(--warn-soft);padding:10px 14px;border-radius:6px;margin:12px 0;font-size:15px}
+.good{border-left:4px solid var(--ok);background:var(--ok-soft);padding:10px 14px;border-radius:6px;margin:12px 0;font-size:15px}
+ul.check{list-style:none;padding-left:0}
+ul.check li{padding-left:28px;position:relative;margin:6px 0}
+ul.check li::before{content:"";position:absolute;left:4px;top:6px;width:14px;height:14px;border:2px solid var(--muted);border-radius:3px}
+.diagram{background:var(--paper);border:1px solid var(--line);border-radius:10px;padding:12px;margin:12px 0}
+.diagram svg{width:100%;height:auto;display:block}
+.svg-box{fill:var(--paper);stroke:var(--line);stroke-width:1.5}
+.svg-box.key{fill:var(--accent-soft);stroke:var(--accent)}
+.svg-box.ext{fill:var(--code)}
+.svg-t{fill:var(--ink);font:600 14px -apple-system,"Segoe UI",Roboto,Arial,sans-serif}
+.svg-s{fill:var(--muted);font:12px -apple-system,"Segoe UI",Roboto,Arial,sans-serif}
+.svg-a{stroke:var(--muted);stroke-width:1.6;fill:none}
+.svg-l{fill:var(--muted);font:italic 11.5px -apple-system,"Segoe UI",Roboto,Arial,sans-serif}
+.small{font-size:14px;color:var(--muted)}
+footer{margin-top:48px;color:var(--muted);font-size:13px;border-top:1px solid var(--line);padding-top:12px}
+@media (max-width:680px){
+  h1{font-size:25px} h2{font-size:20px}
+  .grid2,.grid3{grid-template-columns:1fr}
+  .toc{columns:1}
+  .issue dl{grid-template-columns:1fr}
+  .issue dt{margin-top:6px}
+  .arrow{display:none}
+}
+@media print{
+  :root{--bg:#fff;--paper:#fff}
+  body{font-size:12.5px;background:#fff}
+  main{max-width:none;padding:0}
+  h2{margin-top:22px;padding-top:8px}
+  h2,h3,h4{break-after:avoid}
+  #giaiphap,#bangchung{break-before:page}
+  .issue,.diagram,.stat,.step,.card{break-inside:avoid}
+  tr,dl > *{break-inside:avoid}
+  .lead,.note,.good{break-inside:avoid}
+  h1{font-size:24px} h2{font-size:18px} h3{font-size:15px}
+  table,.issue dl,.note,.good,.step,.lead{font-size:11.5px}
+  th{font-size:10.5px} th,td{padding:5px 8px}
+  code{font-size:10.5px}
+  .stat b{font-size:16px} .stat span{font-size:11.5px}
+  .issue{padding:10px 14px;margin:10px 0}
+  .issue header h4{font-size:13.5px}
+  .issue dl{grid-template-columns:90px 1fr}
+  a{color:inherit;text-decoration:none}
+  .toc{columns:2}
+  .grid3{grid-template-columns:repeat(3,1fr)}
+  .grid2{grid-template-columns:1fr 1fr}
+}
+@page{size:A4;margin:16mm 14mm}
+</style>
+</head>
+<body>
+<main>
+
+<h1>MTM Kit (Codex) — Flow chi tiết và giải pháp</h1>
+<p class="lead">Tài liệu nội bộ cho team: kit chạy thế nào trong một trận Master the Machine, các lỗi hai vòng review đã chỉ ra, cách đã sửa, bằng chứng kiểm thử, và những việc còn phải làm trước khi thi.</p>
+<div class="meta">
+  <span class="pill">team-sdlc-pack 1.0.0</span>
+  <span class="pill">Cập nhật 25/10/2026</span>
+  <span class="pill ok">Test tự động 31/31 pass</span>
+  <span class="pill ok">Rehearsal Claude: 830 → 1000 sau khi sửa đề mock</span>
+  <span class="pill warn">Chưa kiểm trên portal thật và máy Windows</span>
+</div>
+
+<div class="card">
+<b>Mục lục</b>
+<ol class="toc">
+  <li><a href="#tongquan">Bức tranh tổng thể</a></li>
+  <li><a href="#chuanbi">Pha chuẩn bị</a></li>
+  <li><a href="#batdau">Bắt đầu trận</a></li>
+  <li><a href="#item">Vòng làm một item</a></li>
+  <li><a href="#songsong">Làn song song (worktree)</a></li>
+  <li><a href="#pause">Tạm dừng, tiếp tục, kết thúc</a></li>
+  <li><a href="#giaiphap">Giải pháp cho từng lỗi review</a></li>
+  <li><a href="#bangchung">Bằng chứng kiểm thử</a></li>
+  <li><a href="#conlai">Việc còn lại trước khi thi</a></li>
+  <li><a href="#phuluc">Phụ lục: 13 tool của helper</a></li>
+</ol>
+</div>
+
+<h2 id="tongquan" class="keep">1. Bức tranh tổng thể</h2>
+<p>mtm-player của BTC chạy Codex CLI với root agent <code>team_orchestrator</code>. Agent không gọi thẳng Game Master: mọi việc chạm tới portal, Game API và progress log đi qua <b>MCP helper</b> <code>mtm_minimal</code>. Helper giữ mật khẩu, team key và cookie trong bộ nhớ, tự kiểm tra trước khi gửi, và ghi các event bắt buộc vào log. Agent lo phần code, test, Git và quyết định làm item nào.</p>
+
+<div class="diagram">
+<svg viewBox="0 0 940 380" role="img" aria-label="Sơ đồ thành phần: mtm-player, Team Orchestrator, subagents, MCP helper, progress log, portal, Game API, repo Git">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--muted)"/></marker>
+  </defs>
+  <!-- boxes -->
+  <rect class="svg-box ext" x="20" y="40" width="180" height="80" rx="10"/>
+  <text class="svg-t" x="110" y="74" text-anchor="middle">mtm-player (BTC)</text>
+  <text class="svg-s" x="110" y="94" text-anchor="middle">gửi lifecycle input</text>
+
+  <rect class="svg-box key" x="260" y="40" width="240" height="80" rx="10"/>
+  <text class="svg-t" x="380" y="70" text-anchor="middle">Team Orchestrator</text>
+  <text class="svg-s" x="380" y="89" text-anchor="middle">Codex CLI · root agent</text>
+  <text class="svg-s" x="380" y="106" text-anchor="middle">code · test · Git · chọn item</text>
+
+  <rect class="svg-box" x="560" y="30" width="360" height="100" rx="10"/>
+  <text class="svg-t" x="580" y="56">Subagents (không có credential)</text>
+  <text class="svg-s" x="580" y="78">team_repo_scout — chỉ đọc, tìm nguyên nhân PI</text>
+  <text class="svg-s" x="580" y="97">team_feature_worker — làm item trong worktree riêng</text>
+  <text class="svg-s" x="580" y="116">team_quality_checker — chỉ đọc, review CR/BUG</text>
+
+  <rect class="svg-box key" x="260" y="230" width="240" height="120" rx="10"/>
+  <text class="svg-t" x="380" y="258" text-anchor="middle">MCP helper mtm_minimal</text>
+  <text class="svg-s" x="380" y="280" text-anchor="middle">password · team key · cookie: chỉ trong RAM</text>
+  <text class="svg-s" x="380" y="299" text-anchor="middle">preflight · idempotency · planner</text>
+  <text class="svg-s" x="380" y="318" text-anchor="middle">state: .git/mtm-team/state.json</text>
+
+  <rect class="svg-box ext" x="20" y="250" width="180" height="70" rx="10"/>
+  <text class="svg-t" x="110" y="280" text-anchor="middle">progress.ndjson</text>
+  <text class="svg-s" x="110" y="299" text-anchor="middle">schema của BTC</text>
+
+  <rect class="svg-box ext" x="560" y="210" width="175" height="60" rx="10"/>
+  <text class="svg-t" x="647" y="236" text-anchor="middle">Portal</text>
+  <text class="svg-s" x="647" y="255" text-anchor="middle">login · /match/&lt;id&gt;</text>
+
+  <rect class="svg-box ext" x="560" y="290" width="175" height="60" rx="10"/>
+  <text class="svg-t" x="647" y="316" text-anchor="middle">Game API</text>
+  <text class="svg-s" x="647" y="335" text-anchor="middle">start · submissions</text>
+
+  <rect class="svg-box ext" x="765" y="210" width="155" height="140" rx="10"/>
+  <text class="svg-t" x="842" y="262" text-anchor="middle">Repo Git</text>
+  <text class="svg-s" x="842" y="281" text-anchor="middle">được BTC giao</text>
+  <text class="svg-s" x="842" y="300" text-anchor="middle">branch · folder</text>
+
+  <!-- arrows -->
+  <line class="svg-a" x1="200" y1="80" x2="258" y2="80" marker-end="url(#ah)"/>
+  <line class="svg-a" x1="500" y1="80" x2="558" y2="80" marker-end="url(#ah)"/>
+  <text class="svg-l" x="529" y="70" text-anchor="middle">spawn</text>
+  <line class="svg-a" x1="380" y1="122" x2="380" y2="228" marker-start="url(#ah)" marker-end="url(#ah)"/>
+  <text class="svg-l" x="390" y="180">gọi tool MCP</text>
+  <line class="svg-a" x1="258" y1="285" x2="202" y2="285" marker-end="url(#ah)"/>
+  <text class="svg-l" x="230" y="275" text-anchor="middle">ghi</text>
+  <line class="svg-a" x1="110" y1="248" x2="110" y2="122" marker-end="url(#ah)"/>
+  <text class="svg-l" x="118" y="190">đọc log</text>
+  <line class="svg-a" x1="500" y1="255" x2="558" y2="242" marker-end="url(#ah)"/>
+  <line class="svg-a" x1="500" y1="318" x2="558" y2="320" marker-end="url(#ah)"/>
+  <path class="svg-a" d="M470 122 L470 172 L842 172 L842 208" marker-end="url(#ah)"/>
+  <text class="svg-l" x="660" y="165" text-anchor="middle">commit · push (agent)</text>
+</svg>
+</div>
+
+<div class="grid3">
+  <div class="stat"><b>Helper sở hữu</b><span>Gọi portal và Game API; ghi ORCHESTRATOR_*, ENVIRONMENT_READY, GAME_MASTER_API, DISCOVERED, IN_PROGRESS, SUBMITTED.</span></div>
+  <div class="stat"><b>Agent sở hữu</b><span>Clone, cài môi trường, code, test, evidence, <code>submit.json</code>, commit và push; báo PREPARATION_STATUS và BACKLOG_TESTS.</span></div>
+  <div class="stat"><b>Không bao giờ</b><span>Credential trong file, log, prompt subagent hay Git config; force-push; sửa <code>exam-info.json</code>, <code>env-require/</code>, <code>challenge/</code>.</span></div>
+</div>
+
+<h2 id="chuanbi">2. Pha chuẩn bị (PREPARE_GAME_V2)</h2>
+<p>Mục tiêu: có checkout đúng repo, môi trường build được, đăng nhập vào đúng trang trận, rồi báo <code>ENVIRONMENT_READY</code> cho mtm-player. Chưa có team key ở pha này, nên chưa được gọi Game API.</p>
+<div class="tablewrap">
+<table>
+<tr><th>#</th><th>Bước</th><th>Ai làm / tool</th><th>Event trong log</th><th>Điều kiện qua bước</th></tr>
+<tr><td>1</td><td>Nhận input</td><td>Agent gọi <code>configure_session</code> với nguyên văn input</td><td>ORCHESTRATOR_STARTED</td><td>Descriptor hợp lệ: origin, đường dẫn trong <code>&lt;TeamWorkspace&gt;/matches</code>, không đi qua symlink/junction</td></tr>
+<tr><td>2</td><td>GIT_AUTH</td><td>Agent: <code>git ls-remote</code></td><td>PREPARATION_STATUS đầu + cuối</td><td>Đọc được branch được giao</td></tr>
+<tr><td>3</td><td>REPOSITORY</td><td>Agent: clone vào <code>checkoutRoot</code></td><td>như trên</td><td>HEAD = origin/branch</td></tr>
+<tr><td>4</td><td>ENVIRONMENT</td><td>Agent: <code>recon_repo</code>, cài theo <code>env-require/</code></td><td>như trên</td><td>Dependency, DB (nếu có) sẵn sàng</td></tr>
+<tr><td>5</td><td>BUILD</td><td>Agent: build + test baseline</td><td>như trên</td><td>Build chạy; ghi lại lỗi có sẵn từ trước</td></tr>
+<tr><td>6</td><td>MATCH_LOGIN</td><td><code>login_match</code>: tự thử NextAuth → form → JSON, mở <code>/match/&lt;matchId&gt;</code>, kiểm tra assignment</td><td>MATCH_LOGIN COMPLETED hoặc FAILED (<code>ASSIGNMENT_MISMATCH</code>)</td><td>Trang hiện đúng match id; team, folder, branch, repo không mâu thuẫn với input</td></tr>
+<tr><td>7</td><td>Sẵn sàng</td><td><code>report_ready</code></td><td>ENVIRONMENT_READY (revision, build PASS, matchLogin PASS)</td><td>Cả 5 stage COMPLETED; agent trả JSON cuối và kết thúc lượt</td></tr>
+</table>
+</div>
+<div class="note"><b>Kiểm tra assignment (bước 6) chặn gì:</b> trang không hiện match id của mình; trang hiện folder, branch, team hoặc repo khác input (đọc từ dữ liệu có cấu trúc, rồi từ nhãn trên trang HTML thuần như “Team T01”, “branch main”, “Repository &lt;url&gt;”). URL repo viết khác dạng nhưng cùng owner/name vẫn được coi là cùng repo. Thông tin trang không hiển thị thì chỉ ghi chú. Nếu hôm practice portal thật bị đọc nhầm, đặt <code>matchView.assignmentCheck: "warn"</code> trong <code>config/game-adapter.json</code> để hạ thành ghi chú.</div>
+
+<h2 id="batdau" class="keep">3. Bắt đầu trận (START_GAME_V4)</h2>
+<div class="flow">
+  <div class="step"><b>configure_session</b>Kiểm team key: độ dài và SHA-256 khớp input; origin API nằm trong danh sách cho phép.</div>
+  <div class="arrow">→</div>
+  <div class="step"><b>BACKLOG_SYNC</b>Đọc trang trận: item, trạng thái, thời gian còn lại, match UUID (từ URL Start/Submit).</div>
+  <div class="arrow">→</div>
+  <div class="step"><b>DISCOVERED</b>Mỗi item một event, không lặp lại khi resume.</div>
+  <div class="arrow">→</div>
+  <div class="step"><b>View + NEXT</b>Planner xếp thứ tự: PI trước, rồi item sắp hết hạn, rồi điểm trên phút.</div>
+</div>
+<p>Mọi kết quả tool đều kèm <code>next</code>, <code>alerts</code> (dòng <code>!!</code> phải xử lý trước) và <code>keepAlive</code>. Nếu helper khởi động lại giữa hai lượt và mất login, START_GAME trả <code>NEED_PREPARE_INPUT</code>: agent gửi lại input PREPARE cũ kèm input START trong một lần <code>configure_session</code>, không mở vòng mới.</p>
+
+<h2 id="item">4. Vòng làm một item</h2>
+<div class="flow">
+  <div class="step"><b>1 · start_work</b>Gọi Start Work API; nhận brief, MVS, submitTemplate; tạo <code>answers/&lt;ID&gt;/submit.json</code>.</div>
+  <div class="step"><b>2 · Contract</b>1 phút: outcome, MVS + 2–4 tình huống ẩn, phạm vi file.</div>
+  <div class="step"><b>3 · Code + test</b>Thay đổi nhỏ nhất; BACKLOG_TESTS RUNNING → PASSED/FAILED với số thật.</div>
+  <div class="step"><b>4 · Evidence</b>File trong <code>answers/&lt;ID&gt;/evidence/</code>, tham chiếu dạng <code>evidence/&lt;file&gt;</code>.</div>
+  <div class="step"><b>5 · Commit + push</b>Từ checkoutRoot; push bị từ chối thì rebase, test lại, push. Không force-push.</div>
+  <div class="step"><b>6 · submit_work</b>Preflight → POST với Idempotency-Key → receipt → SUBMITTED.</div>
+  <div class="step"><b>7 · Tiếp</b>Không chờ chấm điểm; lấy NEXT hoặc <code>wait_for_update</code>.</div>
+</div>
+
+<h3>Preflight của submit_work (từ chối và nói rõ lỗi, không gửi gì)</h3>
+<div class="grid2">
+<div class="card">
+<h4>Trận và item</h4>
+<ul>
+  <li>Phase phải là GAME; trận không PAUSED, không FINISHED</li>
+  <li>Item đã <code>start_work</code>, chưa nộp, chưa đóng hoặc quá hạn</li>
+  <li>Bài đang dở (PENDING/UNCERTAIN) cũng phải qua kiểm tra này trước khi gửi lại</li>
+</ul>
+</div>
+<div class="card">
+<h4>Commit</h4>
+<ul>
+  <li>SHA đủ 40/64 ký tự, có trong máy và đã có trên <code>origin/&lt;branch&gt;</code></li>
+  <li><code>submit.json</code> và mọi file evidence được tham chiếu nằm trong chính commit đó</li>
+  <li>Commit không sửa <code>exam-info.json</code>, <code>env-require/</code>, <code>challenge/</code>; không có thư mục evidence sai chỗ</li>
+</ul>
+</div>
+</div>
+
+<h3>Kết quả submit và helper xử lý thế nào</h3>
+<div class="tablewrap">
+<table>
+<tr><th>Kết quả</th><th>Khi nào</th><th>Helper làm gì</th></tr>
+<tr><td><b>ACCEPTED</b></td><td>201/200 có receiptId</td><td>Ghi SUBMITTED kèm receipt và revision; refresh trang; báo agent lấy NEXT</td></tr>
+<tr><td><b>UNCERTAIN</b></td><td>Mất kết nối, timeout, 5xx, 429, hoặc không có receipt</td><td>Retry cùng body và cùng <code>clientSubmissionId</code> trong ngân sách 90 giây. <b>Trước mỗi lần retry</b> đọc lại trạng thái trận; đang pause/kết thúc thì dừng, giữ nguyên bài để gửi lại sau</td></tr>
+<tr><td><b>REJECTED</b></td><td>4xx có mã lỗi</td><td>Gợi ý theo mã. Riêng <code>MATCH_NOT_ACCEPTING_SUBMISSIONS</code> (dùng chung cho pause và hết giờ): đọc lại trang chính thức rồi mới kết luận PAUSED hay FINISHED; không xác nhận được thì giữ nguyên trạng thái</td></tr>
+</table>
+</div>
+
+<h2 id="songsong" class="keep">5. Làn song song (worktree)</h2>
+<p>Dùng khi có từ 2 item không phải PI, chạm vào các vùng code khác nhau. Tối đa 2 worker.</p>
+<div class="flow">
+  <div class="step"><b>start_work ID2</b>Bản nháp answer tạm nằm ở checkout chính.</div>
+  <div class="arrow">→</div>
+  <div class="step"><b>worktree create</b>Tạo worktree riêng, link <code>node_modules</code>, tách <code>TEST_DATABASE_URL</code>; <b>chuyển bản nháp <code>answers/ID2/</code> sang worktree</b> và trả về đường dẫn mới.</div>
+  <div class="arrow">→</div>
+  <div class="step"><b>team_feature_worker</b>Chỉ sửa trong worktree; không commit, không gọi API.</div>
+  <div class="arrow">→</div>
+  <div class="step"><b>worktree integrate</b>Commit trong worktree, cherry-pick về main; conflict thì huỷ, main không đổi.</div>
+  <div class="arrow">→</div>
+  <div class="step"><b>Test → push → submit</b>Chạy test ở main, push, <code>submit_work</code>, <code>worktree remove</code>.</div>
+</div>
+
+<h2 id="pause" class="keep">6. Tạm dừng, tiếp tục, kết thúc</h2>
+<div class="tablewrap">
+<table>
+<tr><th>Tình huống</th><th>Tín hiệu</th><th>Hành vi đúng</th></tr>
+<tr><td>BTC tạm dừng trận</td><td><code>MATCH_PAUSED_V1</code> từ mtm-player, hoặc trang trận ghi PAUSED</td><td>Phase PAUSED: không start/submit/push, kể cả retry đang dở và replay bài cũ. Agent trả <code>final_result</code> BLOCKED, không ghi ORCHESTRATOR_ENDED. <code>wait_for_update</code> chờ đủ thời gian chứ không trả về ngay liên tục</td></tr>
+<tr><td>API báo không nhận bài</td><td>409 <code>MATCH_NOT_ACCEPTING_SUBMISSIONS</code></td><td>Đọc lại trang chính thức. PAUSED → làm như trên. FINISHED → <code>final_result end=true</code>. Không rõ → không kết luận, gọi <code>wait_for_update</code></td></tr>
+<tr><td>Trận chạy lại</td><td><code>RESUME_GAME_V1</code> (phiên mới)</td><td>ORCHESTRATOR_RESTARTED; đối chiếu log, Git, receipt; gửi lại bài dở bằng đúng body và key cũ (server trả receipt đã lưu, không nộp trùng)</td></tr>
+<tr><td>Helper/agent chết giữa chừng</td><td>mtm-player khởi động phiên thay thế</td><td>Trạng thái nằm ở <code>.git/mtm-team/state.json</code>; recovery report liệt kê item đang làm, bài chưa rõ kết quả, file chưa commit, stash</td></tr>
+<tr><td>Hết giờ</td><td>Trang ghi FINISHED, hoặc <code>MATCH_ENDED_V1</code></td><td><code>final_result end=true</code>, trả JSON <code>reply</code>, dừng</td></tr>
+</table>
+</div>
+
+<h2 id="giaiphap">7. Giải pháp cho từng lỗi review</h2>
+<p>Hai vòng review của Codex trên bản 1.0.0, cộng các lỗi phát hiện khi chạy rehearsal. Mỗi mục đều có test tái hiện trong <code>devkit/test/</code>. Code chỉ sửa ở bộ Codex; bộ Claude được sinh lại bằng <code>npm run build:claude</code>.</p>
+
+<h3>Vòng 1</h3>
+
+<div class="issue">
+<header><span class="sev p1">P1</span><h4>dryRun vẫn gửi bài thật khi gửi lại bài dở</h4></header>
+<dl>
+<dt>Vấn đề</dt><dd>Với bài đang PENDING/UNCERTAIN, <code>submit_work</code> nhảy thẳng vào nhánh gửi lại, bỏ qua <code>dryRun</code> và phase. Có thể gửi request khi trận PAUSED hoặc đã kết thúc.</dd>
+<dt>Cách sửa</dt><dd>Tách <code>submitGateErrors()</code> (phase GAME, trận không PAUSED/FINISHED) dùng chung cho bài mới và bài gửi lại. Bị chặn hoặc <code>dryRun</code> thì không gửi gì, bài giữ nguyên để gửi lại sau.</dd>
+<dt>File</dt><dd><code>src/runtime-session.mjs</code> (<code>submit_work</code>, <code>preflight</code>)</dd>
+<dt>Test</dt><dd><code>review-fixes</code>: “submit: pause is not end; dryRun and pause never replay…” — đếm request SUBMIT trong progress log, không tăng khi dryRun hay khi pause.</dd>
+</dl>
+</div>
+
+<div class="issue">
+<header><span class="sev p1">P1</span><h4>Trận tạm dừng bị hiểu thành kết thúc</h4></header>
+<dl>
+<dt>Vấn đề</dt><dd>API dùng <code>MATCH_NOT_ACCEPTING_SUBMISSIONS</code> cho cả pause và hết giờ. <code>submit_work</code> đổi thành FINISHED nếu chưa biết trận pause; <code>start_work</code> thì đổi thành FINISHED vô điều kiện (chỗ này Codex bỏ sót). Agent có thể dừng sớm và mọi bài sau bị từ chối.</dd>
+<dt>Cách sửa</dt><dd><code>recheckMatchStatus()</code> đọc lại trang trận chính thức; chỉ chấp nhận PAUSED/FINISHED khi trang xác nhận, còn lại trả UNCONFIRMED và giữ nguyên trạng thái. Gợi ý cho agent theo từng trường hợp. <code>wait_for_update</code> chờ hết timeout khi trận vẫn đang pause.</dd>
+<dt>File</dt><dd><code>src/runtime-session.mjs</code></dd>
+<dt>Test</dt><dd>Cùng test end-to-end trên (pause thật ở mock → <code>matchStatus: PAUSED</code>, view không báo FINISHED) + test UNCONFIRMED khi không đọc được trang.</dd>
+</dl>
+</div>
+
+<div class="issue">
+<header><span class="sev p1">P1</span><h4>Sai assignment vẫn báo login thành công</h4></header>
+<dl>
+<dt>Vấn đề</dt><dd><code>verifyAssignment()</code> chỉ trả ghi chú; trang của match khác vẫn ra <code>MATCH_LOGIN: COMPLETED</code>.</dd>
+<dt>Cách sửa</dt><dd>Trả <code>{ok, errors, notes}</code>; có lỗi thì <code>login_match</code> báo <code>ASSIGNMENT_MISMATCH</code>, MATCH_LOGIN FAILED, <code>report_ready</code> không qua được. Match id so theo từ nguyên vẹn (ABCD12345 không khớp ABCD1234).</dd>
+<dt>File</dt><dd><code>src/runtime-session.mjs</code>, <code>src/portal.mjs</code></dd>
+<dt>Test</dt><dd><code>review-fixes</code>: “assignment: the assigned page passes; another match, branch, folder or team blocks”.</dd>
+</dl>
+</div>
+
+<div class="issue">
+<header><span class="sev p2">P2</span><h4>Kiểm tra phạm vi thư mục không xử lý symlink/junction</h4></header>
+<dl>
+<dt>Vấn đề</dt><dd>So sánh đường dẫn dạng chuỗi: <code>matches</code> trỏ ra ngoài workspace vẫn được chấp nhận. Cũng là nguyên nhân lỗi alias <code>/var</code> ↔ <code>/private/var</code> khi chạy test trên macOS. (Codex xếp P1; installer đã chặn link lúc cài nên lỗ hổng chỉ còn khi link được tạo sau.)</dd>
+<dt>Cách sửa</dt><dd><code>realPathLoose()</code> giải đường dẫn thực (cả với đường dẫn chưa tồn tại); <code>isInside</code>/<code>samePath</code> so bằng đường dẫn thực; <code>linkOnPath()</code> từ chối <code>checkoutRoot</code>, <code>matchRoot</code>, <code>progressLogFile</code> đi qua symlink/junction bên trong workspace.</dd>
+<dt>File</dt><dd><code>src/util.mjs</code>, <code>src/lifecycle.mjs</code></dd>
+<dt>Test</dt><dd><code>review-fixes</code>: “lifecycle paths: links under the workspace are refused; an aliased workspace path is accepted”.</dd>
+</dl>
+</div>
+
+<div class="issue">
+<header><span class="sev p2">P2</span><h4>Làn worktree tự tạo điểm nghẽn MAIN_DIRTY</h4></header>
+<dl>
+<dt>Vấn đề</dt><dd>Theo đúng skill, <code>start_work</code> tạo bản nháp answer ở checkout chính (chưa track), worker làm trong worktree; đến <code>integrate</code> thì chính bản nháp đó làm main “dirty”. Commit nó ở main thì cherry-pick lại conflict.</dd>
+<dt>Cách sửa</dt><dd><code>worktree create</code> chuyển bản nháp chưa track sang worktree (<code>moveDraftAnswer</code>), trả về đường dẫn <code>answer</code> mới; skill <code>team-orchestrator</code> ghi rõ đưa worker đường dẫn này.</dd>
+<dt>File</dt><dd><code>src/runtime-session.mjs</code>, <code>skills/team-orchestrator/SKILL.md</code></dd>
+<dt>Test</dt><dd><code>review-fixes</code>: “worktree: start_work → create → integrate does not trip over the draft answer”.</dd>
+</dl>
+</div>
+
+<div class="issue">
+<header><span class="sev dk">Devkit</span><h4>Rehearsal sập khi pha chuẩn bị thất bại</h4></header>
+<dl>
+<dt>Vấn đề</dt><dd><code>finish()</code> đọc biến <code>restarts</code> trước khi biến được khai báo → <code>ReferenceError</code>, mất report.</dd>
+<dt>Cách sửa</dt><dd>Khai báo <code>restarts</code> trước mọi đường có thể gọi <code>finish()</code>.</dd>
+<dt>File</dt><dd><code>devkit/player-sim.mjs</code></dd>
+<dt>Test</dt><dd><code>player-sim</code>: “a failed preparation still writes the report”.</dd>
+</dl>
+</div>
+
+<h3>Vòng 2</h3>
+
+<div class="issue">
+<header><span class="sev p1">P1</span><h4>Đang retry submit thì trận PAUSED vẫn gửi tiếp</h4></header>
+<dl>
+<dt>Vấn đề</dt><dd>Bản sửa vòng 1 chỉ chặn lúc bắt đầu <code>submit_work</code>; vòng retry bên trong (5xx/timeout) không kiểm lại trạng thái.</dd>
+<dt>Cách sửa</dt><dd><code>submit()</code> và <code>startWork()</code> nhận hook <code>beforeRetry</code>. Helper dùng <code>retryGate()</code>: đọc lại trang trận rồi áp cùng điều kiện như lần gửi đầu. Bị chặn thì dừng retry, trả UNCERTAIN kèm <code>halted</code>, bài giữ nguyên body và <code>clientSubmissionId</code> để gửi lại sau khi trận chạy lại.</dd>
+<dt>File</dt><dd><code>src/game-api.mjs</code>, <code>src/runtime-session.mjs</code></dd>
+<dt>Test</dt><dd><code>review-fixes</code>: server trả 503 rồi trận chuyển PAUSED (qua phase và qua trạng thái trang) → chỉ đúng 1 request; tương tự cho <code>start_work</code>.</dd>
+</dl>
+</div>
+
+<div class="issue">
+<header><span class="sev p1">P1</span><h4>Assignment vẫn lọt hai trường hợp sai</h4></header>
+<dl>
+<dt>Vấn đề</dt><dd>(a) Repo <code>other/wrong.git</code> so với <code>team/right.git</code> chỉ bị coi là “viết URL khác”. (b) Trang HTML thuần hiện team/branch sai vẫn qua vì chưa đọc các trường này.</dd>
+<dt>Cách sửa</dt><dd><code>repoKey()</code> chuẩn hoá https/ssh/<code>git@host:</code>/<code>.git</code>; khác owner/name là lỗi. <code>assignmentFromText()</code> đọc giá trị theo nhãn (team, branch, folder, repository) trên trang thuần; mâu thuẫn thì chặn. Team chỉ hiện bằng tên đăng ký vẫn hợp lệ. Thêm công tắc <code>assignmentCheck: "warn"</code> cho ngày practice.</dd>
+<dt>File</dt><dd><code>src/util.mjs</code>, <code>src/portal.mjs</code>, <code>src/runtime-session.mjs</code>, <code>config/game-adapter.json</code></dd>
+<dt>Test</dt><dd><code>review-fixes</code>: “assignment (review 2)…” — repo khác, team/branch/folder/repo sai trên trang thuần đều bị chặn; 3 cách viết cùng repo đều qua; chế độ warn chỉ ghi chú.</dd>
+</dl>
+</div>
+
+<div class="issue">
+<header><span class="sev p2">P2</span><h4>Alias workspace kết hợp symlink vẫn lọt</h4></header>
+<dl>
+<dt>Vấn đề</dt><dd>Workspace viết bằng alias và <code>matches</code> là symlink ra ngoài: validator trả <code>errors: []</code>.</dd>
+<dt>Cách sửa</dt><dd><code>linkOnPath()</code> tìm tổ tiên cao nhất của target có đường dẫn thực bằng đường dẫn thực của workspace, rồi kiểm từng thư mục bên dưới đúng như target viết, không giải link trước.</dd>
+<dt>File</dt><dd><code>src/util.mjs</code></dd>
+<dt>Test</dt><dd><code>review-fixes</code>: “lifecycle paths (review 2)” — alias ở target, ở root, và ở cả hai đều bị từ chối.</dd>
+</dl>
+</div>
+
+<h3>Phát hiện khi chạy rehearsal</h3>
+
+<div class="issue">
+<header><span class="sev dk">Devkit</span><h4>Thiếu CLI <code>claude</code> làm rehearsal sập với <code>spawn claude ENOENT</code></h4></header>
+<dl>
+<dt>Cách sửa</dt><dd><code>rehearse.mjs</code> và <code>player-sim.mjs</code> kiểm CLI trên PATH trước khi tạo thư mục rehearsal, in hướng dẫn cài; lỗi khởi động CLI giữa chừng được ghi log thay vì làm sập controller. Agent chết vì lỗi (ví dụ chưa đăng nhập) thì controller in nguyên nhân và cách đăng nhập.</dd>
+<dt>Test</dt><dd><code>player-sim</code>: “a missing agent CLI gives an install hint”.</dd>
+</dl>
+</div>
+
+<div class="issue">
+<header><span class="sev dk">Mock</span><h4>Đề <code>training-02</code> đánh trượt bài đúng (TASK-13, CR-12)</h4></header>
+<dl>
+<dt>Vấn đề</dt><dd>CR-11 yêu cầu thêm voucher START15, nhưng hidden test của TASK-13 và CR-12 ghi cứng danh sách 4 voucher cũ. Làm CR-11 xong thì hai item này chắc chắn FAILED.</dd>
+<dt>Cách sửa</dt><dd>Hidden test lấy “thứ tự trong repo” từ <code>src/vouchers.js</code> của commit được chấm, vẫn kiểm 4 voucher gốc giữ đúng thứ tự. Đã thử ngược: sắp xếp lại danh sách hoặc bỏ START15 vẫn bị bắt.</dd>
+<dt>Kết quả</dt><dd>Chấm lại các commit của rehearsal: cả hai PASSED, tổng 830 → 1000.</dd>
+</dl>
+</div>
+
+<h2 id="bangchung">8. Bằng chứng kiểm thử</h2>
+<div class="grid3">
+  <div class="stat"><b>31/31</b><span>test devkit pass (unit, end-to-end với mock, crash/resume, đóng gói, player-sim)</span></div>
+  <div class="stat"><b>6/6</b><span>test hồi quy vòng 1 fail trên code gốc, pass trên code mới</span></div>
+  <div class="stat"><b>READY</b><span>cài bộ Codex và bộ Claude vào workspace mới, checker đều báo READY</span></div>
+</div>
+
+<h3>Rehearsal với Claude Code (25/10/2026)</h3>
+<p>Lệnh: <code>node rehearse.mjs --provider claude --time-scale 2 --pause-at 12 --pause-for 60 --chaos submit-timeout-once</code>. 22,3 phút, khoảng $5,95, progress log hợp lệ (513 event), 1 lần khởi động lại phiên sau pause.</p>
+<div class="tablewrap">
+<table>
+<tr><th>Item</th><th>Loại</th><th>Điểm</th><th>Lộ đề (phút ảo)</th><th>Bắt đầu</th><th>Nộp</th><th>Kết quả</th></tr>
+<tr><td>BUG-11</td><td>BUG</td><td>100</td><td>0</td><td>1,1</td><td>2,4</td><td>PASSED 100 — server cố ý làm mất response, helper gửi lại đúng bài và nhận receipt</td></tr>
+<tr><td>TASK-11</td><td>TASK</td><td>60</td><td>0</td><td>2,5</td><td>3,2</td><td>PASSED 60</td></tr>
+<tr><td>CR-11</td><td>CR</td><td>180</td><td>5</td><td>5,1</td><td>6,4</td><td>PASSED 180</td></tr>
+<tr><td>TASK-12</td><td>TASK</td><td>60</td><td>9</td><td>9,2</td><td>10,1</td><td>PASSED 60</td></tr>
+<tr><td colspan="7" class="small">Phút 12: trận PAUSED 60 giây. Agent dừng đúng lúc; sau khi trận chạy lại, phiên mới đối chiếu Git và receipt rồi làm tiếp.</td></tr>
+<tr><td>PI-11</td><td>PI</td><td>200</td><td>12</td><td>12,8</td><td>14,3</td><td>PASSED 200</td></tr>
+<tr><td>TASK-13</td><td>TASK</td><td>70</td><td>15</td><td>15,3</td><td>16,1</td><td>FAILED do lỗi đề mock → PASSED khi chấm lại</td></tr>
+<tr><td>BUG-13</td><td>BUG</td><td>80</td><td>18</td><td>18,2</td><td>19,0</td><td>PASSED 80</td></tr>
+<tr><td>BUG-12</td><td>BUG</td><td>100</td><td>20</td><td>20,2</td><td>21,1</td><td>PASSED 100</td></tr>
+<tr><td>CR-12</td><td>CR</td><td>100</td><td>24</td><td>24,2</td><td>25,4</td><td>FAILED do lỗi đề mock → PASSED khi chấm lại</td></tr>
+<tr><td>TASK-14</td><td>TASK</td><td>50</td><td>30</td><td>30,2</td><td>31,0</td><td>PASSED 50</td></tr>
+</table>
+</div>
+<div class="good">Agent bắt đầu mỗi item trong 0,2–1 phút sau khi item lộ đề, nộp đủ 10/10, và chờ đúng cách khi hết việc. Rehearsal này agent làm tuần tự nên <b>chưa dùng tới làn worktree</b>; phần đó hiện chỉ có test tự động bảo vệ.</div>
+
+<h2 id="conlai" class="keep">9. Việc còn lại trước khi thi</h2>
+<ul class="check">
+  <li><b>Practice trên portal thật (26/10):</b> <code>login_match</code> phải trả <code>verification.ok: true</code>; <code>refresh_match</code> thấy item, trạng thái, thời gian còn lại và match UUID. Nếu kiểm tra assignment chặn nhầm: đặt <code>assignmentCheck: "warn"</code> rồi chỉnh parser bằng <code>/mtm-tune-adapter</code>.</li>
+  <li><b>Máy Windows dùng để thi:</b> đóng gói zip, cài và chạy checker ra READY qua <code>/mtm-ship</code>.</li>
+  <li><b>Team ID và tên đội thật</b> thay cho <code>YOUR_TEAM_ID</code> (<code>devkit/tools/set-identity.mjs</code>); version giống nhau ở 3 file.</li>
+  <li><b>Xoá <code>.DS_Store</code></b> do Finder tạo trong <code>codex/team-sdlc-pack/</code> trước khi đóng gói.</li>
+  <li><b>Nên chạy thêm một rehearsal với Codex</b> (<code>--provider codex</code>, 40 phút) để biết chi phí và tốc độ sát với lúc thi.</li>
+  <li><b>Sau practice:</b> chạy <code>/mtm-practice-debrief</code> để biến mọi lỗi gặp phải thành một rule hoặc một chốt chặn trong code.</li>
+</ul>
+
+<h2 id="phuluc" class="keep">10. Phụ lục: 13 tool của helper</h2>
+<div class="tablewrap">
+<table>
+<tr><th>Tool</th><th>Dùng khi</th></tr>
+<tr><td><code>configure_session</code></td><td>Mọi lifecycle input, gửi nguyên văn kể cả dòng marker</td></tr>
+<tr><td><code>login_match</code></td><td>Đăng nhập, mở trang trận, kiểm tra assignment</td></tr>
+<tr><td><code>refresh_match</code></td><td>Đọc lại trang trận (có thể kèm page text)</td></tr>
+<tr><td><code>wait_for_update</code></td><td>Rảnh việc: chờ tối đa 55 giây đến khi có thay đổi</td></tr>
+<tr><td><code>get_backlog_item</code></td><td>Lấy mô tả item khi start_work không trả đủ</td></tr>
+<tr><td><code>start_work</code></td><td>Bắt đầu item (bắt buộc trước khi sửa code)</td></tr>
+<tr><td><code>submit_work</code></td><td>Preflight + nộp, một lần mỗi item; <code>dryRun</code> để chỉ kiểm tra</td></tr>
+<tr><td><code>report_progress</code></td><td>PREPARATION_STATUS, BACKLOG_TESTS, BLOCKER_* do agent báo</td></tr>
+<tr><td><code>report_ready</code></td><td>Kết thúc pha chuẩn bị, ghi ENVIRONMENT_READY</td></tr>
+<tr><td><code>recon_repo</code></td><td>Nhận diện stack, thư mục app, lệnh build/test</td></tr>
+<tr><td><code>worktree</code></td><td>create / integrate / remove / list cho làn song song</td></tr>
+<tr><td><code>session_status</code></td><td>Ảnh chụp phục hồi: phase, stage, bài dở, file chưa commit, stash</td></tr>
+<tr><td><code>final_result</code></td><td>JSON kết thúc lượt (COMPLETED / BLOCKED)</td></tr>
+</table>
+</div>
+
+<footer>Nguồn: <code>Kit/codex/team-sdlc-pack</code> (bản 1.0.0 sau hai vòng sửa), <code>Kit/CHANGELOG.md</code>, <code>Kit/devkit/test/</code>, report rehearsal <code>Kit/rehearsals/2026-10-25T11-43-24-493Z-claude</code>. Tài liệu nội bộ của team, không chứa credential.</footer>
+</main>
+</body>
+</html>

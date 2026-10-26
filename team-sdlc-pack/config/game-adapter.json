@@ -26,7 +26,8 @@
   "matchView": {
     "pagePathTemplate": "{matchPageUrl}/{matchId}",
     "extraJsonPaths": [],
-    "assignmentCheck": "block"
+    "assignmentCheck": "block",
+    "repoHostAliases": {}
   },
   "polling": {
     "successMs": 5000,

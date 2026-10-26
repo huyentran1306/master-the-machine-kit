@@ -118,6 +118,17 @@ export function assignmentFromText(pageText) {
   return out;
 }
 
+/**
+ * The match-information part of the page text: the lines before the first line that names a backlog
+ * item. Backlog descriptions ("branch dev fails when ...") must never be read as the assignment.
+ */
+export function matchInfoText(pageText) {
+  const lines = String(pageText || '').split('\n');
+  const keyLine = new RegExp(`(^|[^A-Za-z0-9])${KEY_SRC}($|[^A-Za-z0-9])`);
+  const i = lines.findIndex((l) => keyLine.test(l));
+  return (i < 0 ? lines : lines.slice(0, i)).join('\n');
+}
+
 /** Team and repository the match object names, when the page carries them as data. */
 function assignmentFrom(o) {
   const str = (v) => ((typeof v === 'string' || typeof v === 'number') && String(v).trim() ? String(v).trim() : null);
@@ -368,7 +379,7 @@ export function parseMatchPage(html, { matchId, serverNow = Date.now() } = {}) {
   if (!matchUuid) warnings.push('match UUID not found on the page (Start/Submit URLs)');
   if (!items.length) warnings.push('no backlog item ids found on the page');
   if (!status) warnings.push('match status not found on the page');
-  return { matchUuid, status, statusRaw, endsAt, remainingMs, items, pageText, structured, warnings, itemLinks, matchIdShown, assignment, textAssignment: assignmentFromText(pageText) };
+  return { matchUuid, status, statusRaw, endsAt, remainingMs, items, pageText, structured, warnings, itemLinks, matchIdShown, assignment, textAssignment: assignmentFromText(matchInfoText(pageText)) };
 }
 
 /** True when the response looks like a login page rather than the match page. */

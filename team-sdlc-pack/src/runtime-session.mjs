@@ -23,7 +23,7 @@ const PLAYBOOK = { PI: 'backlog-pi', BUG: 'backlog-bug', CR: 'backlog-cr', TASK:
 
 export const DEFAULT_ADAPTER = {
   login: { strategy: 'auto', strategies: ['nextauth', 'form', 'json'] },
-  matchView: { pagePathTemplate: '{matchPageUrl}/{matchId}', assignmentCheck: 'block' },
+  matchView: { pagePathTemplate: '{matchPageUrl}/{matchId}', assignmentCheck: 'block', repoHostAliases: {} },
   polling: { successMs: 5000, errorMs: 10000, backgroundMs: 20000, maxWaitMs: 55000 },
   submit: { acceptedStatuses: ['ACCEPTED', 'RECEIVED'], retryBudgetMs: 90000 },
   planner: {},
@@ -463,10 +463,11 @@ export class RuntimeSession {
 
   /**
    * Guide step 5: the page must be the assigned match and agree with the mtm-player input.
-   * A value the page shows that contradicts the input blocks MATCH_LOGIN: structured page data first,
-   * then labelled values on a plain page ("Team T01", "branch main", "Repository <url>"). A value the page
-   * does not show at all is only noted. Repository URLs count as the same repo when host-independent
-   * paths match (https vs ssh vs .git spellings); another owner/name is a contradiction.
+   * A value the page shows that contradicts the input blocks MATCH_LOGIN. Per field, structured page data
+   * wins; labelled values on a plain page ("Team T01", "branch main", "Repository <url>") are read only
+   * from the match header (before the first backlog item), never from backlog descriptions. A value the
+   * page does not show at all is only noted. Repositories match on host + path (https / ssh / .git
+   * spellings normalize); another host or another owner/name is a contradiction.
    * game-adapter.json matchView.assignmentCheck = "warn" turns contradictions into notes (practice-day
    * escape hatch if the real page labels things in a way this parser misreads).
    */
@@ -489,28 +490,44 @@ export class RuntimeSession {
     else errors.push(`the page does not show match id ${this.matchId}: it is not the assigned match page`);
     const want = this.repository || {};
     const got = a.repository || {};
-    // folder / branch: structured value must match; labelled text values must include ours.
+    // Structured page data wins per field; labelled plain-text values (match header only) are the fallback.
     for (const [name, wanted, structured, labelled] of [['folder', want.folder, got.folder, t.folders], ['branch', want.branch, got.branch, t.branches]]) {
       if (!wanted) continue;
-      if (structured && lc(structured) !== lc(wanted)) errors.push(`page ${name} ${structured} != assigned ${name} ${wanted}`);
-      else if (labelled.length && !labelled.some((v) => lc(v) === lc(wanted))) errors.push(`page shows ${name} ${labelled.join('/')}, assigned ${name} is ${wanted}`);
-      else if (structured || labelled.length || token(wanted)) notes.push(`${name} shown`);
+      if (structured) {
+        if (lc(structured) !== lc(wanted)) errors.push(`page ${name} ${structured} != assigned ${name} ${wanted}`);
+        else notes.push(`${name} shown`);
+      } else if (labelled.length && !labelled.some((v) => lc(v) === lc(wanted))) errors.push(`page shows ${name} ${labelled.join('/')}, assigned ${name} is ${wanted}`);
+      else if (labelled.length || token(wanted)) notes.push(`${name} shown`);
     }
     if (want.url) {
+      // Same repository = same host and same path. https / ssh / scp-like / .git spellings normalize;
+      // a different host (github.com vs gitlab.com) is another repository unless the adapter declares
+      // the alias (matchView.repoHostAliases, e.g. {"ssh.github.com": "github.com"}).
+      const aliases = this.adapter.matchView?.repoHostAliases || {};
+      const host = (k) => {
+        const h = k.host.replace(/^www\./, '');
+        return lc(aliases[h] || h);
+      };
       const w = repoKey(want.url);
-      const shown = [got.url, ...t.repoUrls].filter(Boolean);
-      const same = shown.filter((u) => repoKey(u).path === w.path);
-      if (shown.length && !same.length) errors.push(`page repository ${shown.join(' / ')} is not the assigned repository ${want.url}`);
-      else if (same.length) notes.push(same.some((u) => repoKey(u).host === w.host) ? 'repository shown' : `repository shown (host spelled differently: ${same[0]})`);
+      const shown = got.url ? [got.url] : t.repoUrls;
+      const same = shown.filter((u) => repoKey(u).path === w.path && host(repoKey(u)) === host(w));
+      const otherHost = shown.filter((u) => repoKey(u).path === w.path && host(repoKey(u)) !== host(w));
+      if (shown.length && !same.length) {
+        errors.push(otherHost.length
+          ? `page repository ${otherHost[0]} is on another host than the assigned ${want.url} (if it is the same server, declare it in game-adapter.json matchView.repoHostAliases)`
+          : `page repository ${shown.join(' / ')} is not the assigned repository ${want.url}`);
+      } else if (same.length) notes.push('repository shown');
     }
     const teamId = this.teamId || this.identity?.teamId;
     const teamName = this.teamName || this.identity?.teamName;
     if (teamId) {
       const ours = (v) => lc(v) === lc(teamId);
       const nameShown = !!teamName && lc(text).includes(lc(teamName));
-      if (a.teamId && !ours(a.teamId)) errors.push(`page team ${a.teamId} != assigned team ${teamId}`);
-      else if (t.teamIds.length && !t.teamIds.some(ours) && !token(teamId) && !nameShown) errors.push(`page shows team ${t.teamIds.join('/')}, assigned team is ${teamId}${teamName ? ` (${teamName})` : ''}`);
-      else if (a.teamId || t.teamIds.some(ours) || token(teamId) || nameShown) notes.push('team shown');
+      if (a.teamId) {
+        if (!ours(a.teamId)) errors.push(`page team ${a.teamId} != assigned team ${teamId}`);
+        else notes.push('team shown');
+      } else if (t.teamIds.length && !t.teamIds.some(ours) && !token(teamId) && !nameShown) errors.push(`page shows team ${t.teamIds.join('/')}, assigned team is ${teamId}${teamName ? ` (${teamName})` : ''}`);
+      else if (t.teamIds.some(ours) || token(teamId) || nameShown) notes.push('team shown');
     }
     if (errors.length && this.adapter.matchView?.assignmentCheck === 'warn') {
       notes.push(...errors.map((e) => `NOT BLOCKING (assignmentCheck=warn): ${e}`));

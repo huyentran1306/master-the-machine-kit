@@ -119,11 +119,11 @@ footer{margin-top:48px;color:var(--muted);font-size:13px;border-top:1px solid va
 <main>
 
 <h1>MTM Kit (Codex) — Flow chi tiết và giải pháp</h1>
-<p class="lead">Tài liệu nội bộ cho team: kit chạy thế nào trong một trận Master the Machine, các lỗi hai vòng review đã chỉ ra, cách đã sửa, bằng chứng kiểm thử, và những việc còn phải làm trước khi thi.</p>
+<p class="lead">Tài liệu nội bộ cho team: kit chạy thế nào trong một trận Master the Machine, các lỗi ba vòng review đã chỉ ra, cách đã sửa, bằng chứng kiểm thử, và những việc còn phải làm trước khi thi.</p>
 <div class="meta">
   <span class="pill">team-sdlc-pack 1.0.0</span>
-  <span class="pill">Cập nhật 25/10/2026</span>
-  <span class="pill ok">Test tự động 31/31 pass</span>
+  <span class="pill">Cập nhật 26/10/2026</span>
+  <span class="pill ok">Test tự động 32/32 pass</span>
   <span class="pill ok">Rehearsal Claude: 830 → 1000 sau khi sửa đề mock</span>
   <span class="pill warn">Chưa kiểm trên portal thật và máy Windows</span>
 </div>
@@ -228,7 +228,7 @@ footer{margin-top:48px;color:var(--muted);font-size:13px;border-top:1px solid va
 <tr><td>7</td><td>Sẵn sàng</td><td><code>report_ready</code></td><td>ENVIRONMENT_READY (revision, build PASS, matchLogin PASS)</td><td>Cả 5 stage COMPLETED; agent trả JSON cuối và kết thúc lượt</td></tr>
 </table>
 </div>
-<div class="note"><b>Kiểm tra assignment (bước 6) chặn gì:</b> trang không hiện match id của mình; trang hiện folder, branch, team hoặc repo khác input (đọc từ dữ liệu có cấu trúc, rồi từ nhãn trên trang HTML thuần như “Team T01”, “branch main”, “Repository &lt;url&gt;”). URL repo viết khác dạng nhưng cùng owner/name vẫn được coi là cùng repo. Thông tin trang không hiển thị thì chỉ ghi chú. Nếu hôm practice portal thật bị đọc nhầm, đặt <code>matchView.assignmentCheck: "warn"</code> trong <code>config/game-adapter.json</code> để hạ thành ghi chú.</div>
+<div class="note"><b>Kiểm tra assignment (bước 6) chặn gì:</b> trang không hiện match id của mình; trang hiện folder, branch, team hoặc repo khác input. Mỗi trường ưu tiên dữ liệu có cấu trúc của trang; chỉ khi thiếu mới đọc nhãn trên trang HTML thuần (“Team T01”, “branch main”, “Repository &lt;url&gt;”), và chỉ ở phần thông tin match phía trên backlog, không đọc mô tả item. Repo so cả host lẫn owner/name: https, ssh, <code>.git</code> là cùng repo; github.com và gitlab.com là hai repo khác nhau (alias host phải khai báo trong <code>matchView.repoHostAliases</code>). Thông tin trang không hiển thị thì chỉ ghi chú. Nếu hôm practice portal thật bị đọc nhầm, đặt <code>matchView.assignmentCheck: "warn"</code> trong <code>config/game-adapter.json</code> để hạ thành ghi chú.</div>
 
 <h2 id="batdau" class="keep">3. Bắt đầu trận (START_GAME_V4)</h2>
 <div class="flow">
@@ -310,7 +310,7 @@ footer{margin-top:48px;color:var(--muted);font-size:13px;border-top:1px solid va
 </div>
 
 <h2 id="giaiphap">7. Giải pháp cho từng lỗi review</h2>
-<p>Hai vòng review của Codex trên bản 1.0.0, cộng các lỗi phát hiện khi chạy rehearsal. Mỗi mục đều có test tái hiện trong <code>devkit/test/</code>. Code chỉ sửa ở bộ Codex; bộ Claude được sinh lại bằng <code>npm run build:claude</code>.</p>
+<p>Ba vòng review của Codex trên bản 1.0.0, cộng các lỗi phát hiện khi chạy rehearsal. Mỗi mục đều có test tái hiện trong <code>devkit/test/</code>. Code chỉ sửa ở bộ Codex; bộ Claude được sinh lại bằng <code>npm run build:claude</code>.</p>
 
 <h3>Vòng 1</h3>
 
@@ -406,6 +406,28 @@ footer{margin-top:48px;color:var(--muted);font-size:13px;border-top:1px solid va
 </dl>
 </div>
 
+<h3>Vòng 3</h3>
+
+<div class="issue">
+<header><span class="sev p2">P2</span><h4>Assignment đúng vẫn có thể bị chặn vì mô tả backlog</h4></header>
+<dl>
+<dt>Vấn đề</dt><dd>Dữ liệu match ghi branch <code>main</code>, nhưng mô tả một item có câu “branch dev fails…” thì kit báo sai branch và chặn login. Parser đọc nhãn trên toàn bộ trang, kể cả nội dung backlog.</dd>
+<dt>Cách sửa</dt><dd>Mỗi trường (folder, branch, team, repo) ưu tiên dữ liệu có cấu trúc; có rồi thì không đọc text. Khi phải dùng text, <code>matchInfoText()</code> chỉ lấy phần thông tin match, tức các dòng trước dòng đầu tiên nhắc tới một item backlog.</dd>
+<dt>File</dt><dd><code>src/portal.mjs</code>, <code>src/runtime-session.mjs</code></dd>
+<dt>Test</dt><dd><code>review-fixes</code>: “assignment (review 3)…” — mô tả có “branch dev”, “folder OTHER”, repo và team khác vẫn qua (cả trang có dữ liệu lẫn trang thuần); giá trị sai ở phần thông tin match vẫn bị chặn.</dd>
+</dl>
+</div>
+
+<div class="issue">
+<header><span class="sev p2">P2</span><h4>Khác Git host vẫn bị coi là cùng repo</h4></header>
+<dl>
+<dt>Vấn đề</dt><dd><code>github.com/example/repo</code> và <code>gitlab.com/example/repo</code> đều qua vì chỉ so <code>owner/repo</code>.</dd>
+<dt>Cách sửa</dt><dd>So cả host và đường dẫn. Vẫn chuẩn hoá https/ssh/<code>git@host:</code>/<code>.git</code> và <code>www.</code>. Host khác chỉ được chấp nhận khi khai báo alias trong <code>config/game-adapter.json</code> → <code>matchView.repoHostAliases</code> (ví dụ <code>{"ssh.github.com": "github.com"}</code>); thông báo lỗi chỉ rõ chỗ khai báo.</dd>
+<dt>File</dt><dd><code>src/runtime-session.mjs</code>, <code>config/game-adapter.json</code></dd>
+<dt>Test</dt><dd>Cùng test “review 3”: gitlab.com bị chặn trên cả trang có dữ liệu và trang thuần; <code>www.github.com</code> qua; <code>ssh.github.com</code> bị chặn khi chưa khai báo, qua khi có alias.</dd>
+</dl>
+</div>
+
 <h3>Phát hiện khi chạy rehearsal</h3>
 
 <div class="issue">
@@ -427,7 +449,7 @@ footer{margin-top:48px;color:var(--muted);font-size:13px;border-top:1px solid va
 
 <h2 id="bangchung">8. Bằng chứng kiểm thử</h2>
 <div class="grid3">
-  <div class="stat"><b>31/31</b><span>test devkit pass (unit, end-to-end với mock, crash/resume, đóng gói, player-sim)</span></div>
+  <div class="stat"><b>32/32</b><span>test devkit pass (unit, end-to-end với mock, crash/resume, đóng gói, player-sim)</span></div>
   <div class="stat"><b>6/6</b><span>test hồi quy vòng 1 fail trên code gốc, pass trên code mới</span></div>
   <div class="stat"><b>READY</b><span>cài bộ Codex và bộ Claude vào workspace mới, checker đều báo READY</span></div>
 </div>
@@ -482,7 +504,7 @@ footer{margin-top:48px;color:var(--muted);font-size:13px;border-top:1px solid va
 </table>
 </div>
 
-<footer>Nguồn: <code>Kit/codex/team-sdlc-pack</code> (bản 1.0.0 sau hai vòng sửa), <code>Kit/CHANGELOG.md</code>, <code>Kit/devkit/test/</code>, report rehearsal <code>Kit/rehearsals/2026-10-25T11-43-24-493Z-claude</code>. Tài liệu nội bộ của team, không chứa credential.</footer>
+<footer>Nguồn: <code>Kit/codex/team-sdlc-pack</code> (bản 1.0.0 sau ba vòng sửa), <code>Kit/CHANGELOG.md</code>, <code>Kit/devkit/test/</code>, report rehearsal <code>Kit/rehearsals/2026-10-25T11-43-24-493Z-claude</code>. Tài liệu nội bộ của team, không chứa credential.</footer>
 </main>
 </body>
 </html>

@@ -114,6 +114,12 @@ export async function install(opts) {
     copyFile(path.join(PACK, 'agents', f), path.join(TW, lay.agentsDir, f), opts.dryRun);
     registration.push(`${lay.agentsDir}/${f}`);
   }
+  // Files the Player's Init form requires regardless of provider (see registrationLayout).
+  for (const extra of lay.extraAgentFiles || []) {
+    if (!opts.dryRun) fs.mkdirSync(path.dirname(path.join(TW, extra.to)), { recursive: true });
+    copyFile(path.join(PACK, extra.from), path.join(TW, extra.to), opts.dryRun);
+    registration.push(extra.to);
+  }
   const skills = fs.readdirSync(path.join(PACK, 'skills'), { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
   const skillDirs = [lay.skillsDir, ...(lay.extraSkillsDirs || [])];
   for (const dir of skillDirs) {

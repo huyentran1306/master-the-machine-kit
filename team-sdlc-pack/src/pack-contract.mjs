@@ -119,9 +119,14 @@ export function registrationLayout(provider) {
     // mtm-player's own prompt tells the orchestrator to read `.agents/skills/<name>/SKILL.md` for
     // every provider (cli-supervisor.mjs), so the Claude variant installs the skills there as well
     // as in the folder Claude Code loads by itself.
-    return { agentsDir: '.claude/agents', agentExt: '.md', skillsDir: '.claude/skills', extraSkillsDirs: ['.agents/skills'], mcpFile: '.mcp.json', mcpSource: 'config/claude.mcp.json', instructions: 'CLAUDE.md', instructionsSource: 'docs/CLAUDE.workspace.md', settings: '.claude/settings.json', settingsSource: 'config/claude.settings.json' };
+    // mtm-player's Init form verifies a fixed registration file list before it will load a pack
+    // (team-install.mjs requiredRegistrationFiles): `.codex/agents/team-orchestrator.toml` is in it
+    // for EVERY provider, and must match the pack's own copy byte for byte. Without it the form
+    // refuses with TEAM_RUNTIME_NOT_INSTALLED even though `inspect-runtime` reports READY — that
+    // command only resolves the manifest and never checks this list.
+    return { agentsDir: '.claude/agents', agentExt: '.md', skillsDir: '.claude/skills', extraSkillsDirs: ['.agents/skills'], extraAgentFiles: [{ from: 'agents/team-orchestrator.toml', to: '.codex/agents/team-orchestrator.toml' }], mcpFile: '.mcp.json', mcpSource: 'config/claude.mcp.json', instructions: 'CLAUDE.md', instructionsSource: 'docs/CLAUDE.workspace.md', settings: '.claude/settings.json', settingsSource: 'config/claude.settings.json' };
   }
-  return { agentsDir: '.codex/agents', agentExt: '.toml', skillsDir: '.agents/skills', extraSkillsDirs: [], mcpFile: '.codex/config.toml', mcpSource: 'config/codex.toml', instructions: 'AGENTS.md', instructionsSource: 'docs/AGENTS.workspace.md', settings: null, settingsSource: null };
+  return { agentsDir: '.codex/agents', agentExt: '.toml', skillsDir: '.agents/skills', extraSkillsDirs: [], extraAgentFiles: [], mcpFile: '.codex/config.toml', mcpSource: 'config/codex.toml', instructions: 'AGENTS.md', instructionsSource: 'docs/AGENTS.workspace.md', settings: null, settingsSource: null };
 }
 
 export function expandRegistration(provider, text, teamWorkspace) {

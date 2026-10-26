@@ -7,6 +7,7 @@ import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { RuntimeSession } from '../src/runtime-session.mjs';
 import { TOOLS } from '../src/tools.mjs';
+import { drainNetwork } from '../src/http.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PACK_ROOT = path.resolve(HERE, '..');
@@ -43,7 +44,11 @@ function send(msg) {
 function toolResult(value, isError = false) {
   let text = JSON.stringify(value);
   if (text.length > MAX_RESULT_CHARS) text = `${text.slice(0, MAX_RESULT_CHARS)}…[truncated]`;
-  return { content: [{ type: 'text', text }], isError };
+  // mtm-player reads HTTP telemetry only from structuredContent.networkActivity (src/http.mjs).
+  const networkActivity = drainNetwork();
+  const out = { content: [{ type: 'text', text }], isError };
+  if (networkActivity.length) out.structuredContent = { networkActivity };
+  return out;
 }
 
 async function handle(msg) {

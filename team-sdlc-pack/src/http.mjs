@@ -81,6 +81,32 @@ export function httpError(code, message, extra = {}) {
  * request(url, opts) -> { status, headers, text, json, url, requestId, serverDate }
  * opts: method, headers, body (string), jar, allowedOrigins, timeoutMs, maxBytes, maxRedirects
  */
+/**
+ * Explicit HTTP telemetry for mtm-player's dashboard. The Player counts only telemetry a team
+ * reports through `structuredContent.networkActivity` on an MCP tool result (src/cli-activity.mjs:
+ * `{url, method, httpStatus}`, first 100 entries, http/https only) — a URL that merely appears in a
+ * command or an argument proves nothing to it, and with no telemetry the dashboard's
+ * "Network & API activity" panel reads UNAVAILABLE. Reporting every request keeps the organizer's
+ * own view of our traffic complete, which is the point: all of it goes to allowed origins.
+ * Queries are dropped here, never recorded, matching what the Player keeps.
+ */
+const MAX_TELEMETRY = 100;
+const telemetry = [];
+
+export function recordNetwork(url, method, httpStatus) {
+  try {
+    const u = new URL(url);
+    if (!['http:', 'https:'].includes(u.protocol)) return;
+    if (telemetry.length >= MAX_TELEMETRY) telemetry.shift();
+    telemetry.push({ url: `${u.origin}${u.pathname}`, method: String(method || 'GET').toUpperCase(), httpStatus: Number.isInteger(httpStatus) ? httpStatus : null });
+  } catch { /* an unparseable URL is not evidence of a request */ }
+}
+
+/** Takes the requests made since the last call, for the next tool result. */
+export function drainNetwork() {
+  return telemetry.splice(0, telemetry.length);
+}
+
 export async function request(url, opts = {}) {
   const {
     method = 'GET', headers = {}, body, jar, allowedOrigins, timeoutMs = 20000, maxBytes = 3_000_000, maxRedirects = 5,
@@ -101,8 +127,10 @@ export async function request(url, opts = {}) {
       res = await fetch(current, { method: m, headers: h, body: b, redirect: 'manual', signal: ac.signal });
     } catch (e) {
       clearTimeout(timer);
+      recordNetwork(current, m, null);
       throw httpError(e.name === 'AbortError' ? 'TIMEOUT' : 'NETWORK', `${m} ${new URL(current).pathname}: ${e.name === 'AbortError' ? 'timed out' : e.cause?.code || e.message}`);
     }
+    recordNetwork(current, m, res.status);
     if (jar) jar.setFrom(current, res.headers);
     if ([301, 302, 303, 307, 308].includes(res.status) && res.headers.get('location')) {
       clearTimeout(timer);

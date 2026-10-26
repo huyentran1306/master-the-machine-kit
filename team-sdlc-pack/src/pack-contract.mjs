@@ -116,9 +116,12 @@ export function expandMcpJson(text, teamWorkspace) {
 /** Registration layout per provider (where profiles, skills and the MCP registration go). */
 export function registrationLayout(provider) {
   if (provider === 'claude') {
-    return { agentsDir: '.claude/agents', agentExt: '.md', skillsDir: '.claude/skills', mcpFile: '.mcp.json', mcpSource: 'config/claude.mcp.json', instructions: 'CLAUDE.md', instructionsSource: 'docs/CLAUDE.workspace.md', settings: '.claude/settings.json', settingsSource: 'config/claude.settings.json' };
+    // mtm-player's own prompt tells the orchestrator to read `.agents/skills/<name>/SKILL.md` for
+    // every provider (cli-supervisor.mjs), so the Claude variant installs the skills there as well
+    // as in the folder Claude Code loads by itself.
+    return { agentsDir: '.claude/agents', agentExt: '.md', skillsDir: '.claude/skills', extraSkillsDirs: ['.agents/skills'], mcpFile: '.mcp.json', mcpSource: 'config/claude.mcp.json', instructions: 'CLAUDE.md', instructionsSource: 'docs/CLAUDE.workspace.md', settings: '.claude/settings.json', settingsSource: 'config/claude.settings.json' };
   }
-  return { agentsDir: '.codex/agents', agentExt: '.toml', skillsDir: '.agents/skills', mcpFile: '.codex/config.toml', mcpSource: 'config/codex.toml', instructions: 'AGENTS.md', instructionsSource: 'docs/AGENTS.workspace.md', settings: null, settingsSource: null };
+  return { agentsDir: '.codex/agents', agentExt: '.toml', skillsDir: '.agents/skills', extraSkillsDirs: [], mcpFile: '.codex/config.toml', mcpSource: 'config/codex.toml', instructions: 'AGENTS.md', instructionsSource: 'docs/AGENTS.workspace.md', settings: null, settingsSource: null };
 }
 
 export function expandRegistration(provider, text, teamWorkspace) {

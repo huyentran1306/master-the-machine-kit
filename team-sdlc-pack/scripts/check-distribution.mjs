@@ -123,12 +123,17 @@ export async function check({ teamWorkspace, allowPlaceholder = false, source = 
   t(!agentDiff.length, `registered profiles identical to payload (${lay.agentsDir})`, agentDiff.join(', '));
   const extra = fs.existsSync(regAgents) ? fs.readdirSync(regAgents).filter((f) => f.endsWith(lay.agentExt) && !agentFiles.includes(f)) : [];
   if (extra.length) lines.push(`WARN extra profiles in ${lay.agentsDir} not from this pack: ${extra.join(', ')}`);
-  for (const s of REQUIRED_SKILLS) t(fs.existsSync(path.join(TW, lay.skillsDir, s, 'SKILL.md')), `skill ${s} registered`);
-  const skillDiff = [];
-  for (const s of fs.readdirSync(path.join(runtime, 'skills'))) {
-    for (const f of walk(path.join(runtime, 'skills', s))) if (!same(path.join(runtime, 'skills', s, f), path.join(TW, lay.skillsDir, s, f))) skillDiff.push(`${s}/${f}`);
+  // mtm-player's prompt names `.agents/skills/<name>/SKILL.md` for every provider, so the Claude
+  // variant must have them there too; Claude Code itself loads `.claude/skills/`.
+  const skillDirs = [lay.skillsDir, ...(lay.extraSkillsDirs || [])];
+  for (const dir of skillDirs) {
+    for (const s of REQUIRED_SKILLS) t(fs.existsSync(path.join(TW, dir, s, 'SKILL.md')), `skill ${s} registered in ${dir}`);
+    const skillDiff = [];
+    for (const s of fs.readdirSync(path.join(runtime, 'skills'))) {
+      for (const f of walk(path.join(runtime, 'skills', s))) if (!same(path.join(runtime, 'skills', s, f), path.join(TW, dir, s, f))) skillDiff.push(`${s}/${f}`);
+    }
+    t(!skillDiff.length, `registered skills identical to payload (${dir})`, skillDiff.slice(0, 5).join(', '));
   }
-  t(!skillDiff.length, `registered skills identical to payload (${lay.skillsDir})`, skillDiff.slice(0, 5).join(', '));
   const expected = expandRegistration(manifest.provider, fs.readFileSync(path.join(runtime, lay.mcpSource), 'utf8'), TW);
   const actual = fs.existsSync(path.join(TW, lay.mcpFile)) ? fs.readFileSync(path.join(TW, lay.mcpFile), 'utf8') : null;
   t(actual === expected, `${lay.mcpFile} equals the expanded registration`, actual == null ? 'missing' : 'bytes differ (rerun install)');

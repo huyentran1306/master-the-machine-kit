@@ -3,7 +3,7 @@
 // only speaks JSON-RPC.
 import fs from 'node:fs';
 import path from 'node:path';
-import { ProgressLog } from './progress.mjs';
+import { ProgressLog, scrubSummary, playerRuleErrors } from './progress.mjs';
 import { parseLifecycleText, validateDescriptor, publicDescriptor } from './lifecycle.mjs';
 import { CookieJar, request } from './http.mjs';
 import { login, parseMatchPage, looksLikeLogin, textBlockFor } from './portal.mjs';
@@ -141,16 +141,23 @@ export class RuntimeSession {
     return true;
   }
 
-  /** Append one event; schema problems are reported, never thrown into a tool flow. */
-  event(ev) {
+  /**
+   * Append one event; schema problems are reported, never thrown into a tool flow.
+   * `optional` marks telemetry the Player can live without: it is dropped near the 256 KiB wall.
+   */
+  event(ev, { optional = false } = {}) {
     if (!this.log) {
       this.logProblems.push(`no progress log yet for ${ev.type}`);
       return false;
     }
+    const safe = typeof ev.summary === 'string' ? { ...ev, summary: oneLine(scrubSummary(ev.summary)) } : ev;
     try {
-      const r = this.log.append(ev);
+      const r = this.log.append(safe, { optional });
       if (r.queued) this.raiseLocalAlert('PROGRESS_LOG_UNAVAILABLE', `progress log append failed (${this.log.lastError}); events are queued and retried in order`);
       else this.clearLocalAlert('PROGRESS_LOG_UNAVAILABLE');
+      if (this.log.pressure !== 'OK') {
+        this.raiseLocalAlert('PROGRESS_LOG_PRESSURE', `progress log is ${Math.round(this.log.size / 1024)} KiB of the 256 KiB mtm-player reads; optional telemetry is being dropped (${this.log.dropped} so far). Keep summaries short.`);
+      }
       return r.ok;
     } catch (e) {
       this.logProblems.push(e.message);
@@ -167,16 +174,26 @@ export class RuntimeSession {
     this.localAlerts?.delete(id);
   }
 
-  apiLogger(operation, backlogId = null) {
+  /**
+   * GAME_MASTER_API pairs. mtm-player only accepts SUCCEEDED with a 2xx status and FAILED with null
+   * or >= 400, so a 3xx is reported as FAILED without a status rather than silently ignored.
+   * `optional` is used for the poll/refresh pairs: the match page is read every few seconds and a
+   * 40-minute match would otherwise blow past the Player's 256 KiB log limit.
+   */
+  apiLogger(operation, backlogId = null, { optional = false } = {}) {
     return async (phase, req, res, err) => {
-      const summary = phase === 'REQUESTED' ? 'Calling mtm-game-server.'
-        : phase === 'SUCCEEDED' ? 'Received the mtm-game-server result.'
-          : oneLine(`Failed: ${res ? `HTTP ${res.status} ${res.json?.error?.code || ''}` : `${err?.code || ''} ${err?.message || ''}`}`);
+      const status = res ? res.status : null;
+      const ok = status !== null && status >= 200 && status < 300;
+      const realPhase = phase === 'SUCCEEDED' && !ok ? 'FAILED' : phase;
+      const httpStatus = realPhase === 'REQUESTED' || (realPhase === 'FAILED' && status !== null && status < 400) ? null : status;
+      const summary = realPhase === 'REQUESTED' ? 'Calling mtm-game-server.'
+        : realPhase === 'SUCCEEDED' ? 'Received the mtm-game-server result.'
+          : `Failed: ${res ? `HTTP ${res.status} ${res.json?.error?.code || ''}`.trim() : `${err?.code || ''} ${err?.message || ''}`.trim()}`;
       this.event({
         type: 'GAME_MASTER_API', operation, backlogId: safeId(backlogId ?? req?.backlogId ?? null), method: req?.method || null,
-        origin: loggableOrigin(req?.url), path: loggablePath(req?.url), phase, httpStatus: res ? res.status : null,
-        requestId: phase === 'REQUESTED' ? null : safeId(res?.requestId), summary,
-      });
+        origin: loggableOrigin(req?.url), path: loggablePath(req?.url), phase: realPhase, httpStatus,
+        requestId: realPhase === 'REQUESTED' ? null : safeId(res?.requestId), summary,
+      }, { optional });
     };
   }
 
@@ -518,7 +535,7 @@ export class RuntimeSession {
         path: loggablePath(req?.url) || '/', phase, httpStatus: res ? res.status : null, requestId: safeId(res?.requestId),
         summary: phase === 'REQUESTED' ? oneLine(`Calling the match MCP server (${req?.operation || operation}).`)
           : phase === 'SUCCEEDED' ? 'Received the match MCP result.' : oneLine(`Match MCP failed: ${res ? `HTTP ${res.status}` : `${err?.code || ''} ${err?.message || ''}`}`),
-      });
+      }, { optional: true });
     };
   }
 
@@ -651,7 +668,11 @@ export class RuntimeSession {
   async doRefresh({ reason = 'refresh', noRelogin = false } = {}) {
     if (!this.matchPageUrl) return { ok: false, error: 'NOT_CONFIGURED' };
     const url = this.matchUrl();
-    const log = this.apiLogger(reason === 'login' ? 'LOGIN' : 'REFRESH_MATCH');
+    // A poll that changes nothing is routine: log it as optional telemetry (dropped under pressure)
+    // and in full only now and then, so the audit trail stays readable inside the Player's budget.
+    const routine = reason === 'refresh' || reason === 'poll' || reason === 'status-check';
+    const sinceLogged = this.lastLoggedRefreshAt ? Date.now() - this.lastLoggedRefreshAt : Infinity;
+    const log = this.apiLogger(reason === 'login' ? 'LOGIN' : 'REFRESH_MATCH', null, { optional: routine && sinceLogged < 60000 });
     for (let attempt = 0; attempt < 2; attempt++) {
       if (!this.loggedIn && !noRelogin) {
         try {
@@ -716,6 +737,7 @@ export class RuntimeSession {
       this.snapshot = after;
       this.match.lastRefreshAt = this.now();
       this.lastPollError = null;
+      if (!routine || sinceLogged >= 60000 || evs.length) this.lastLoggedRefreshAt = Date.now();
       if (this.phase === 'GAME') this.emitDiscovered();
       if (evs.length) this.pendingEvents.push(...evs.map((e) => e.text));
       if (!this.match.uuid) this.openBlocker('MATCH_UUID_UNKNOWN', null, 'Match UUID for Start/Submit not found on the match page.');
@@ -830,7 +852,7 @@ export class RuntimeSession {
     if (!it || it.description || it.detailFetched || !this.itemLinks?.[id] || !this.matchPageUrl) return;
     it.detailFetched = true;
     const url = new URL(this.itemLinks[id], this.matchUrl()).toString();
-    const log = this.apiLogger('REFRESH_MATCH', id);
+    const log = this.apiLogger('REFRESH_MATCH', id, { optional: true });
     const req = { method: 'GET', url, backlogId: id };
     await log('REQUESTED', req);
     try {
@@ -1168,6 +1190,10 @@ export class RuntimeSession {
       ev.receiptId ??= null;
     }
     if (ev.type === 'BLOCKER_OPENED') ev.backlogId ??= null;
+    const ruleErrors = playerRuleErrors({ ...ev, schemaVersion: 1, playerSessionId: this.playerSessionId });
+    if (ruleErrors.length) {
+      return { ok: false, error: 'PLAYER_RULE', message: `mtm-player would ignore this event: ${ruleErrors.join('; ')}`, next: 'Report the real counts and try again.' };
+    }
     try {
       const r = this.log.append(ev);
       if (ev.type === 'PREPARATION_STATUS') this.prep[ev.stage] = ev.status;
@@ -1195,7 +1221,24 @@ export class RuntimeSession {
     const tracking = await G.remoteTrackingHead(this.checkoutRoot, this.repository.branch);
     if (tracking && tracking !== head) return { ok: false, error: 'REVISION_MISMATCH', message: `HEAD ${head.slice(0, 12)} differs from origin/${this.repository.branch} ${tracking.slice(0, 12)}: preparation must not commit or push; reset the branch to origin/${this.repository.branch}` };
     if (!fs.existsSync(this.matchRoot)) return { ok: false, error: 'MATCH_ROOT_MISSING', message: `${this.matchRoot} does not exist in the checkout` };
-    const ok = this.event({ type: 'ENVIRONMENT_READY', requestId: safeId(this.prepareRequestId) || 'prepare', repository: { ...this.repository }, revision: head, build: 'PASS', matchLogin: 'PASS' });
+    // mtm-player reads every ENVIRONMENT_READY line in the file and fails with ENVIRONMENT_READY_CONFLICT
+    // when two differ. Writing the same one twice is harmless; writing a different one breaks preparation.
+    const wanted = { schemaVersion: 1, playerSessionId: this.playerSessionId, type: 'ENVIRONMENT_READY', requestId: safeId(this.prepareRequestId) || 'prepare', repository: { ...this.repository }, revision: head, build: 'PASS', matchLogin: 'PASS' };
+    const previous = ProgressLog.read(this.progressLogFile).filter((e) => e.type === 'ENVIRONMENT_READY');
+    const conflicting = previous.find((e) => JSON.stringify({ ...e }) !== JSON.stringify(wanted));
+    if (conflicting) {
+      return {
+        ok: false, error: 'ENVIRONMENT_READY_CONFLICT',
+        message: `the log already has a different ENVIRONMENT_READY (revision ${String(conflicting.revision).slice(0, 12)}, requestId ${conflicting.requestId}); mtm-player refuses a log with two different ones`,
+        next: 'The checkout moved since the first readiness report. Reset the checkout to that revision (git checkout <revision>) and call report_ready again, or report BLOCKED to the operator.',
+      };
+    }
+    if (previous.length) {
+      this.state.envReady = { revision: head, requestId: wanted.requestId };
+      const same = { schemaVersion: 1, status: 'SUBMITTED', backlogs: [], summary: oneLine(summary || `ENVIRONMENT_READY already logged for ${this.matchId} at ${head.slice(0, 12)}.`, 2000) };
+      return { ok: true, revision: head, replay: true, final: same, reply: JSON.stringify(same), next: 'Readiness was already reported for this round. Reply with the `reply` JSON and end the turn.' };
+    }
+    const ok = this.event(wanted);
     if (!ok) return { ok: false, error: 'LOG_APPEND_FAILED', message: 'ENVIRONMENT_READY was not written; mtm-player has NOT received readiness. Fix the log problem and call report_ready again.', alerts: this.view().alerts };
     this.state.envReady = { revision: head, requestId: this.prepareRequestId };
     this.saveState();
@@ -1212,8 +1255,15 @@ export class RuntimeSession {
     const resultStatus = ['SUBMITTED', 'BLOCKED', 'FAILED'].includes(status) ? status : this.phase === 'PAUSED' ? 'BLOCKED' : submitted ? 'SUBMITTED' : 'BLOCKED';
     const final = { schemaVersion: 1, status: resultStatus, backlogs, summary: oneLine(summary || `${submitted}/${backlogs.length} backlog item(s) submitted with receipts.`, 2000) };
     const errs = validateFinalResult(final);
+    let endNote = null;
     if (end) {
-      const endStatus = ['COMPLETED', 'BLOCKED', 'FAILED'].includes(status) ? status : 'COMPLETED';
+      // mtm-player rejects ORCHESTRATOR_ENDED COMPLETED while a blocker is still open.
+      const open = [...this.blockers.keys()];
+      let endStatus = ['COMPLETED', 'BLOCKED', 'FAILED'].includes(status) ? status : 'COMPLETED';
+      if (endStatus === 'COMPLETED' && open.length) {
+        endStatus = 'BLOCKED';
+        endNote = `${open.length} blocker(s) still open (${open.join(', ')}): the log records ORCHESTRATOR_ENDED BLOCKED, because mtm-player rejects COMPLETED with an open blocker. Resolve them with report_progress BLOCKER_RESOLVED first if they are actually cleared.`;
+      }
       if (!this.endedLogged) {
         this.event({ type: 'ORCHESTRATOR_ENDED', status: endStatus, summary: endStatus === 'COMPLETED' ? 'The match has ended; all activity has stopped.' : oneLine(summary || 'Stopped.') });
         this.endedLogged = true;
@@ -1222,7 +1272,7 @@ export class RuntimeSession {
       this.stopPoller();
       this.saveState();
     }
-    return { ok: errs.length === 0, final, reply: JSON.stringify(final), schemaErrors: errs };
+    return { ok: errs.length === 0, final, reply: JSON.stringify(final), schemaErrors: errs, ...(endNote ? { endNote } : {}) };
   }
 
   final_result(args = {}) {

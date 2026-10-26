@@ -159,10 +159,15 @@ export function originOf(url) {
   }
 }
 
-/** The schema accepts only https origins; loopback mock origins are logged as null. */
+/**
+ * Origins mtm-player accepts in a log event: https, or http on loopback (so rehearsals against a
+ * local mock produce the same events a real match does).
+ */
 export function loggableOrigin(url) {
   const o = originOf(url);
-  return o && /^https:\/\/[^/?#]+$/.test(o) && o.length <= 256 ? o : null;
+  if (!o || o.length > 256) return null;
+  if (/^https:\/\/[^/?#]+$/.test(o)) return o;
+  return /^http:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(o) ? o : null;
 }
 
 export function loggablePath(url) {

@@ -94,7 +94,7 @@ export async function install(opts) {
   const lay = registrationLayout(provider);
   const runtime = path.join(TW, 'team-sdlc-pack', 'runtime');
   if (!opts.dryRun) {
-    for (const d of [path.join(TW, 'matches'), path.join(TW, 'team-sdlc-pack', 'logs'), path.join(TW, '.mtm'), path.join(TW, lay.agentsDir), path.join(TW, lay.skillsDir)]) fs.mkdirSync(d, { recursive: true });
+    for (const d of [path.join(TW, 'matches'), path.join(TW, 'team-sdlc-pack', 'logs'), path.join(TW, '.mtm'), path.join(TW, lay.agentsDir), path.join(TW, lay.skillsDir), ...(lay.extraSkillsDirs || []).map((x) => path.join(TW, x))]) fs.mkdirSync(d, { recursive: true });
   }
 
   // 3. Payload (runtime is fully pack-owned: replace it).
@@ -115,15 +115,21 @@ export async function install(opts) {
     registration.push(`${lay.agentsDir}/${f}`);
   }
   const skills = fs.readdirSync(path.join(PACK, 'skills'), { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
-  for (const skill of skills) {
-    const dst = path.join(TW, lay.skillsDir, skill);
-    if (fs.existsSync(dst) && !(previous.skills || []).includes(skill)) {
-      // A folder we did not create: keep a backup instead of overwriting it.
-      if (!opts.dryRun) fs.renameSync(dst, `${dst}.bak-before-team-pack-${Date.now()}`);
-    } else rmrf(dst, opts.dryRun);
-    for (const f of walk(path.join(PACK, 'skills', skill))) copyFile(path.join(PACK, 'skills', skill, f), path.join(dst, f), opts.dryRun);
+  const skillDirs = [lay.skillsDir, ...(lay.extraSkillsDirs || [])];
+  for (const dir of skillDirs) {
+    if (!opts.dryRun) fs.mkdirSync(path.join(TW, dir), { recursive: true });
+    for (const skill of skills) {
+      const dst = path.join(TW, dir, skill);
+      if (fs.existsSync(dst) && !(previous.skills || []).includes(skill)) {
+        // A folder we did not create: keep a backup instead of overwriting it.
+        if (!opts.dryRun) fs.renameSync(dst, `${dst}.bak-before-team-pack-${Date.now()}`);
+      } else rmrf(dst, opts.dryRun);
+      for (const f of walk(path.join(PACK, 'skills', skill))) copyFile(path.join(PACK, 'skills', skill, f), path.join(dst, f), opts.dryRun);
+    }
   }
-  for (const stale of (previous.skills || []).filter((x) => !skills.includes(x))) rmrf(path.join(TW, previous.skillsDir || lay.skillsDir, stale), opts.dryRun);
+  for (const dir of [...new Set([...(previous.skillDirs || [previous.skillsDir].filter(Boolean)), ...skillDirs])]) {
+    for (const stale of (previous.skills || []).filter((x) => !skills.includes(x))) rmrf(path.join(TW, dir, stale), opts.dryRun);
+  }
   for (const f of ['team-runtime.json', 'team-pack-info.json']) {
     copyFile(path.join(PACK, f), path.join(TW, '.mtm', f), opts.dryRun);
     registration.push(`.mtm/${f}`);
@@ -161,7 +167,7 @@ export async function install(opts) {
   }
 
   if (!opts.dryRun) {
-    fs.writeFileSync(ownFile, `${JSON.stringify({ version: pkg.version, provider, teamId: info.teamId, installedFrom: PACK, registration, skills, skillsDir: lay.skillsDir }, null, 2)}\n`);
+    fs.writeFileSync(ownFile, `${JSON.stringify({ version: pkg.version, provider, teamId: info.teamId, installedFrom: PACK, registration, skills, skillsDir: lay.skillsDir, skillDirs }, null, 2)}\n`);
   }
   return { TW, provider, version: pkg.version, teamId: info.teamId, teamName: info.teamName, payload: files.length, registration, agentsNote, config };
 }

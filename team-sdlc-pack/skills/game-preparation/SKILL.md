@@ -47,6 +47,9 @@ Read `README.md` and `env-require/README.md` first: they state the real setup st
 ## 5. MATCH_LOGIN
 `login_match`. It logs MATCH_LOGIN itself and verifies the match/team/repository shown on `/match/<matchId>`. Do not start any backlog item now. Failure -> retry once; still failing -> reply BLOCKED (step 7).
 
+## 5b. Company knowledge (optional, 30 seconds)
+`match_mcp action:"tools"`. If the match page advertises an MCP server, this lists what the customer's internal material offers (standards, QA fixtures, tickets); note the tool names in `.mtm-notes/baseline.md` so you do not rediscover them under time pressure. `NO_MATCH_MCP` is a normal answer: this match has none.
+
 ## 6. ENVIRONMENT_READY
 `report_ready`. It writes ENVIRONMENT_READY (requestId, repository, HEAD revision, build PASS, matchLogin PASS) and returns `reply`. If it refuses, fix what it names and call it again.
 

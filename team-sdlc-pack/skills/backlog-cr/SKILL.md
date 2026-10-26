@@ -7,7 +7,7 @@ description: Playbook for an MTM CR-xx change request - implement the new spec c
 
 Target ~14 minutes; watch `!! WRAP UP`. Long spec -> spawn `team_repo_scout` for an acceptance breakdown while you locate touchpoints.
 
-1. `start_work <ID>`. Notes: one acceptance line per rule, number, name, default, format and "must never" statement in the spec; plus the boundaries of each rule and the old behaviour that must stay. A "never" rule applies to existing data too.
+1. `start_work <ID>`. If the spec cites an internal standard, format, fixture set or ticket, search it with `match_mcp` first and follow it literally (column order, encoding, rounding, naming); cite the document id in the answer. Notes: one acceptance line per rule, number, name, default, format and "must never" statement in the spec; plus the boundaries of each rule and the old behaviour that must stay. A "never" rule applies to existing data too.
 2. Touchpoints (search): data/config, business logic, validation, API/serialization, UI (buttons, labels, states), docs listing behaviour, permissions. Put them in scope.
 3. Implement in small steps, following existing patterns (routing, naming, error format, i18n, where config lives). Backward compatible for everything the spec does not change. No new dependency unless the spec requires it.
 4. Tests: each MVS scenario at its layer + each acceptance line + boundaries (exactly at a limit, just over, zero, rounding) + unchanged old behaviour. Update tests that encode the old rule and name them in the answer.

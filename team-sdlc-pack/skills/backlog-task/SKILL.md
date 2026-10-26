@@ -8,6 +8,7 @@ description: Playbook for an MTM TASK-xx general assignment without MVS - do exa
 No MVS; Grader still checks. Every template field hints at what is graded. Target ~8 minutes.
 
 1. `start_work <ID>`. Notes: each concrete deliverable in the brief (code, endpoint, log/trace, config, doc line, file) as an acceptance line. Do all of them, including docs named in the brief (exact file name, no alias).
+1b. If the brief points at something outside the repository (an internal document, ticket or fixture), search it with `match_mcp` before assuming it is unavailable.
 2. Follow the repo's patterns (routing, naming, logging, error format, where version/config are read). Do not hardcode values the repo keeps elsewhere.
 3. Tests for the new behaviour, including simple variants (missing input, query strings, trailing slash where the router accepts it). For data returned from module-owned objects/arrays, test that mutating a response does not change later responses.
 4. Common TASK kinds:

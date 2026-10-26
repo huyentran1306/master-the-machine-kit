@@ -16,7 +16,9 @@
 - Credentials (password, team key, cookies): helper memory only.
 
 ## Tools
-configure_session, login_match, refresh_match, wait_for_update, get_backlog_item, start_work, submit_work, report_progress, report_ready, recon_repo, worktree, session_status, final_result.
+configure_session, login_match, refresh_match, wait_for_update, get_backlog_item, start_work, submit_work, report_progress, report_ready, recon_repo, match_mcp, worktree, session_status, final_result.
+
+`match_mcp` speaks MCP over Streamable HTTP to the match's own MCP server (the customer's internal material), when the match page advertises one or `game-adapter.json` `matchView.mcpUrl` names it. The helper never guesses a URL, sends the team bearer, keeps the origin allowlist, and logs every call as NETWORK_ACTIVITY.
 
 ## Events written by the helper
 ORCHESTRATOR_STARTED/RESTARTED (configure_session), PREPARATION_STATUS MATCH_LOGIN (login_match), ENVIRONMENT_READY (report_ready), GAME_START_STATUS BACKLOG_SYNC (START/RESUME_GAME), BACKLOG_STATUS DISCOVERED/IN_PROGRESS/SUBMITTED, BACKLOG_TESTS NOT_RUN (start), GAME_MASTER_API REQUESTED/SUCCEEDED/FAILED around every login, refresh, start and submit request, BLOCKER_OPENED/RESOLVED for helper-detected problems, ORCHESTRATOR_ENDED (final_result end=true / MATCH_ENDED).

@@ -34,6 +34,9 @@ Name: `<ID>-TC-01.md`, `<ID>-TC-02.md`, ... plus `<ID>-regression.md` for the fu
 - UI items: a screenshot is strong evidence. If the app runs locally: `& "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe" --headless=new --disable-gpu --window-size=1440,900 --screenshot="<absolute path>\evidence\<ID>-after-1440.png" "http://localhost:<port>/<page>"` (Playwright if the repo has it). Not runnable within 3 minutes -> skip screenshots, rely on component/unit tests + build and say so.
 - PI: a repro test failing before and passing after is the evidence (`<ID>-repro.md`), plus the affected module's tests.
 
+## When the answer rests on internal material
+If a rule came from the match MCP server (internal standard, fixture set, ticket), name the document id in the analysis/summary field and, when it decided a concrete choice, quote the one line it decided (column order, encoding, rounding). That is what tells the grader the choice was not invented. If nothing was available, write the assumption you used instead - never leave the field vague.
+
 ## Before commit
 - `submit.json` parses (`node -e "JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'))" "<path>"`).
 - Every `evidence/<file>` you referenced exists. Remove `.gitkeep` only if real evidence exists (harmless either way).

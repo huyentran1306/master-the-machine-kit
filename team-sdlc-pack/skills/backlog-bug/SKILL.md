@@ -9,6 +9,7 @@ MVS is the minimum; Grader runs more. Target ~10 minutes.
 
 1. `start_work <ID>`: description, MVS, template. Notes: expected behaviour (outcome); acceptance = every MVS scenario + 2-4 hidden ones: the same defect via another input/caller/page, exact boundaries, empty/null, case/whitespace, the neighbouring behaviour that must NOT change (e.g. mobile layout when fixing desktop, other statuses when fixing one).
 2. Tests first at the layer each MVS names (HTTP: status + fields; service/query: data; UI: component/DOM/CSS class). Watch them fail for the right reason.
+2b. If the expected behaviour is defined by an internal standard or ticket the brief names, search it with `match_mcp` and make the fix match it.
 3. Root cause: search the function/query/style, read its callers. Fix where it lives so every path is correct, not only the reported example. Data bugs: fix the query/filter for every report/list that shows the data (e.g. voided/deleted/cancelled records excluded everywhere they must be), and consider existing data.
 4. If an existing test encodes the wrong behaviour, update it and name it in the answer. Never delete/skip/weaken tests.
 5. Targeted tests -> module/full suite once -> build/typecheck once. No NEW failures vs `<checkoutRoot>/.mtm-notes/baseline.md`. Report BACKLOG_TESTS.

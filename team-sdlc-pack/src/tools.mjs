@@ -71,6 +71,12 @@ export const TOOLS = [
     handler: (s, a) => s.worktree(a),
   },
   {
+    name: 'match_mcp',
+    description: "The match's own MCP server, when the organizers provide one (the customer's internal material: standards, fixtures, tickets, documentation). action 'tools' lists what it offers, 'call' runs one (name + args), 'resource' reads a uri. Use it when a backlog item refers to an internal standard/fixture/ticket instead of assuming it is unavailable. The URL comes from the match page or game-adapter.json; the helper never guesses one.",
+    inputSchema: obj({ action: { type: 'string', enum: ['tools', 'call', 'resource'] }, name: { type: 'string' }, args: { type: 'object' }, uri: { type: 'string' } }),
+    handler: (s, a) => s.match_mcp(a),
+  },
+  {
     name: 'session_status',
     description: 'Recovery snapshot: phase, preparation stages, credentials present (yes/no), started/unsubmitted items, unresolved submissions, dirty files, stashes, current view.',
     inputSchema: obj({}),

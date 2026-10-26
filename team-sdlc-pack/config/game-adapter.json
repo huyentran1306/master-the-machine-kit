@@ -27,7 +27,8 @@
     "pagePathTemplate": "{matchPageUrl}/{matchId}",
     "extraJsonPaths": [],
     "assignmentCheck": "block",
-    "repoHostAliases": {}
+    "repoHostAliases": {},
+    "mcpUrl": null
   },
   "polling": {
     "successMs": 5000,

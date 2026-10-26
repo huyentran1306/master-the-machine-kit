@@ -13,8 +13,9 @@ import { materializeAnswer, answerPaths, countScenarios, checkAnswer } from './a
 import { rank, alerts as plannerAlerts, diffItems, isSubmitted, isClosed, effectiveLeft } from './planner.mjs';
 import { recon } from './recon.mjs';
 import { validateFinalResult } from './schema.mjs';
+import { McpHttpClient, resultText } from './mcp-http.mjs';
 import {
-  oneLine, safeId, uuid, sleep, readJson, writeJson, loggableOrigin, loggablePath, redact, truncate, minutes, SHA_RE, ITEM_KEY_RE, sha256, isInside, nowIso, repoKey,
+  oneLine, safeId, uuid, sleep, readJson, writeJson, loggableOrigin, loggablePath, originOf, redact, truncate, minutes, SHA_RE, ITEM_KEY_RE, sha256, isInside, nowIso, repoKey,
 } from './util.mjs';
 
 const PREP_STAGES = ['GIT_AUTH', 'REPOSITORY', 'ENVIRONMENT', 'BUILD', 'MATCH_LOGIN'];
@@ -23,7 +24,7 @@ const PLAYBOOK = { PI: 'backlog-pi', BUG: 'backlog-bug', CR: 'backlog-cr', TASK:
 
 export const DEFAULT_ADAPTER = {
   login: { strategy: 'auto', strategies: ['nextauth', 'form', 'json'] },
-  matchView: { pagePathTemplate: '{matchPageUrl}/{matchId}', assignmentCheck: 'block', repoHostAliases: {} },
+  matchView: { pagePathTemplate: '{matchPageUrl}/{matchId}', assignmentCheck: 'block', repoHostAliases: {}, mcpUrl: null },
   polling: { successMs: 5000, errorMs: 10000, backgroundMs: 20000, maxWaitMs: 55000 },
   submit: { acceptedStatuses: ['ACCEPTED', 'RECEIVED'], retryBudgetMs: 90000 },
   planner: {},
@@ -475,6 +476,100 @@ export class RuntimeSession {
   rememberPage(parsed) {
     this.lastPageText = parsed.pageText;
     this.lastAssignment = { matchIdShown: parsed.matchIdShown, ...(parsed.assignment || {}), text: parsed.textAssignment || null };
+    if (parsed.mcpUrls?.length && !this.adapter.matchView?.mcpUrl) {
+      const base = this.matchUrl();
+      const seen = new Set(this.pageMcpUrls || []);
+      for (const u of parsed.mcpUrls) {
+        try {
+          const abs = new URL(u, base).toString();
+          if (this.allowedOrigins().includes(originOf(abs))) seen.add(abs);
+        } catch { /* not a URL */ }
+      }
+      this.pageMcpUrls = [...seen];
+    }
+  }
+
+  allowedOrigins() {
+    return [...new Set([...(this.allowedMatchOrigins || []), ...(this.allowedApiOrigins || [])])];
+  }
+
+  /**
+   * The match MCP server, when the organizers provide one: the customer's internal material
+   * (standards, fixtures, tickets, documentation) that a backlog item may refer to. The URL comes from
+   * game-adapter.json (matchView.mcpUrl) or from the match page itself - never from a guess.
+   */
+  matchMcpUrl() {
+    const configured = this.adapter.matchView?.mcpUrl;
+    if (configured) {
+      const abs = new URL(configured.replace('{matchId}', encodeURIComponent(this.matchId || '')).replace('{matchUuid}', this.match.uuid || ''), this.matchPageUrl || 'https://invalid.local').toString();
+      return abs;
+    }
+    const urls = this.pageMcpUrls || [];
+    if (!urls.length) return null;
+    const id = String(this.matchId || '').toLowerCase();
+    return urls.find((u) => id && u.toLowerCase().includes(id)) || urls.find((u) => this.match.uuid && u.toLowerCase().includes(this.match.uuid)) || urls[0];
+  }
+
+  mcpLogger(operation) {
+    return async (phase, req, res, err) => {
+      this.event({
+        type: 'NETWORK_ACTIVITY', operation: safeId(operation) || 'MATCH_MCP', backlogId: safeId(this.state.current),
+        method: req?.method || 'POST', origin: loggableOrigin(req?.url) || loggableOrigin(this.matchPageUrl) || 'https://invalid.local',
+        path: loggablePath(req?.url) || '/', phase, httpStatus: res ? res.status : null, requestId: safeId(res?.requestId),
+        summary: phase === 'REQUESTED' ? oneLine(`Calling the match MCP server (${req?.operation || operation}).`)
+          : phase === 'SUCCEEDED' ? 'Received the match MCP result.' : oneLine(`Match MCP failed: ${res ? `HTTP ${res.status}` : `${err?.code || ''} ${err?.message || ''}`}`),
+      });
+    };
+  }
+
+  async match_mcp({ action = 'tools', name, args = {}, uri } = {}) {
+    if (this.phase === 'IDLE') return { ok: false, error: 'NOT_CONFIGURED', next: this.nextHint() };
+    const url = this.matchMcpUrl();
+    if (!url) {
+      return {
+        ok: false, error: 'NO_MATCH_MCP',
+        message: 'The match page advertises no MCP server, and game-adapter.json matchView.mcpUrl is not set.',
+        next: 'Work from the repository and the brief. If an item refers to an internal standard, fixture or ticket you cannot reach, state the assumption you used in the answer and ship; never wait for it.',
+      };
+    }
+    if (!this.allowedOrigins().includes(originOf(url))) {
+      return { ok: false, error: 'ORIGIN_NOT_ALLOWED', message: `${originOf(url)} is not in the origins mtm-player allowed.` };
+    }
+    this.mcp ||= new McpHttpClient({ url, bearer: this.bearer, allowedOrigins: this.allowedOrigins(), log: this.mcpLogger('MATCH_MCP') });
+    if (this.mcp.url !== url) this.mcp = new McpHttpClient({ url, bearer: this.bearer, allowedOrigins: this.allowedOrigins(), log: this.mcpLogger('MATCH_MCP') });
+    if (this.bearer && this.mcp.bearer !== this.bearer) this.mcp.bearer = this.bearer;
+    try {
+      if (action === 'tools') {
+        const tools = await this.mcp.tools();
+        let resources = [];
+        try {
+          resources = await this.mcp.resources();
+        } catch { /* resources are optional */ }
+        return this.clean({
+          ok: true, url, server: this.mcp.serverInfo, instructions: this.mcp.instructions ? truncate(this.mcp.instructions, 2000) : null,
+          tools: tools.map((t) => ({ name: t.name, description: truncate(t.description || '', 300), input: Object.keys(t.inputSchema?.properties || {}), required: t.inputSchema?.required || [] })),
+          resources: resources.slice(0, 50).map((r) => ({ uri: r.uri, name: r.name, description: truncate(r.description || '', 160) })),
+          next: 'Call one with action "call" (name + args), or read a resource with action "resource" (uri). Quote what you used in the answer.',
+        });
+      }
+      if (action === 'call') {
+        if (!name) return { ok: false, error: 'NAME_REQUIRED', next: 'action "tools" lists the names.' };
+        const r = await this.mcp.call(name, args);
+        return this.clean({ ok: !r?.isError, url, tool: name, isError: !!r?.isError, text: resultText(r), structured: r?.structuredContent ?? null });
+      }
+      if (action === 'resource') {
+        if (!uri) return { ok: false, error: 'URI_REQUIRED' };
+        const r = await this.mcp.readResource(uri);
+        return this.clean({ ok: true, url, uri, text: resultText(r) });
+      }
+      return { ok: false, error: 'BAD_ACTION', message: 'action is tools | call | resource' };
+    } catch (e) {
+      this.mcp.ready = false;
+      return this.clean({
+        ok: false, error: e.code || 'MATCH_MCP_FAILED', message: e.message, url,
+        next: 'The match MCP server is not answering. Do not retry in a loop: work from the repository and the brief, write the assumption you used into the answer, and ship.',
+      });
+    }
   }
 
   verifyAssignment() {

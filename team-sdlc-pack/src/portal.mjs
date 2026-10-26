@@ -295,6 +295,13 @@ export function parseMatchPage(html, { matchId, serverNow = Date.now() } = {}) {
   let matchUuid = [...uuidCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || null;
   if (uuidCounts.size > 1) warnings.push(`several match UUIDs in Start/Submit URLs: ${[...uuidCounts.keys()].join(', ')}`);
 
+  // MCP endpoints the page advertises (the organizers' match MCP server with the customer's internal
+  // material). Only a URL the page itself shows is ever called; the helper never guesses one.
+  const mcpUrls = [...new Set([
+    ...[...corpus.matchAll(/https?:\/\/[^\s"'<>()\\]+\/(?:api\/v\d+\/)?mcp(?:\/[A-Za-z0-9._~-]+)*\/?/gi)].map((m) => m[0]),
+    ...[...corpus.matchAll(/(?:^|["'\s(])(\/(?:api\/v\d+\/)?mcp(?:\/[A-Za-z0-9._~-]+)*)\/?(?=["'\s)<]|$)/gim)].map((m) => m[1]),
+  ])].map((u) => u.replace(/[.,;)]+$/, '')).filter((u) => !/\.(js|css|png|jpg|svg|json)$/i.test(u));
+
   // Structured items.
   let items = new Map();
   let matchObj = null;
@@ -379,7 +386,7 @@ export function parseMatchPage(html, { matchId, serverNow = Date.now() } = {}) {
   if (!matchUuid) warnings.push('match UUID not found on the page (Start/Submit URLs)');
   if (!items.length) warnings.push('no backlog item ids found on the page');
   if (!status) warnings.push('match status not found on the page');
-  return { matchUuid, status, statusRaw, endsAt, remainingMs, items, pageText, structured, warnings, itemLinks, matchIdShown, assignment, textAssignment: assignmentFromText(matchInfoText(pageText)) };
+  return { matchUuid, status, statusRaw, endsAt, remainingMs, items, pageText, structured, warnings, itemLinks, matchIdShown, assignment, mcpUrls, textAssignment: assignmentFromText(matchInfoText(pageText)) };
 }
 
 /** True when the response looks like a login page rather than the match page. */

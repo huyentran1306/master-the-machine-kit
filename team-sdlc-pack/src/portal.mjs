@@ -92,6 +92,26 @@ function objectsAround(seg, needleRe, maxTries = 10) {
   return found;
 }
 
+/**
+ * A backlog title the page actually showed, or null.
+ *
+ * The plain-HTML branch takes whatever text follows the item id on its line, and on a page whose
+ * markup it does not fully understand that can be a fragment of JSON or markup - a real match
+ * produced the title `"}'` for TASK-01, which told the orchestrator nothing and delayed the item.
+ * Better to report no title (the agent then calls get_backlog_item for the real text) than to
+ * report noise that reads like a title.
+ */
+export function usableTitle(raw) {
+  if (typeof raw !== 'string') return null;
+  const s = raw.replace(/\s+/g, ' ').trim();
+  if (s.length < 4 || s.length > 200) return null;
+  const wordChars = (s.match(/[\p{L}\p{N}]/gu) || []).length;
+  if (wordChars < 4) return null;                       // "}' and friends
+  if (wordChars / s.length < 0.5) return null;          // mostly punctuation: a fragment, not prose
+  if (/^[{}[\]"'`,;:|<>\\/]/.test(s)) return null;      // starts mid-JSON or mid-tag
+  return s;
+}
+
 const pick = (o, keys) => {
   for (const k of keys) if (o[k] != null && o[k] !== '') return o[k];
   return null;
@@ -178,7 +198,7 @@ function descriptionOf(o) {
 function itemFromObject(key, o) {
   const it = { id: key, type: key.split('-')[0], title: null, maxPoints: null, availability: null, teamStatus: null, result: null, score: null, deadlineAt: null, revealedAt: null, deadlineMinutes: null, description: null };
   const title = pick(o, ['title', 'name', 'summary', 'headline']);
-  if (typeof title === 'string') it.title = title;
+  if (typeof title === 'string') it.title = usableTitle(title);
   const type = pick(o, ['type', 'backlogType', 'kind', 'itemType']);
   if (typeof type === 'string' && /^(TASK|CR|BUG|PI)$/i.test(type)) it.type = type.toUpperCase();
   const pts = pick(o, ['maxPoints', 'maxPt', 'maxScore', 'points', 'maxPts', 'score_max', 'max']);
@@ -231,7 +251,9 @@ function itemsFromText(text) {
     const it = { id, type: id.split('-')[0], title: null, maxPoints: null, availability: null, teamStatus: null, result: null, score: null, deadlineAt: null, revealedAt: null, description: null };
     const rest = line.slice(line.indexOf(id) + id.length).replace(/^[\s|:·\-—]+/, '');
     const t = rest.split('|').map((x) => x.trim()).filter(Boolean)[0] || lines[idx + 1] || '';
-    if (t && !re.test(t)) it.title = t.slice(0, 200);
+    // Try the text after the id, then the next line; a fragment that is not a title stays null.
+    if (t && !re.test(t)) it.title = usableTitle(t);
+    if (!it.title) { const n = lines[idx + 1]; if (n && !re.test(n)) it.title = usableTitle(n); }
     const pts = (line + ' ' + (lines[idx + 1] || '')).match(/\b(?:max\s*)?(\d{2,4})\s*(?:pt|pts|points|điểm)\b/i) || line.match(/\|\s*(\d{2,4})\s*\|/);
     if (pts) it.maxPoints = Number(pts[1]);
     for (const [r, k, v] of TEXT_STATUS) if (!it[k] && r.test(line)) it[k] = v;

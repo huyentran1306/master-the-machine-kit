@@ -31,7 +31,7 @@ Search the user-visible string first (label, error code, column header, route se
 - Run one file: `pnpm test tests/<file>.test.ts`; one case: `pnpm test -t "<name>"`.
 - `TEST_DATABASE_URL` must be unique per working copy (the suite truncates between cases). In a worktree the helper rewrites it; never point tests at `DATABASE_URL`.
 - `fileParallelism: false` is intentional — do not "optimize" it away.
-- UI-only change with no sensible unit test: assert the component/HTML (render or a route handler response) and add a screenshot as evidence (`pnpm exec playwright` is available as a dev dependency when the repo has it; otherwise headless Edge/Chrome `--screenshot`).
+- UI-only change with no sensible unit test: assert the component/HTML (render or a route handler response) and add a screenshot as evidence (`pnpm exec playwright` is available as a dev dependency when the repo has it; otherwise a headless Chrome/Edge binary that exists on this machine, with `--screenshot` (see evidence-and-answer)).
 
 ## Money, dates, ordering (common traps)
 - Money is stored in **minor units (BIGINT)**; convert at the form/transport boundary (`src/lib/money.ts`), zero-decimal currencies use factor 1. Never do float math on totals.

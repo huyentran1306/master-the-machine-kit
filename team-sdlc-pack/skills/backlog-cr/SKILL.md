@@ -15,7 +15,7 @@ Target ~14 minutes; watch `!! WRAP UP`. Long spec -> spawn `team_repo_scout` for
    - Export/download (CSV/Excel): header row and column order as specified; respects current filters/search/sort (not just the current page unless specified); escaping of commas, quotes, newlines; leading `=`, `+`, `-`, `@` neutralized against formula injection; UTF-8 (BOM if Excel is named); empty result -> header only; dates/numbers in the documented format; correct Content-Type and filename; permission checks same as the list.
    - New endpoint next to existing ones: same auth, validation and error shape; harmless normalization the route family already accepts (trailing slash, query params) keeps working.
    - Settings/limits: default value, min/max, invalid input message.
-6. Module/full suite + build/typecheck once. Report BACKLOG_TESTS.
+6. **Full suite + build/typecheck, both green.** Acceptance usually requires it outright; a pre-existing failure is not an excuse, and a baseline test that contradicts the new behaviour should be corrected and explained in the answer. Report BACKLOG_TESTS.
 7. Review with `team_quality_checker`; close GAPs.
 8. Answer + evidence per MVS scenario (evidence-and-answer skill); list what changed per rule and assumptions.
 9. Commit `<ID>: <change>`, push, `submit_work <ID>`.

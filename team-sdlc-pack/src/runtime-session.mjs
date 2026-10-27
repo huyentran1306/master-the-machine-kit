@@ -2,6 +2,7 @@
 // planner, answer/evidence contract and recovery state. Tool handlers live here; bin/runtime-server.mjs
 // only speaks JSON-RPC.
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { ProgressLog, scrubSummary, playerRuleErrors } from './progress.mjs';
 import { parseLifecycleText, validateDescriptor, publicDescriptor } from './lifecycle.mjs';
@@ -72,6 +73,14 @@ export class RuntimeSession {
 
   /** Redacts credentials from anything returned to the model. */
   clean(value) {
+    // The match being over is the one thing the agent must not miss: mtm-player needs
+    // ORCHESTRATOR_ENDED as the final event, and a round left open looks unfinished to the
+    // organizer. A planner alert proved easy to scroll past, so this rides on EVERY tool result
+    // until the end event is actually in the log.
+    if (value && typeof value === 'object' && !Array.isArray(value)
+        && this.phase === 'GAME' && this.match?.status === 'FINISHED' && !this.endedLogged) {
+      value = { ...value, mustEnd: 'The match is FINISHED. Call final_result {"end":true} NOW: it writes ORCHESTRATOR_ENDED, the last event mtm-player waits for. Nothing else you do can score.' };
+    }
     const text = JSON.stringify(value);
     const red = redact(text, this.secrets());
     if (red === text) return value;
@@ -966,6 +975,20 @@ export class RuntimeSession {
       const s = typeof content === 'string' ? content : JSON.stringify(content);
       filesOut[rel] = s.length <= 4000 ? s : `${s.slice(0, 4000)}…[full copy in .git/mtm-team/items/${id}/files/${rel}]`;
     }
+    // Files Start Work ships are not reference reading: an organizer sends a check runner together
+    // with the official QA data, and the item is graded on ITS output. A team that writes its own
+    // equivalent produces numbers that cannot match the expected results, and loses the item while
+    // believing it passed. So name the files on disk, and point at the ones that look runnable.
+    const providedFiles = {};
+    const providedRunners = [];
+    if (this.stateDir) {
+      for (const rel of Object.keys(material.files)) {
+        const abs = path.join(this.stateDir, 'items', id, 'files', rel);
+        if (!fs.existsSync(abs)) continue;
+        providedFiles[rel] = abs;
+        if (/(run[-_]?checks?|runner|verify|validate|check)[\w.-]*\.(mjs|cjs|js|ts|ps1|sh|py)$/i.test(rel)) providedRunners.push(abs);
+      }
+    }
     const now = this.now();
     const { left, by } = effectiveLeft(it, now, this.match.endsAt);
     return this.clean({
@@ -977,6 +1000,11 @@ export class RuntimeSession {
       minimumVerificationScenarios: material.minimumVerificationScenarios,
       requiredScenarios: required,
       files: filesOut,
+      providedFiles,
+      providedRunners,
+      providedRunnersNote: providedRunners.length
+        ? 'Run these exactly as shipped and keep their output as the evidence. They load the official QA data; your own script or data cannot produce the expected results.'
+        : undefined,
       answer: answer ? { submitJson: answer.submitJson, evidenceDir: answer.evidenceDir, created: answer.created, refsLookLike: 'evidence/<file>' } : { note: 'matchRoot not found; create answers/<ID>/submit.json from submitTemplate yourself' },
       playbook: `.agents/skills/${PLAYBOOK[it.type] || 'backlog-task'}/SKILL.md`,
       stackSkill: this.stackSkill ? `.agents/skills/${this.stackSkill}/SKILL.md` : null,
@@ -1085,6 +1113,32 @@ export class RuntimeSession {
     }
     const tests = this.lastTests?.[id];
     if (it && ['CR', 'BUG'].includes(it.type) && tests?.status !== 'PASSED') warnings.push(`last BACKLOG_TESTS for ${id} is ${tests?.status || 'not reported'}: report real results before submitting`);
+    // Parallel lanes have put one item's evidence into another item's folder before (a worker, or a
+    // worktree integration, copying the whole evidence tree). The grader then reads a dependency
+    // task illustrated with CSV screenshots. This is a warning, never a refusal: a wrong refusal
+    // near the deadline costs the whole item, while a warning costs nothing and is usually right.
+    try {
+      const mine = path.join(this.matchRoot || '', 'answers', id, 'evidence');
+      if (this.matchRoot && fs.existsSync(mine)) {
+        const digest = (f) => { try { return crypto.createHash('sha1').update(fs.readFileSync(f)).digest('hex'); } catch { return null; } };
+        const mineFiles = new Map();
+        for (const f of fs.readdirSync(mine)) { const d = digest(path.join(mine, f)); if (d) mineFiles.set(d, f); }
+        const foreign = [];
+        for (const other of fs.readdirSync(path.join(this.matchRoot, 'answers'))) {
+          if (other === id) continue;
+          const dir = path.join(this.matchRoot, 'answers', other, 'evidence');
+          if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) continue;
+          for (const f of fs.readdirSync(dir)) {
+            const d = digest(path.join(dir, f));
+            // Same bytes under both items, and not one of the per-run logs that legitimately repeat.
+            if (d && mineFiles.has(d) && !/^(test|build|typecheck|install|audit)[\w.-]*\.(log|txt)$/i.test(f)) foreign.push(`${mineFiles.get(d)} (also in ${other})`);
+          }
+        }
+        if (foreign.length >= 2) {
+          warnings.push(`${foreign.length} evidence file(s) under answers/${id}/evidence are byte-identical to another item's evidence: ${foreign.slice(0, 3).join(', ')}. Remove what does not belong to ${id} before submitting - a grader reading someone else's screenshots counts against the evidence, and it usually means a worktree lane copied the wrong folder.`);
+        }
+      }
+    } catch { /* an evidence cross-check must never block a submission */ }
     return { errors, warnings, sha, answer, evidenceRefs: check.evidenceRefs };
   }
 

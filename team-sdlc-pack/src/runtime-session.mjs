@@ -13,7 +13,7 @@ import * as G from './git.mjs';
 import { materializeAnswer, answerPaths, countScenarios, checkAnswer } from './answers.mjs';
 import { rank, alerts as plannerAlerts, diffItems, isSubmitted, isClosed, effectiveLeft } from './planner.mjs';
 import { recon } from './recon.mjs';
-import { validateFinalResult } from './schema.mjs';
+import { validate, validateFinalResult } from './schema.mjs';
 import { McpHttpClient, resultText } from './mcp-http.mjs';
 import { buildChecklist, looksLikeTestOutput } from './checklist.mjs';
 import {
@@ -1153,6 +1153,17 @@ export class RuntimeSession {
         else {
           try {
             answer = JSON.parse(raw.replace(/^\uFEFF/, ''));
+            const schemaPath = `challenge/${id}-submit.schema.json`;
+            const delivered = this.readMaterial(id)?.files?.[schemaPath];
+            const schemaRaw = delivered ?? await G.fileAt(cwd, sha, `${folder}/${schemaPath}`);
+            if (schemaRaw != null) {
+              try {
+                const schema = typeof schemaRaw === 'string' ? JSON.parse(schemaRaw) : schemaRaw;
+                errors.push(...validate(schema, answer).map((error) => `${schemaPath}: ${error}`));
+              } catch (e) {
+                errors.push(`${schemaPath}: cannot validate organizer schema: ${e.message}`);
+              }
+            }
           } catch (e) {
             errors.push(`${rel} is not valid JSON: ${e.message}`);
           }
@@ -1170,7 +1181,7 @@ export class RuntimeSession {
         const baseline = this.environmentRevision || this.state.envReady?.revision;
         const base = (baseline && await G.revParse(cwd, baseline)) || await G.revParse(cwd, `origin/${this.repository.branch}`);
         if (base) {
-          const changed = (await G.git(cwd, ['diff', '--name-only', `${base}...${sha}`])).stdout.split('\n').filter(Boolean);
+          const changed = (await G.git(cwd, ['diff', '--name-only', `${base}...${sha}`, '--', folder])).stdout.split('\n').filter(Boolean);
           const forbidden = changed.filter((f) => new RegExp(`^${folder}/(exam-info\\.json|env-require/|challenge/)`).test(f));
           if (forbidden.length) errors.push(`the commit changes files that must stay untouched: ${forbidden.slice(0, 4).join(', ')} (revert them: git checkout ${base.slice(0, 12)} -- <path>, then commit again)`);
           const junk = changed.filter((f) => /(^|\/)(\.env(\.|$)|node_modules\/|\.next\/|dist\/|coverage\/)/.test(f));

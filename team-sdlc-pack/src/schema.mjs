@@ -1,10 +1,11 @@
 // Minimal JSON-Schema validator for the keywords used by contracts/*.schema.json
 // (oneOf, $ref, type, const, enum, required, properties, additionalProperties:false,
-// minLength/maxLength/pattern, minimum/maximum, maxItems, items). Validation is driven by the
+// minLength/maxLength/pattern, minimum/maximum, minItems/maxItems, uniqueItems, prefixItems, boolean items, if/then/else). Validation is driven by the
 // contract file itself, so the pack and the organizer schema cannot drift apart.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CONTRACTS = path.join(HERE, '..', 'contracts');
@@ -28,7 +29,13 @@ function resolveRef(root, ref) {
 }
 
 export function validate(schema, value, root = schema, at = '$') {
+  if (schema === true) return [];
+  if (schema === false) return [`${at}: not allowed`];
   const errs = [];
+  if (schema.if) {
+    const branch = validate(schema.if, value, root, at).length === 0 ? schema.then : schema.else;
+    if (branch !== undefined) errs.push(...validate(branch, value, root, at));
+  }
   if (schema.$ref) return validate(resolveRef(root, schema.$ref), value, root, at);
   if (schema.oneOf) {
     const results = schema.oneOf.map((s) => validate(s, value, root, at));
@@ -57,10 +64,15 @@ export function validate(schema, value, root = schema, at = '$') {
     if (schema.maximum != null && value > schema.maximum) errs.push(`${at}: above ${schema.maximum}`);
   }
   if (Array.isArray(value)) {
+    if (schema.minItems != null && value.length < schema.minItems) errs.push(`${at}: fewer than ${schema.minItems} items`);
     if (schema.maxItems != null && value.length > schema.maxItems) errs.push(`${at}: more than ${schema.maxItems} items`);
-    if (schema.items) value.forEach((v, i) => errs.push(...validate(schema.items, v, root, `${at}[${i}]`)));
+    if (schema.uniqueItems && value.some((v, i) => value.slice(0, i).some((other) => isDeepStrictEqual(v, other)))) errs.push(`${at}: items must be unique`);
+    value.forEach((v, i) => {
+      const itemSchema = i < (schema.prefixItems?.length || 0) ? schema.prefixItems[i] : schema.items;
+      if (itemSchema !== undefined) errs.push(...validate(itemSchema, v, root, `${at}[${i}]`));
+    });
   }
-  if (typeOk('object', value) && (schema.properties || schema.required)) {
+  if (typeOk('object', value) && (schema.properties || schema.required || schema.additionalProperties === false)) {
     for (const k of schema.required || []) if (!(k in value)) errs.push(`${at}.${k}: required`);
     for (const [k, v] of Object.entries(value)) {
       if (schema.properties?.[k]) errs.push(...validate(schema.properties[k], v, root, `${at}.${k}`));

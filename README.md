@@ -1,4 +1,4 @@
-# Master the Machine Kit3 — 2.1.0
+# Master the Machine Kit3 — 2.1.1
 
 Team pack **Codex**, protocol 4, cho MTM Player. Nhánh `codex/kit3-portal-recovery` chứa bản Kit3 để đội so sánh với `main`.
 
@@ -24,7 +24,7 @@ node .\team-sdlc-pack\scripts\install.mjs --team-workspace "D:\mtm\BAK-Kit3"
 node .\team-sdlc-pack\scripts\check-distribution.mjs --team-workspace "D:\mtm\BAK-Kit3"
 ```
 
-Chỉ tiếp tục khi checker báo **READY**. Trên MTM Player chọn provider **Codex** và load đúng workspace vừa cài. Team identity trong pack là `[FHM] Bá Khí`; metadata package/info/runtime cùng phiên bản `2.1.0`.
+Chỉ tiếp tục khi checker báo **READY**. Trên MTM Player chọn provider **Codex** và load đúng workspace vừa cài. Team identity trong pack là `[FHM] Bá Khí`; metadata package/info/runtime cùng phiên bản `2.1.1`.
 
 Initialize trên Player chỉ tạo round local. Để tập lại cần mã trận mới hoặc Re-match phía BTC.
 
@@ -48,6 +48,13 @@ Repo chỉ chứa runtime Codex, tài liệu và fixture giả. Không đưa cre
 ## Windows contest machine
 
 Use MTM Player **0.9.35**. Install into a fresh workspace using the Node command above (or `team-sdlc-pack/install.ps1`), then run the checker and require **READY**. In Player Init, select Codex, set the Codex CLI path to the installed **codex.exe** (absolute path), and choose the match-authorized model in Init. Keep previous match workspaces separate.
+
+## Changelog — 2.1.1
+
+- Token reduction for subagents. In a Windows practice run of 2.1.0 (1000/1000), the match used ~25.7M input tokens: main agent 13.3M, three subagent sessions ~10M, approval guardian 2.5M. Each subagent began with ~67-70k tokens of context because `spawn_agent` defaults to `fork_turns: "all"` and copies the whole parent conversation.
+- Skills now spawn every subagent with `fork_turns: "none"` and a self-contained brief (IDs, absolute paths, checklist path, diff/test commands, MVS names, evidence paths, time box); long material is written to `.mtm-notes/` and passed as paths.
+- Worker, quality-checker and scout profiles forbid nested `spawn_agent` and read the files named in their brief.
+- When to review or parallelize is unchanged. Not yet measured in a live match.
 
 ## Changelog — 2.1.0
 

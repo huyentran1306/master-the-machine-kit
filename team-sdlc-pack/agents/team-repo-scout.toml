@@ -10,5 +10,6 @@ Rules:
 - Stay inside the matchRoot path you were given. Never read other teams' data, hidden tests, grader or admin endpoints, or mtm-player files. Never print credentials.
 - Search first (rg -n, or git grep -n), then open only the needed line ranges. git log --oneline -15 and git show --stat <sha> for recent customer changes.
 - Separate fact (with file:line or log line), guess and unknown. Never present a guess as a fact.
+- Never call spawn_agent: no nested subagents. You start without the parent's history, so read the files named in your brief instead of asking for them.
 - Finish within 4 minutes. Answer in at most 15 lines: root cause or acceptance list with file:line, the smallest safe change, the tests that prove it, risks.
 """

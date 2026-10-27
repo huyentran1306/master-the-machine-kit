@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "backlogId": "TASK-02",
+  "status": "NOT_STARTED",
+  "evidenceFiles": [],
+  "testResults": [
+    {
+      "id": "TASK-02-TC-01",
+      "result": "NOT_RUN",
+      "evidence": []
+    },
+    {
+      "id": "TASK-02-TC-02",
+      "result": "NOT_RUN",
+      "evidence": []
+    },
+    {
+      "id": "TASK-02-TC-03",
+      "result": "NOT_RUN",
+      "evidence": []
+    },
+    {
+      "id": "TASK-02-TC-04",
+      "result": "NOT_RUN",
+      "evidence": []
+    },
+    {
+      "id": "TASK-02-TC-05",
+      "result": "NOT_RUN",
+      "evidence": []
+    }
+  ],
+  "engineeringRecord": {
+    "analysis": "",
+    "changes": [],
+    "tests": [],
+    "risks": [],
+    "aiCollaboration": ""
+  }
+}

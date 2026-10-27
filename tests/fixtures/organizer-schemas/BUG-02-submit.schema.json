@@ -1,0 +1,260 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "MTM-26-EAC440/BUG-02-submit.schema.json",
+  "title": "BUG-02 submission",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "backlogId",
+    "status",
+    "evidenceFiles",
+    "testResults",
+    "engineeringRecord"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "backlogId": {
+      "const": "BUG-02"
+    },
+    "status": {
+      "description": "Overall result when you submit: DONE (all requirements met), PARTIAL (some met), BLOCKED (could not be done; explain in engineeringRecord).",
+      "enum": [
+        "DONE",
+        "PARTIAL",
+        "BLOCKED"
+      ]
+    },
+    "evidenceFiles": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/evidencePath"
+      }
+    },
+    "testResults": {
+      "description": "Exactly one row per test case, in this order: BUG-02-TC-01, BUG-02-TC-02, BUG-02-TC-03, BUG-02-TC-04.",
+      "type": "array",
+      "prefixItems": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "result",
+            "evidence"
+          ],
+          "properties": {
+            "id": {
+              "const": "BUG-02-TC-01"
+            },
+            "result": {
+              "$ref": "#/$defs/result"
+            },
+            "evidence": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/evidencePath"
+              }
+            },
+            "note": {
+              "type": "string"
+            }
+          },
+          "if": {
+            "properties": {
+              "result": {
+                "const": "PASS"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "evidence": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "result",
+            "evidence"
+          ],
+          "properties": {
+            "id": {
+              "const": "BUG-02-TC-02"
+            },
+            "result": {
+              "$ref": "#/$defs/result"
+            },
+            "evidence": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/evidencePath"
+              }
+            },
+            "note": {
+              "type": "string"
+            }
+          },
+          "if": {
+            "properties": {
+              "result": {
+                "const": "PASS"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "evidence": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "result",
+            "evidence"
+          ],
+          "properties": {
+            "id": {
+              "const": "BUG-02-TC-03"
+            },
+            "result": {
+              "$ref": "#/$defs/result"
+            },
+            "evidence": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/evidencePath"
+              }
+            },
+            "note": {
+              "type": "string"
+            }
+          },
+          "if": {
+            "properties": {
+              "result": {
+                "const": "PASS"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "evidence": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "result",
+            "evidence"
+          ],
+          "properties": {
+            "id": {
+              "const": "BUG-02-TC-04"
+            },
+            "result": {
+              "$ref": "#/$defs/result"
+            },
+            "evidence": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/evidencePath"
+              }
+            },
+            "note": {
+              "type": "string"
+            }
+          },
+          "if": {
+            "properties": {
+              "result": {
+                "const": "PASS"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "evidence": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ],
+      "items": false
+    },
+    "engineeringRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "analysis",
+        "changes",
+        "tests",
+        "risks",
+        "aiCollaboration"
+      ],
+      "properties": {
+        "analysis": {
+          "type": "string"
+        },
+        "changes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tests": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "risks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "aiCollaboration": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "evidencePath": {
+      "description": "Path relative to answers/<backlogId>/, directly inside evidence/.",
+      "type": "string",
+      "pattern": "^evidence/[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "result": {
+      "enum": [
+        "PASS",
+        "FAIL",
+        "NOT_RUN"
+      ]
+    }
+  }
+}

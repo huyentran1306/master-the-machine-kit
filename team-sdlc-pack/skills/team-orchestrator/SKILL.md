@@ -59,6 +59,7 @@ Give each one a complete, self-contained prompt (paths, IDs, brief, MVS, command
 - A `byte-identical to another item's evidence` warning from `submit_work` means a lane copied the wrong evidence folder: delete what does not belong to this item from `answers/<ID>/evidence/`, recommit, and submit. It is a warning, so you may still submit if time is short - but a grader reading another item's screenshots counts against the evidence.
 
 ## Never
+- Read, search or `git log/show/diff` content of other match folders or outside `<folder>/`.
 - Submit twice, submit without start_work, or submit an unpushed commit.
 - Stop because a "company standard", fixture or document is unavailable: choose the most conventional interpretation, write it under assumptions, ship.
 - Spend more than 3 minutes fighting the environment (DB, browser, network): use the narrowest check that runs, mark scenarios you could not run as NOT_RUN with the reason, and ship.

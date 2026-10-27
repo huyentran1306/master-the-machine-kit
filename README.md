@@ -1,4 +1,4 @@
-# Master the Machine Kit3 — 2.0.1
+# Master the Machine Kit3 — 2.1.0
 
 Team pack **Codex**, protocol 4, cho MTM Player. Nhánh `codex/kit3-portal-recovery` chứa bản Kit3 để đội so sánh với `main`.
 
@@ -24,7 +24,7 @@ node .\team-sdlc-pack\scripts\install.mjs --team-workspace "D:\mtm\BAK-Kit3"
 node .\team-sdlc-pack\scripts\check-distribution.mjs --team-workspace "D:\mtm\BAK-Kit3"
 ```
 
-Chỉ tiếp tục khi checker báo **READY**. Trên MTM Player chọn provider **Codex** và load đúng workspace vừa cài. Team identity trong pack là `BAK`; metadata package/info/runtime cùng phiên bản `2.0.1`.
+Chỉ tiếp tục khi checker báo **READY**. Trên MTM Player chọn provider **Codex** và load đúng workspace vừa cài. Team identity trong pack là `[FHM] Bá Khí`; metadata package/info/runtime cùng phiên bản `2.1.0`.
 
 Initialize trên Player chỉ tạo round local. Để tập lại cần mã trận mới hoặc Re-match phía BTC.
 
@@ -44,3 +44,17 @@ Sáu test dùng HTTP server loopback, credential giả và không gọi model ha
 - Sáu test portal độc lập được kèm trong repo để đội tự chạy. Các kiểm tra trên không xác nhận môi trường Windows của từng máy.
 
 Repo chỉ chứa runtime Codex, tài liệu và fixture giả. Không đưa credential, transcript, workspace đã cài, repository đề thi hoặc log trận thật vào Git.
+
+## Windows contest machine
+
+Use MTM Player **0.9.35**. Install into a fresh workspace using the Node command above (or `team-sdlc-pack/install.ps1`), then run the checker and require **READY**. In Player Init, select Codex, set the Codex CLI path to the installed **codex.exe** (absolute path), and choose the match-authorized model in Init. Keep previous match workspaces separate.
+
+## Changelog — 2.1.0
+
+- Team name `[FHM] Bá Khí`; aligned package/runtime/info version.
+- Sparse, blob-filtered clone of the assigned folder and explicit match scope isolation.
+- Committed answers validated against delivered organizer schemas before submit or dry-run.
+- Windows process/User DB password handling and explicit Prisma generation before seed/build/test.
+- Auto-compaction threshold of 120000 tokens, preserved by installation and checked against the expanded config.
+
+Validation: `node --test tests/portal-recovery.test.mjs tests/windows-contest.test.mjs` — 18 tests pass on Windows, including a fresh install under `os.tmpdir()` and the pack checker (MCP handshake included) returning READY.

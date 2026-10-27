@@ -11,7 +11,7 @@ The clock started at reveal; rank is by the server's receivedAt of a PASSED subm
 2. Locate (aim 4 minutes). In parallel, spawn `team_repo_scout` with the symptom text and matchRoot ("find root cause, 15 lines, file:line") and keep searching yourself:
    - `rg -n` the symptom words, error codes, endpoints, UI labels, messages.
    - Logs: `logs/`, `*.log`, recon `logs` list; read stack traces to file:line.
-   - Recent customer changes cause most incidents: `git -C "<checkoutRoot>" log --oneline -15 -- "<folder>"`, then `git show --stat <sha>` and the suspicious diff. Commits named with backlog IDs are teams' work; others are the customer's.
+   - Recent customer changes cause most incidents: `git -C "<checkoutRoot>" log --oneline -15 -- "<folder>"`, then `git -C "<checkoutRoot>" show --stat <sha> -- "<folder>/"` and the suspicious diff scoped with `-- "<folder>/"`. Commits named with backlog IDs are teams' work; others are the customer's.
    - Keep `fact:` (file:line / log line), `guess:`, `unknown:` in notes. Never fix a guess.
 3. Reproduce with the smallest failing test next to existing tests (or a scripted request). No repro = no trusted fix.
 4. Fix the root cause with the smallest safe change, where it lives (all paths through that code). Keep any rule the faulty change added on purpose. No refactoring.

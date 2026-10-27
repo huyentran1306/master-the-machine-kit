@@ -16,8 +16,9 @@ Each stage: `report_progress` PREPARATION_STATUS `IN_PROGRESS` at the start, the
 Prompt/auth failure -> BLOCKED with blockerId `GIT_AUTHENTICATION_REQUIRED` (report_progress BLOCKER_OPENED), wait for operator approval through mtm-player, retry once, then BLOCKER_RESOLVED.
 
 ## 2. REPOSITORY
-- No checkout yet: `git clone --branch <branch> --single-branch "<repository.url>" "<checkoutRoot>"`
+- No checkout yet: `git clone --filter=blob:none --sparse --branch <branch> --single-branch "<repository.url>" "<checkoutRoot>"`
 - Checkout exists (new round or resume): `git -C "<checkoutRoot>" fetch origin <branch>`, then if `git -C "<checkoutRoot>" status --short` is not empty: `git -C "<checkoutRoot>" stash push -u -m "previous-round"`, then `git -C "<checkoutRoot>" checkout -B <branch> origin/<branch>`.
+- After either flow: `git -C "<checkoutRoot>" sparse-checkout set <folder>` to select only the assigned match folder. Keep full commit history (no shallow clone) for ancestry checks; do not inspect other match folders.
 - Verify: `<matchRoot>` exists; `git -C "<checkoutRoot>" rev-parse HEAD` equals `git -C "<checkoutRoot>" rev-parse origin/<branch>`.
 - If `git config user.name` / `user.email` are empty in the checkout, set them locally only: `git -C "<checkoutRoot>" config user.name "<teamId> DPT"` and `user.email "<teamId>@dpt.local"`.
 - `git -C "<checkoutRoot>" config core.longpaths true` (Windows).
@@ -29,11 +30,13 @@ Do not commit or push during preparation.
 Read `README.md` and `env-require/README.md` first: they state the real setup steps, ports and credentials policy. `recon_repo` returns `envelope`, `app` (install/build/test/typecheck commands) and `stackSkill`; if `stackSkill` is set, read `.agents/skills/<stackSkill>/SKILL.md` once.
 
 ## 3. ENVIRONMENT
+- Use `pwsh` on Windows. When `.env.example` has DB password placeholders, read `MTM_SOLOVA_DB_PASSWORD` from the process environment; if absent, use `[Environment]::GetEnvironmentVariable('MTM_SOLOVA_DB_PASSWORD','User')` in pwsh. If present, URL-encode it (e.g. `[Uri]::EscapeDataString`) and replace only the app-role password in `DATABASE_URL` and `TEST_DATABASE_URL`, preserving the documented role, host, port and database names. Never echo the password or resulting URLs; keep `.env` untracked (use a local Git exclude if necessary).
 - `recon_repo` -> envelope, app path, install/build/test/typecheck commands, env keys, DB/docker files.
 - **If `env-require/` exists, follow its README exactly** - it is the match's own setup contract:
   1. Check the toolchain it names (`node --version`, `pnpm --version`, `git --version`, DB client). Missing user-level tool: `corepack enable pnpm`. Never install system software (DB server, JDK, SDK, browsers) during the match: the operator does that before the clock; report ENVIRONMENT BLOCKED naming what is missing.
   2. `<app.path>/.env.example` -> `.env` (copy, fill the placeholders the README describes; secrets stay local, never committed). Keep host/port/database names exactly as documented.
   3. Dependencies: `pnpm install --frozen-lockfile` (or the recon install command) in the app path - or run the provided `env-require/prepare-source.ps1`.
+  3b. For a Prisma app, explicitly run `pnpm prisma generate` (or `pnpm exec prisma generate`) after install and before seed, build or tests, even if install appeared successful. Never edit source to work around an ungenerated Prisma client.
   4. Database, when the app needs one: apply migrations and seed as the README says (`pnpm exec prisma migrate deploy`, `pnpm db:seed`). The role/database are created by the operator with `db-setup.sql`; if that step is missing you cannot do it yourself - report BLOCKED.
   5. Verification: run the match's own doctor - `pwsh -NoProfile -File env-require/doctor.ps1` (the binary may be installed as `pwsh-preview`; try that name too. Add `-SourceDir ../<app.path>` when the app folder differs. Use forward slashes: this may be macOS or Linux, not only Windows). Only `Environment status: READY` counts, and a missing privilege or component it names is ENVIRONMENT BLOCKED with that exact line - never change tests or app code to work around an environment problem.
      **No PowerShell on the machine is NOT a blocker.** doctor.ps1 only checks; it sets nothing up. Verify the same things yourself - `git`, `node`, `pnpm` resolve; install/build/test commands run; the database answers on the `TEST_DATABASE_URL` connection - then report ENVIRONMENT COMPLETED with `doctor.ps1 not run: PowerShell unavailable` in the summary. Reporting BLOCKED over a missing checker costs the match for nothing.
@@ -41,6 +44,7 @@ Read `README.md` and `env-require/README.md` first: they state the real setup st
 - **Unfamiliar stack** (`recon_repo` -> `unknownStack: true`, or commands missing): read `.agents/skills/stack-unknown/SKILL.md` once. In short: the repository README, the CI workflow commands in `recon.ci`, the Makefile/scripts and the test runner config tell you the real install/build/test commands - use them verbatim, do not invent.
 
 ## 4. BUILD
+- For a Prisma app (including one without `env-require/`), ensure explicit `pnpm exec prisma generate` has succeeded after install before building or testing.
 - Run the build (or typecheck) and the unit test suite once (`pnpm build`, `pnpm typecheck`, `pnpm test`). Record in `<checkoutRoot>/.mtm-notes/baseline.md` (git-ignored by the helper): exact commands, duration, tests already failing (by name). Pre-existing test failures are normal (the backlog may be about them): BUILD is COMPLETED when the project builds/typechecks and the test runner runs.
 - A step that needs an unavailable service (DB, external API) is not a build failure: note it in baseline.md, use the narrowest check that runs.
 - COMPLETED summary example: "Build passed; 212 tests ran, 2 pre-existing failures recorded."

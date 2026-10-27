@@ -20,7 +20,7 @@ Write the chosen commands into `<checkoutRoot>/.mtm-notes/baseline.md`: install,
 - A step that needs a service you cannot start (DB, broker, external API): use the narrowest check that runs, record that scenario as NOT_RUN with the reason, and ship. Never spend more than 3 minutes fighting the environment.
 
 ## 3. Find the code for an item
-Search the user-visible strings first (`rg -n "<label or error code>"`), then the route/handler, then the service/repository layer, then the data model. Read only the ranges you need. For a regression, `git log --oneline -15` plus `git show --stat <sha>` on recent customer commits.
+Search the user-visible strings first (`rg -n "<label or error code>"`), then the route/handler, then the service/repository layer, then the data model. Read only the ranges you need. For a regression, `git -C "<checkoutRoot>" log --oneline -15 -- "<folder>/"` plus `git -C "<checkoutRoot>" show --stat <sha> -- "<folder>/"` on recent customer commits.
 
 ## 4. Match the project's conventions
 Copy the patterns already in the repo: error shape, validation layer, naming, logging, migrations (a schema change needs the project's own migration mechanism, committed with the code), i18n strings, and where config/version values live. Do not add a dependency, change the framework, or reformat files.

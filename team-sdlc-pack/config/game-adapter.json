@@ -25,7 +25,7 @@
   },
   "matchView": {
     "pagePathTemplate": "{matchPageUrl}/{matchId}",
-    "extraJsonPaths": [],
+    "extraJsonPaths": ["/api/v1/match/{matchId}"],
     "assignmentCheck": "block",
     "repoHostAliases": {},
     "mcpUrl": null

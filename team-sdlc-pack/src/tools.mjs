@@ -24,7 +24,7 @@ export const TOOLS = [
   },
   {
     name: 'wait_for_update',
-    description: 'Bounded serial polling of the match page (<= 55 s). Returns early on any change (new item, state/edit, match status). Use whenever nothing is actionable. Never end your turn instead of calling this while the match runs.',
+    description: 'Long-poll the match page. Returns the instant anything changes (new item, state/edit, match status), so call it with no timeoutMs and let it wait: a long wait costs nothing and each extra wake-up costs a full turn. Use whenever nothing is actionable. Never end your turn instead of calling this while the match runs.',
     inputSchema: obj({ timeoutMs: { type: 'integer', minimum: 1000, maximum: 55000 } }),
     handler: (s, a) => s.wait_for_update(a),
   },
@@ -43,7 +43,7 @@ export const TOOLS = [
   {
     name: 'submit_work',
     description: 'Submit ONE time per item. Preflight: started, open, full SHA pushed to the assigned branch, <folder>/answers/<ID>/submit.json and every "evidence/<file>" present IN THAT COMMIT, no root evidence folders, CR/BUG evidence. Sends the committed submit.json as answer (gitRevision field filled if the template has one) with a fixed clientSubmissionId/Idempotency-Key; retries the same body on timeout. Logs SUBMITTED only with the official receipt. Use dryRun to check first.',
-    inputSchema: obj({ backlogItemKey: key, gitRevision: { type: 'string', description: 'Full SHA of the pushed commit (default: HEAD of the checkout).' }, dryRun: { type: 'boolean' }, allowNoEvidence: { type: 'boolean', description: 'Only if the item really has no MVS evidence requirement.' } }, ['backlogItemKey']),
+    inputSchema: obj({ backlogItemKey: key, gitRevision: { type: 'string', description: 'Full SHA of the pushed commit (default: HEAD of the checkout).' }, dryRun: { type: 'boolean' }, allowNoEvidence: { type: 'boolean', description: 'Only if the item really has no MVS evidence requirement.' }, allowUntested: { type: 'boolean', description: 'Only if the item has no runnable test at all (pure UI tweak). Downgrades the test gate to a warning.' } }, ['backlogItemKey']),
     handler: (s, a) => s.submit_work(a),
   },
   {

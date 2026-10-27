@@ -7,6 +7,7 @@ export const PLANNER_DEFAULTS = {
   urgentMinutes: 12,
   wrapUpMinutes: 5,
   budgetFactor: 1.5,
+  stuckAfter: 3, // failing test runs on one item before the planner says to change approach
   typeOrder: { PI: 0, BUG: 1, TASK: 2, CR: 3 },
 };
 
@@ -112,6 +113,12 @@ export function alerts(items, now, endsAt, { current, paused, status } = {}, opt
       out.push(`!! PI ${it.id} revealed${ago} and not started: it is a race. Commit-or-stash current work and start it now (unless NEXT says finish-first).`);
     }
     if (!l.startedAt || paused) continue;
+    // Attempt-based, alongside the time boxes below: three failing runs on one item means the
+    // approach is wrong, and that can happen well inside the time budget.
+    if ((l.failedRuns || 0) >= (o.stuckAfter ?? 3)) {
+      const same = (l.sameFailure || 0) >= 2 ? ' (same failure each time)' : '';
+      out.push(`${it.id === current ? '!!' : 'note:'} STUCK ${it.id}: ${l.failedRuns} failing test runs${same}. Change approach or park it; do not patch a fourth time.`);
+    }
     const { left, by } = effectiveLeft(it, now, endsAt);
     const isCur = it.id === current;
     if (left != null && left <= o.wrapUpMinutes) {

@@ -1,16 +1,46 @@
-# master-the-machine-kit
+# Master the Machine Kit3 — 2.0.1
 
-Team pack thi Master the Machine (provider **Codex**), bản 1.0.0 theo technical guide 0.5.1.
-Bản này thay cho kit 0.3.x trước đây (lịch sử cũ vẫn còn trong Git).
+Team pack **Codex**, protocol 4, cho MTM Player. Nhánh `codex/kit3-portal-recovery` chứa bản Kit3 để đội so sánh với `main`.
 
-## Cấu trúc
+## Thay đổi chính
+
+- Sửa đăng nhập báo thành công nhầm: HTTP 200 với `Loading match…` chưa chứng minh đã đọc được dữ liệu trận.
+- POST đăng nhập gửi `Origin` và `Referer` cùng origin như client chính thức.
+- Khi HTML chưa chứa dữ liệu, helper đọc contestant view `/api/v1/match/{matchId}` bằng cookie của đội. Endpoint này được xác minh từ JavaScript public mà trang match tham chiếu; có thể cấu hình trong `matchView.extraJsonPaths`.
+- JSON trả 401/403 thì refresh thử đăng nhập lại tối đa một lần. Cookie/password/key vẫn chỉ nằm trong bộ nhớ helper.
+- Không phát `ENVIRONMENT_READY` hoặc `BACKLOG_SYNC COMPLETED` khi mới đọc được loading shell. Preparation cho phép metadata xác thực chưa có UUID; khi vào GAME cần UUID để Start Work/Submit.
+- Kế thừa cải tiến Kit2: checklist theo từng acceptance criterion, nhắc đổi hướng sau nhiều vòng test thất bại, và kiểm tra evidence chứa kết quả test trước khi submit.
+
+Chi tiết xử lý portal và cách kiểm chứng: [docs/kit3-portal-recovery.md](docs/kit3-portal-recovery.md).
+
+## Cài trên máy chạy Player
+
+Yêu cầu Node.js >= 20, Git và Codex CLI đã đăng nhập. Từ thư mục repo, dùng một workspace mới để giữ các lượt thi cũ.
+
+Ví dụ PowerShell trên Windows:
+
+```powershell
+node .\team-sdlc-pack\scripts\install.mjs --team-workspace "D:\mtm\BAK-Kit3"
+node .\team-sdlc-pack\scripts\check-distribution.mjs --team-workspace "D:\mtm\BAK-Kit3"
 ```
-team-sdlc-pack/   Team pack mtm-player load: profile agent, skill, MCP helper (Node built-ins), installer, checker
-docs/             mtm-kit-flow-va-giai-phap.html / .pdf: flow chi tiết trong trận + giải pháp cho các lỗi review
-```
-Hướng dẫn cài, đóng gói và các bước trong trận: xem `team-sdlc-pack/README.md`.
 
-## Ghi chú
-- Repo chỉ chứa bộ Codex. Bộ Claude Code được sinh tự động từ bộ này, và devkit (mock Game Master, player-sim, test) nằm ở máy phát triển, không đưa lên đây.
-- `team-sdlc-pack/team-pack-info.json` đang để placeholder (`YOUR_TEAM_ID`): điền mã đội và tên đội thật trước khi đóng gói.
-- Không commit credential, log trận thật hay tài liệu riêng của BTC.
+Chỉ tiếp tục khi checker báo **READY**. Trên MTM Player chọn provider **Codex** và load đúng workspace vừa cài. Team identity trong pack là `BAK`; metadata package/info/runtime cùng phiên bản `2.0.1`.
+
+Initialize trên Player chỉ tạo round local. Để tập lại cần mã trận mới hoặc Re-match phía BTC.
+
+## Chạy test hồi quy portal
+
+```sh
+node --test tests/portal-recovery.test.mjs
+```
+
+Sáu test dùng HTTP server loopback, credential giả và không gọi model hay hệ thống thi thật. Bao phủ loading shell, Origin/Referer, JSON view, cookie hết hạn, từ chối readiness/sync giả và việc UUID chỉ được công bố sau Start.
+
+## Kiểm chứng
+
+- Bản nguồn Kit3 đã qua toàn bộ **89 test** trong devkit nội bộ; devkit đầy đủ và đề giả lập không nằm trong repo phát hành này.
+- Sau cập nhật metadata `2.0.1`, 14 test portal/cài đặt/đóng gói của bản nguồn pass.
+- Installer/checker của pack và `inspect-runtime` của MTM Player 0.9.32 trả **READY** cho workspace mới trên macOS.
+- Sáu test portal độc lập được kèm trong repo để đội tự chạy. Các kiểm tra trên không xác nhận môi trường Windows của từng máy.
+
+Repo chỉ chứa runtime Codex, tài liệu và fixture giả. Không đưa credential, transcript, workspace đã cài, repository đề thi hoặc log trận thật vào Git.

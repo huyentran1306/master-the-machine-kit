@@ -411,6 +411,41 @@ export function parseMatchPage(html, { matchId, serverNow = Date.now() } = {}) {
   return { matchUuid, status, statusRaw, endsAt, remainingMs, items, pageText, structured, warnings, itemLinks, matchIdShown, assignment, mcpUrls, textAssignment: assignmentFromText(matchInfoText(pageText)) };
 }
 
+/** Read the contestant JSON view when the HTTP page is only a client-rendered shell.
+ * Paths come from the adapter, not from probing private endpoints. The public portal client uses
+ * /api/v1/match/<publicId>. Authentication and refresh must validate the same view.
+ */
+export async function loadMatchData(html, { url, matchId, matchUuid, extraJsonPaths = [], call, serverNow = Date.now(), requireUuid = true }) {
+  let parsed = parseMatchPage(html, { matchId, serverNow });
+  let authenticatedJson = false;
+  const readable = () => !!(parsed.matchIdShown && parsed.status && (parsed.matchUuid || (!requireUuid && authenticatedJson)));
+  const errors = [];
+  if (readable()) return { html, parsed, readable: true, authRejected: false, errors };
+  for (const template of extraJsonPaths) {
+    const target = new URL(template.replace('{matchId}', encodeURIComponent(matchId)).replace('{matchUuid}', matchUuid || ''), url).toString();
+    try {
+      const res = await call(target, { method: 'GET', headers: { accept: 'application/json', referer: url } });
+      if (res.status === 401 || res.status === 403) return { html, parsed, readable: false, authRejected: true, errors: [`match data HTTP ${res.status}`] };
+      if (res.status >= 400 || !res.json || typeof res.json !== 'object') {
+        errors.push(`match data HTTP ${res.status} without a usable JSON document`);
+        continue;
+      }
+      const code = res.json.match?.publicId || res.json.match?.code;
+      if (code && code !== matchId) {
+        errors.push('match data belongs to a different match');
+        continue;
+      }
+      html += `\n<script type="application/json">${JSON.stringify(res.json).replace(/</g, '\\u003c')}</script>`;
+      parsed = parseMatchPage(html, { matchId, serverNow });
+      authenticatedJson = !!(res.json.match && code === matchId);
+      if (readable()) return { html, parsed, readable: true, authRejected: false, errors };
+    } catch (e) {
+      errors.push(e.code || 'MATCH_DATA_REQUEST_FAILED');
+    }
+  }
+  return { html, parsed, readable: false, authRejected: false, errors };
+}
+
 /** True when the response looks like a login page rather than the match page. */
 export function looksLikeLogin(res) {
   if (res.status === 401 || res.status === 403) return true;
@@ -473,7 +508,12 @@ export async function login(ctx) {
     const reqInfo = { method: opts.method || 'GET', url };
     await log('REQUESTED', reqInfo);
     try {
-      const res = await request(url, { jar, allowedOrigins, ...opts });
+      // Match the portal's same-origin browser POSTs. The real login endpoint rejects a
+      // credentials POST without Origin/Referer; HTTP 403 must not silently fall back to a shell.
+      const headers = opts.method === 'POST'
+        ? { origin, referer: `${origin}/login`, ...opts.headers }
+        : opts.headers;
+      const res = await request(url, { jar, allowedOrigins, ...opts, headers });
       await log(res.status < 400 ? 'SUCCEEDED' : 'FAILED', reqInfo, res);
       return res;
     } catch (e) {
@@ -483,7 +523,14 @@ export async function login(ctx) {
   };
   const verify = async () => {
     const res = await call('LOGIN', ctx.matchUrl, { method: 'GET' });
-    return !looksLikeLogin(res) && res.status < 400;
+    if (looksLikeLogin(res) || res.status >= 400) return false;
+    const view = await loadMatchData(res.text, {
+      url: ctx.matchUrl, matchId: ctx.matchId || decodeURIComponent(new URL(ctx.matchUrl).pathname.split('/').filter(Boolean).at(-1)),
+      extraJsonPaths: adapter.matchView?.extraJsonPaths || ['/api/v1/match/{matchId}'],
+      requireUuid: false,
+      call: (url, opts) => call('LOGIN', url, opts),
+    });
+    return view.readable;
   };
   for (const strategy of [...new Set(order)]) {
     try {

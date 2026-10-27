@@ -7,7 +7,7 @@ import path from 'node:path';
 import { ProgressLog, scrubSummary, playerRuleErrors } from './progress.mjs';
 import { parseLifecycleText, validateDescriptor, publicDescriptor } from './lifecycle.mjs';
 import { CookieJar, request } from './http.mjs';
-import { login, parseMatchPage, looksLikeLogin, textBlockFor } from './portal.mjs';
+import { login, parseMatchPage, looksLikeLogin, textBlockFor, loadMatchData } from './portal.mjs';
 import { startWork, submit, operationUrl } from './game-api.mjs';
 import * as G from './git.mjs';
 import { materializeAnswer, answerPaths, countScenarios, checkAnswer } from './answers.mjs';
@@ -15,6 +15,7 @@ import { rank, alerts as plannerAlerts, diffItems, isSubmitted, isClosed, effect
 import { recon } from './recon.mjs';
 import { validateFinalResult } from './schema.mjs';
 import { McpHttpClient, resultText } from './mcp-http.mjs';
+import { buildChecklist, looksLikeTestOutput } from './checklist.mjs';
 import {
   oneLine, safeId, uuid, sleep, readJson, writeJson, loggableOrigin, loggablePath, originOf, redact, truncate, minutes, SHA_RE, ITEM_KEY_RE, sha256, isInside, nowIso, repoKey,
 } from './util.mjs';
@@ -25,8 +26,11 @@ const PLAYBOOK = { PI: 'backlog-pi', BUG: 'backlog-bug', CR: 'backlog-cr', TASK:
 
 export const DEFAULT_ADAPTER = {
   login: { strategy: 'auto', strategies: ['nextauth', 'form', 'json'] },
-  matchView: { pagePathTemplate: '{matchPageUrl}/{matchId}', assignmentCheck: 'block', repoHostAliases: {}, mcpUrl: null },
-  polling: { successMs: 5000, errorMs: 10000, backgroundMs: 20000, maxWaitMs: 55000 },
+  matchView: { pagePathTemplate: '{matchPageUrl}/{matchId}', extraJsonPaths: ['/api/v1/match/{matchId}'], assignmentCheck: 'block', repoHostAliases: {}, mcpUrl: null },
+  // maxWaitMs is a ceiling, not a sleep: wait_for_update returns the moment the page changes,
+  // so a longer ceiling costs no reaction time and removes agent turns. Each idle turn re-reads
+  // the whole conversation, which is where this match's tokens actually go.
+  polling: { successMs: 5000, errorMs: 10000, backgroundMs: 20000, maxWaitMs: 170000 },
   submit: { acceptedStatuses: ['ACCEPTED', 'RECEIVED'], retryBudgetMs: 90000 },
   planner: {},
   parallel: { maxWorkers: 2 },
@@ -39,6 +43,9 @@ function deepMerge(a, b) {
 }
 
 export class RuntimeSession {
+  /** Failing test rounds on one item before the helper tells the agent to change approach. */
+  static STUCK_AFTER = 3;
+
   constructor({ teamWorkspace, packRoot, adapter, identity } = {}) {
     this.teamWorkspace = teamWorkspace || null;
     this.packRoot = packRoot;
@@ -139,6 +146,7 @@ export class RuntimeSession {
     if (st.recon) {
       this.stackSkill = st.recon.stackSkill || null;
       this.appPath = st.recon.appPath || null;
+      this.commands = st.recon.commands || {};
     }
     if (st.matchUuid) this.match.uuid = st.matchUuid;
     for (const [id, v] of Object.entries(st.items || {})) {
@@ -364,6 +372,28 @@ export class RuntimeSession {
       if (this.phase === 'IDLE') this.phase = 'PREPARATION';
       this.loadState({ fresh: false });
       this.reconcileFromLog();
+      const pending = this.pendingStart;
+      if (pending) {
+        // A START/RESUME input arrived before the login was restored. Replay it now so the
+        // caller gets the backlog view from this one call. Never fail the restore because
+        // the replay failed: the account is back either way, and the agent can retry.
+        this.pendingStart = null;
+        try {
+          const resumed = await this.applyDescriptor(pending.d);
+          return {
+            ...resumed,
+            message: `Login restored in helper memory, and ${pending.type === 'RESUME_GAME' ? 'the round was resumed' : 'the round was started'} from the input you had already sent. ${resumed.message || ''}`.trim(),
+            resupplied: true,
+          };
+        } catch (e) {
+          return {
+            message: 'Preparation already completed for this request: account restored in helper memory (no new round).',
+            resupplied: true,
+            replayError: String(e && e.message ? e.message : e),
+            next: 'The login is restored. Call configure_session again with the START_GAME_V4 input to enter the round.',
+          };
+        }
+      }
       return { message: 'Preparation already completed for this request: account restored in helper memory (no new round).', resupplied: true };
     }
     if (type === 'PREPARE_GAME' || type === 'RESUME_PREPARATION') {
@@ -401,9 +431,13 @@ export class RuntimeSession {
       if (!this.account) {
         // START_GAME carries no account: the helper process restarted since preparation.
         this.saveState();
+        // Remember what we were asked to do. Feeding the PREPARE input back is enough:
+        // the restore path below replays this START for us, so the agent spends one turn
+        // on recovery instead of three, and reaches the first start_work sooner.
+        this.pendingStart = { type, d };
         return {
           ...out, ok: false, error: 'NEED_PREPARE_INPUT',
-          next: 'The helper restarted and lost the match login. Call configure_session ONCE with raw = the PREPARE_GAME_V2 input from earlier in this conversation (marker + JSON line) followed by this START_GAME_V4 input. It restores the login without starting a new round.',
+          next: 'The helper restarted and lost the match login. Call configure_session ONCE with raw = the PREPARE_GAME_V2 input from earlier in this conversation (marker + JSON line). That restores the login and resumes this round in the same call: the result carries the backlog view, so do not start a new round and do not call refresh_match or session_status afterwards.',
         };
       }
       if (!samePrep) out.note = 'Account from an earlier input is reused.';
@@ -416,11 +450,16 @@ export class RuntimeSession {
           this.syncDone = true;
           this.event({ type: 'GAME_START_STATUS', stage: 'BACKLOG_SYNC', status: 'COMPLETED', summary: oneLine(`Retrieved the current backlog: ${this.items.size} item(s).`) });
         } else {
+          this.syncDone = false;
           this.event({ type: 'GAME_START_STATUS', stage: 'BACKLOG_SYNC', status: 'FAILED', summary: oneLine(`Backlog sync failed: ${r.error}`) });
         }
         out.sync = r.ok ? 'COMPLETED' : `FAILED: ${r.error}`;
       }
       out.view = this.view({ includeEvents: true });
+      // The view is here. Two extra round trips before the first start_work cost real match
+      // minutes, so make it explicit rather than leaving the agent to be cautious.
+      out.next = `The backlog view is in this result; it is current. Go straight to start_work on NEXT - do not call refresh_match or session_status first. ${this.nextHint()}`;
+      if (out.sync?.startsWith('FAILED:')) out.next = 'Backlog data was NOT synchronized. Call login_match once to restore the contestant session, then refresh_match. Do not mark BACKLOG_SYNC complete or interpret the loading shell as an empty backlog.';
       if (resume) out.recovery = await this.recoveryReport();
       this.saveState();
       return out;
@@ -453,7 +492,7 @@ export class RuntimeSession {
     const origin = new URL(this.matchPageUrl).origin;
     this.jar.clear();
     const res = await login({
-      origin, matchUrl: this.matchUrl(), username: this.account.username, password: this.account.password, jar: this.jar,
+      origin, matchUrl: this.matchUrl(), matchId: this.matchId, username: this.account.username, password: this.account.password, jar: this.jar,
       allowedOrigins: this.allowedMatchOrigins, adapter: this.adapter, preferred: this.state.loginPreferred, log: this.apiLogger('LOGIN'),
     });
     this.state.loginPreferred = res;
@@ -715,21 +754,33 @@ export class RuntimeSession {
         this.lastPollError = `HTTP ${res.status}`;
         return { ok: false, error: `match page HTTP ${res.status}` };
       }
-      let html = res.text;
-      for (const tpl of this.adapter.matchView.extraJsonPaths || []) {
-        // Practice-day escape hatch: JSON endpoints the page itself uses (configure in game-adapter.json).
-        const jurl = new URL(tpl.replace('{matchId}', encodeURIComponent(this.matchId)).replace('{matchUuid}', this.match.uuid || ''), url).toString();
-        const jreq = { method: 'GET', url: jurl };
-        await log('REQUESTED', jreq);
-        try {
-          const jr = await request(jurl, { jar: this.jar, allowedOrigins: this.allowedMatchOrigins, headers: { accept: 'application/json' } });
-          await log(jr.status < 400 ? 'SUCCEEDED' : 'FAILED', jreq, jr);
-          if (jr.status < 400 && jr.json !== undefined) html += `\n<script type="application/json">${jr.text.replace(/</g, '\\u003c')}</script>`;
-        } catch (e) {
-          await log('FAILED', jreq, null, e);
+      const view = await loadMatchData(res.text, {
+        url, matchId: this.matchId, matchUuid: this.match.uuid,
+        requireUuid: this.phase === 'GAME',
+        extraJsonPaths: this.adapter.matchView.extraJsonPaths || [], serverNow: this.now(),
+        call: async (jurl, opts) => {
+          const req = { method: 'GET', url: jurl };
+          await log('REQUESTED', req);
+          try {
+            const result = await request(jurl, { jar: this.jar, allowedOrigins: this.allowedMatchOrigins, ...opts });
+            await log(result.status < 400 ? 'SUCCEEDED' : 'FAILED', req, result);
+            return result;
+          } catch (e) { await log('FAILED', req, null, e);throw e; }
+        },
+      });
+      const parsed = view.parsed;
+      this.portalReady = view.readable;
+      if (!view.readable) {
+        this.rememberPage(parsed);
+        this.lastParse = { structured: parsed.structured, warnings: parsed.warnings };
+        if (view.authRejected) {
+          this.loggedIn = false;
+          if (!noRelogin && attempt === 0) continue;
         }
+        this.lastPollError = view.authRejected ? 'MATCH_DATA_UNAUTHORIZED' : 'MATCH_DATA_UNAVAILABLE';
+        this.openBlocker('MATCH_PORTAL_LOADING', null, 'Match data is unavailable: the HTML is only a loading shell, or the contestant JSON view was rejected. Readiness and backlog sync are not verified.');
+        return { ok: false, error: this.lastPollError, details: view.errors, next: 'Retry login_match once. If preparation still cannot read match status and UUID, report BLOCKED before the clock starts; do not mark BACKLOG_SYNC complete.' };
       }
-      const parsed = parseMatchPage(html, { matchId: this.matchId, serverNow: this.now() });
       this.itemLinks = { ...(this.itemLinks || {}), ...parsed.itemLinks };
       const hash = sha256(parsed.pageText).slice(0, 16);
       this.pageChanged = hash !== this.match.pageTextHash;
@@ -749,9 +800,10 @@ export class RuntimeSession {
       if (!routine || sinceLogged >= 60000 || evs.length) this.lastLoggedRefreshAt = Date.now();
       if (this.phase === 'GAME') this.emitDiscovered();
       if (evs.length) this.pendingEvents.push(...evs.map((e) => e.text));
-      if (!this.match.uuid) this.openBlocker('MATCH_UUID_UNKNOWN', null, 'Match UUID for Start/Submit not found on the match page.');
+      if (!this.match.uuid && this.phase === 'GAME') this.openBlocker('MATCH_UUID_UNKNOWN', null, 'Match UUID for Start/Submit not found on the match page.');
       else this.resolveBlocker('MATCH_UUID_UNKNOWN', 'Match UUID found.');
       this.resolveBlocker('MATCH_LOGIN_FAILED', 'Match page readable again.');
+      this.resolveBlocker('MATCH_PORTAL_LOADING', 'Authenticated match status and UUID verified.');
       this.saveState();
       return { ok: true, events: evs };
     }
@@ -812,12 +864,13 @@ export class RuntimeSession {
     if (this.lastPollError) out.pollError = this.lastPollError;
     if (this.lastParse && !this.lastParse.structured) out.parse = `page structure unknown (${this.lastParse.warnings.join('; ')}): read pageText; pass matchUuid to start_work if needed`;
     if (pageText && this.lastPageText) out.pageText = truncate(this.lastPageText, 12000);
-    if (this.phase === 'GAME' && this.match.status !== 'FINISHED') out.keepAlive = 'Match running: do not end your turn. Act on NEXT or call wait_for_update.';
+    if (this.phase === 'GAME' && this.match.status !== 'FINISHED') out.keepAlive = 'Match running: do not end your turn. Act on NEXT, or call wait_for_update with no timeoutMs - it returns the instant anything changes, so waiting long is free and waking up often is not.';
     return out;
   }
 
-  async wait_for_update({ timeoutMs = 55000 } = {}) {
-    const max = Math.min(Number(timeoutMs) || 55000, this.adapter.polling.maxWaitMs || 55000);
+  async wait_for_update({ timeoutMs } = {}) {
+    const ceiling = this.adapter.polling.maxWaitMs || 55000;
+    const max = Math.min(Number(timeoutMs) || ceiling, ceiling);
     const until = Date.now() + max;
     let lastErr = null;
     if (this.pendingEvents.length) return this.clean({ ok: true, changed: true, view: this.view({ includeEvents: true }) });
@@ -964,6 +1017,21 @@ export class RuntimeSession {
     let answer = null;
     if (root && fs.existsSync(root)) answer = materializeAnswer(root, id, material.submitTemplate);
     const required = countScenarios(material.minimumVerificationScenarios);
+    // The checklist goes out with the material and is also written beside the answer, so it survives
+    // an agent restart or a context reset mid-item (see src/checklist.mjs for why this exists).
+    const checklist = buildChecklist({
+      id, type: it.type, startInstruction: material.startInstruction, description: it.description || '',
+      minimumVerificationScenarios: material.minimumVerificationScenarios, requiredScenarios: required,
+      commands: this.commands || {}, appPath: this.appPath || null,
+    });
+    let checklistFile = null;
+    if (answer?.evidenceDir) {
+      try {
+        const target = path.join(path.dirname(answer.submitJson), 'checklist.md');
+        if (!fs.existsSync(target)) fs.writeFileSync(target, checklist.text);
+        checklistFile = target;
+      } catch { /* the checklist is also in this result; a write failure must not block the item */ }
+    }
     if (it.local.reported !== 'IN_PROGRESS' && it.local.reported !== 'SUBMITTED') {
       this.backlogStatus(id, 'IN_PROGRESS', 'Start Work accepted; implementation started.');
       this.event({ type: 'BACKLOG_TESTS', backlogId: id, status: 'NOT_RUN', required, executed: 0, passed: 0, failed: 0, skipped: 0, summary: 'Tests have not run.' });
@@ -1010,7 +1078,11 @@ export class RuntimeSession {
       stackSkill: this.stackSkill ? `.agents/skills/${this.stackSkill}/SKILL.md` : null,
       appPath: this.appPath || null,
       notesFile,
-      next: 'Fill the contract (outcome, MVS + hidden scenarios, scope), then implement and test. Report BACKLOG_TESTS RUNNING/PASSED/FAILED with real counts.',
+      checklist: checklist.steps,
+      acceptanceCriteria: checklist.criteria,
+      requiredScenarioNames: checklist.scenarios,
+      checklistFile,
+      next: 'Work the checklist in order. Fill the contract (outcome, MVS + hidden scenarios, scope), implement, test, then point every acceptance criterion at the evidence that proves it. Report BACKLOG_TESTS RUNNING/PASSED/FAILED with real counts.',
       alerts: this.view().alerts,
     });
   }
@@ -1111,8 +1183,36 @@ export class RuntimeSession {
         if (dirty?.length) warnings.push(`uncommitted changes under answers/${id}: they will NOT be submitted (${dirty.slice(0, 3).join(', ')})`);
       }
     }
+    // Verification gate. Across agentic coding work the bottleneck is not writing the change, it is
+    // proving it; an item submitted without the suite having run is the single cheapest way to lose
+    // points. So "tests ran and passed" is a refusal, not a warning. opts.allowUntested is the escape
+    // hatch for an item that genuinely has no runnable test (a pure UI tweak): it downgrades to a
+    // warning and the reason is recorded in the log.
     const tests = this.lastTests?.[id];
-    if (it && ['CR', 'BUG'].includes(it.type) && tests?.status !== 'PASSED') warnings.push(`last BACKLOG_TESTS for ${id} is ${tests?.status || 'not reported'}: report real results before submitting`);
+    const testErrors = [];
+    if (it && SHA_RE.test(sha)) {
+      if (!tests || tests.status === 'NOT_RUN') testErrors.push(`no test run reported for ${id}: run the suite and report BACKLOG_TESTS before submitting`);
+      else if (tests.status === 'RUNNING') testErrors.push(`the last BACKLOG_TESTS for ${id} is still RUNNING: report the final counts first`);
+      else if (tests.status === 'FAILED') testErrors.push(`the last BACKLOG_TESTS for ${id} is FAILED (${tests.failed} failing): fix it or submit a different item`);
+      else if (tests.executed === 0) testErrors.push(`BACKLOG_TESTS for ${id} reports 0 tests executed: that is not a test run`);
+      const folder = this.repository.folder;
+      // Any referenced evidence file may carry the run output; judge by content, not by file name.
+      let found = null;
+      let placeholder = null;
+      for (const ref of (check.evidenceRefs || []).slice(0, 8)) {
+        const body = await G.fileAt(cwd, sha, `${folder}/answers/${id}/${ref}`);
+        if (body == null) continue;
+        if (/\bNOT_RUN\b/.test(body)) placeholder = ref;
+        if (looksLikeTestOutput(body)) { found = ref; break; }
+      }
+      if (!found) {
+        testErrors.push(placeholder
+          ? `${placeholder} still says NOT_RUN and no other evidence holds a test run: paste the real output (evidence/test.log) and reference it from submit.json`
+          : 'no evidence file holds the output of a test run: save the full command output as evidence/test.log and reference it from submit.json');
+      }
+    }
+    if (opts.allowUntested) warnings.push(...testErrors.map((e) => `allowUntested: ${e}`));
+    else errors.push(...testErrors);
     // Parallel lanes have put one item's evidence into another item's folder before (a worker, or a
     // worktree integration, copying the whole evidence tree). The grader then reads a dependency
     // task illustrated with CSV screenshots. This is a warning, never a refusal: a wrong refusal
@@ -1139,10 +1239,10 @@ export class RuntimeSession {
         }
       }
     } catch { /* an evidence cross-check must never block a submission */ }
-    return { errors, warnings, sha, answer, evidenceRefs: check.evidenceRefs };
+    return { errors, warnings, sha, answer, evidenceRefs: check.evidenceRefs, testStatus: tests?.status || 'NOT_REPORTED' };
   }
 
-  async submit_work({ backlogItemKey, gitRevision, dryRun = false, allowNoEvidence = false } = {}) {
+  async submit_work({ backlogItemKey, gitRevision, dryRun = false, allowNoEvidence = false, allowUntested = false } = {}) {
     const id = String(backlogItemKey || '').trim();
     if (!this.bearer) return { ok: false, error: 'NO_BEARER' };
     if (!this.match.uuid) return { ok: false, error: 'MATCH_UUID_UNKNOWN' };
@@ -1165,7 +1265,7 @@ export class RuntimeSession {
       body = rec.body;
       note = `replaying the unresolved submission ${rec.body.clientSubmissionId} with the identical body (sha ${rec.body.gitRevision.slice(0, 12)})`;
     } else {
-      const pf = await this.preflight(id, gitRevision, { allowNoEvidence });
+      const pf = await this.preflight(id, gitRevision, { allowNoEvidence, allowUntested });
       if (pf.errors.length || dryRun) {
         return this.clean({ ok: !pf.errors.length, dryRun, refused: pf.errors.length > 0, errors: pf.errors, warnings: pf.warnings, gitRevision: pf.sha, evidenceRefs: pf.evidenceRefs, next: pf.errors.length ? 'Fix every error, commit, push, then call submit_work again. Nothing was sent.' : 'Preflight passed: call submit_work without dryRun.' });
       }
@@ -1254,14 +1354,53 @@ export class RuntimeSession {
       if (ev.type === 'PREPARATION_STATUS' && ev.stage === 'REPOSITORY' && ev.status === 'COMPLETED' && this.checkoutRoot && fs.existsSync(path.join(this.checkoutRoot, '.git'))) {
         G.ensureExcluded(this.checkoutRoot, '/.mtm-notes/');
       }
-      if (ev.type === 'BACKLOG_TESTS') this.lastTests = { ...(this.lastTests || {}), [ev.backlogId]: ev };
+      if (ev.type === 'BACKLOG_TESTS') {
+        this.lastTests = { ...(this.lastTests || {}), [ev.backlogId]: ev };
+        this.noteTestAttempt(ev);
+      }
       if (ev.type === 'BACKLOG_STATUS' && this.items.get(ev.backlogId)) this.items.get(ev.backlogId).local.reported = ev.status;
       if (ev.type === 'BLOCKER_OPENED') this.blockers.set(ev.blockerId, { backlogId: ev.backlogId, summary: ev.summary });
       if (ev.type === 'BLOCKER_RESOLVED') this.blockers.delete(ev.blockerId);
-      return { ok: true, queued: r.queued, alerts: this.view().alerts };
+      const stuck = ev.type === 'BACKLOG_TESTS' ? this.stuckAdvice(ev.backlogId) : null;
+      return this.clean({ ok: true, queued: r.queued, stuck, next: stuck || undefined, alerts: this.view().alerts });
     } catch (e) {
       return { ok: false, error: 'SCHEMA', message: e.message };
     }
+  }
+
+  /**
+   * Counts failing test rounds per item so a stuck agent is stopped by attempts, not only by the
+   * clock. An agent that has failed the same way three times is not converging: a 12-minute time box
+   * lets it burn the rest of the budget on the same wrong idea, while the item next to it is still
+   * untouched. After STUCK_AFTER failures the planner and every tool result say so, and the advice
+   * is to change approach or park the item — in a 40-minute match, parking a hard item early is
+   * usually worth more than finishing it late.
+   */
+  noteTestAttempt(ev) {
+    const it = this.items.get(ev.backlogId);
+    if (!it) return;
+    it.local ||= {};
+    if (ev.status === 'FAILED') {
+      it.local.failedRuns = (it.local.failedRuns || 0) + 1;
+      // A different failure count means something moved; the same count twice means it did not.
+      const sig = `${ev.failed}/${ev.executed}`;
+      it.local.sameFailure = sig === it.local.lastFailureSig ? (it.local.sameFailure || 1) + 1 : 1;
+      it.local.lastFailureSig = sig;
+    } else if (ev.status === 'PASSED') {
+      it.local.failedRuns = 0;
+      it.local.sameFailure = 0;
+      delete it.local.lastFailureSig;
+    }
+    this.saveState();
+  }
+
+  /** null, or an instruction to stop looping on this item. */
+  stuckAdvice(id) {
+    const it = this.items.get(id);
+    const failed = it?.local?.failedRuns || 0;
+    if (failed < RuntimeSession.STUCK_AFTER) return null;
+    const same = (it.local.sameFailure || 0) >= 2 ? ' The failure has not changed between runs, so the current approach is not converging.' : '';
+    return `${id} has failed its tests ${failed} times in a row.${same} Stop patching: re-read the acceptance criteria and the failing assertion, and either take a different approach or park this item (worktree park / move to the next item) and come back only if time is left.`;
   }
 
   async report_ready({ summary } = {}) {
@@ -1269,6 +1408,7 @@ export class RuntimeSession {
     const missing = ['GIT_AUTH', 'REPOSITORY', 'ENVIRONMENT', 'BUILD'].filter((s) => this.prep[s] !== 'COMPLETED');
     if (missing.length) return { ok: false, error: 'STAGES_NOT_COMPLETED', missing, message: 'Report each stage COMPLETED (report_progress PREPARATION_STATUS) only after real success.' };
     if (this.prep.MATCH_LOGIN !== 'COMPLETED') return { ok: false, error: 'LOGIN_NOT_VERIFIED', next: 'call login_match' };
+    if (!this.portalReady) return { ok: false, error: 'MATCH_DATA_UNAVAILABLE', next: 'Call login_match and verify match status and UUID before reporting readiness.' };
     const head = await G.revParse(this.checkoutRoot, 'HEAD');
     if (!head) return { ok: false, error: 'NO_CHECKOUT', message: `no Git checkout at ${this.checkoutRoot}` };
     G.ensureExcluded(this.checkoutRoot, '/.mtm-notes/');
@@ -1338,8 +1478,10 @@ export class RuntimeSession {
     const map = recon(this.matchRoot);
     this.stackSkill = map.stackSkill || null;
     this.appPath = map.app?.path && map.app.path !== '.' ? path.join(this.matchRoot, map.app.path) : this.matchRoot;
+    // Keep the commands: start_work names the real test command in each item's checklist.
+    this.commands = { test: map.app?.test || null, typecheck: map.app?.typecheck || null, build: map.app?.build || null, oneTest: map.app?.oneTest || null };
     if (this.stateDir) writeJson(path.join(this.stateDir, 'repo-map.json'), map);
-    this.state.recon = { stackSkill: this.stackSkill, appPath: this.appPath };
+    this.state.recon = { stackSkill: this.stackSkill, appPath: this.appPath, commands: this.commands };
     this.saveState();
     return { ok: true, map, next: map.stackSkill ? `Read .agents/skills/${map.stackSkill}/SKILL.md once; run app commands from ${this.appPath}.` : undefined };
   }

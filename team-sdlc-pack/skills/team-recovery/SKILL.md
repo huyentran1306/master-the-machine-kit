@@ -30,6 +30,7 @@ The helper opens blocker `BEARER_REJECTED`. Do not retry in a loop. Continue loc
 
 ## Submit outcomes
 - `UNCERTAIN`: change nothing; call `submit_work <ID>` again (same key + body). Repeat after `wait_for_update` if the network is down.
+- A tool timeout or no answer from `submit_work` counts as `UNCERTAIN`: do not change or recommit; call `submit_work <ID>` again (it replays the stored body; `SUBMIT_IN_PROGRESS` means the first call is still running - wait, then call again).
 - `REJECTED BACKLOG_NOT_STARTED`: `start_work <ID>`, then `submit_work <ID>`.
 - `REJECTED ALREADY_SUBMITTED`: it is done; take NEXT.
 - `REJECTED VALIDATION_ERROR/INVALID_SUBMISSION`: fix the named field in submit.json, commit, push, submit again.

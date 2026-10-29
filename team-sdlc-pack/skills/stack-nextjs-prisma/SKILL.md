@@ -25,6 +25,7 @@ Search the user-visible string first (label, error code, column header, route se
 3. Never edit an existing migration; never `migrate reset` (it drops data). If a trigger/constraint is needed, add raw SQL inside the new migration.
 4. Keep existing data valid: a new NOT NULL column needs a default or a backfill statement in the migration.
 5. Run `pnpm exec prisma generate` if types look stale, then `pnpm typecheck`.
+6. Restoring a relation/constraint rule (e.g. a red pre-existing test shows `onDelete` must be `Restrict`, not `Cascade`): change the rule in the `.prisma` schema AND ship it as a new migration, or the next `migrate dev` reverts it. Non-interactive and safe: `pnpm exec prisma migrate dev --create-only --name <slug>`, review the generated SQL (only the intended constraint), then `pnpm exec prisma migrate deploy` and run the full suite. This applies to any item, not only CRs.
 
 ## Tests (vitest)
 - One file per area in `tests/`; follow `helpers.ts` (`truncateAll()` in `beforeEach`, fixture builders). Prefer service/router-level tests over UI tests: they are what the grader can run.

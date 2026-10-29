@@ -41,7 +41,7 @@
       "ACCEPTED",
       "RECEIVED"
     ],
-    "retryBudgetMs": 90000
+    "retryBudgetMs": 60000
   },
   "planner": {
     "estMinutes": {

@@ -31,7 +31,7 @@ export const DEFAULT_ADAPTER = {
   // so a longer ceiling costs no reaction time and removes agent turns. Each idle turn re-reads
   // the whole conversation, which is where this match's tokens actually go.
   polling: { successMs: 5000, errorMs: 10000, backgroundMs: 20000, maxWaitMs: 170000 },
-  submit: { acceptedStatuses: ['ACCEPTED', 'RECEIVED'], retryBudgetMs: 90000 },
+  submit: { acceptedStatuses: ['ACCEPTED', 'RECEIVED'], retryBudgetMs: 60000 },
   planner: {},
   parallel: { maxWorkers: 2 },
 };
@@ -1253,7 +1253,23 @@ export class RuntimeSession {
     return { errors, warnings, sha, answer, evidenceRefs: check.evidenceRefs, testStatus: tests?.status || 'NOT_REPORTED' };
   }
 
-  async submit_work({ backlogItemKey, gitRevision, dryRun = false, allowNoEvidence = false, allowUntested = false } = {}) {
+  async submit_work(args = {}) {
+    // One submission per item at a time: two concurrent calls could otherwise both pass preflight
+    // and create two different clientSubmissionIds for the same item.
+    const id = String(args.backlogItemKey || '').trim();
+    this.submitsInFlight ||= new Set();
+    if (this.submitsInFlight.has(id)) {
+      return { ok: false, error: 'SUBMIT_IN_PROGRESS', next: `A submit_work call for ${id} is still running. Wait for it to return; do not start another one.` };
+    }
+    this.submitsInFlight.add(id);
+    try {
+      return await this.submitWorkOnce(args);
+    } finally {
+      this.submitsInFlight.delete(id);
+    }
+  }
+
+  async submitWorkOnce({ backlogItemKey, gitRevision, dryRun = false, allowNoEvidence = false, allowUntested = false } = {}) {
     const id = String(backlogItemKey || '').trim();
     if (!this.bearer) return { ok: false, error: 'NO_BEARER' };
     if (!this.match.uuid) return { ok: false, error: 'MATCH_UUID_UNKNOWN' };
@@ -1535,6 +1551,38 @@ export class RuntimeSession {
     return true;
   }
 
+  /**
+   * Writes <worktreeRoot>/.mtm-notes/<ID>-brief.md and copies the organizer's Start Work files to
+   * <worktreeRoot>/.mtm-notes/<ID>-files/ so a fork_turns:"none" worker can read them in its worktree.
+   */
+  writeWorkerBrief(it, wtRoot) {
+    const id = it.id;
+    const notes = path.join(wtRoot, '.mtm-notes');
+    const filesDir = path.join(notes, `${id}-files`);
+    const briefFile = path.join(notes, `${id}-brief.md`);
+    G.ensureExcluded(this.checkoutRoot, '/.mtm-notes/');
+    fs.mkdirSync(filesDir, { recursive: true });
+    const material = this.readMaterial(id) || {};
+    const copied = [];
+    for (const [rel, content] of Object.entries(material.files || {})) {
+      const target = path.join(filesDir, rel);
+      if (!isInside(target, filesDir)) continue;
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, typeof content === 'string' ? content : JSON.stringify(content, null, 2));
+      copied.push(rel);
+    }
+    const mvs = material.minimumVerificationScenarios;
+    const section = (title, body) => (body ? `## ${title}\n\n${body}\n\n` : '');
+    const text = `# ${id}${it.title ? ` - ${it.title}` : ''} (${it.type || material.backlogType || '?'})\n\n`
+      + section('Description', it.description || '')
+      + section('Start instruction', material.startInstruction || '')
+      + section('Minimum verification scenarios', typeof mvs === 'string' ? mvs : (mvs ? JSON.stringify(mvs, null, 2) : ''))
+      + section('Submit template', material.submitTemplate ? `\`\`\`json\n${JSON.stringify(material.submitTemplate, null, 2)}\n\`\`\`` : '')
+      + section('Shipped organizer files (copies)', copied.map((rel) => `- ${path.join(filesDir, rel)}`).join('\n'));
+    fs.writeFileSync(briefFile, text);
+    return { briefFile, filesDir, files: copied };
+  }
+
   async worktree({ action, backlogItemKey, message } = {}) {
     const id = backlogItemKey;
     if (!this.checkoutRoot) return { ok: false, error: 'NOT_CONFIGURED' };
@@ -1562,12 +1610,16 @@ export class RuntimeSession {
       // integrate (MAIN_DIRTY) or collide with the cherry-pick. The worktree owns the answer from now on.
       const movedDraftAnswer = await this.moveDraftAnswer(id, wtMatchRoot);
       if (it.local.startedAt) materializeAnswer(wtMatchRoot, id, this.readMaterial(id)?.submitTemplate ?? null);
+      // Children are spawned with fork_turns "none" and may only read inside their worktree, so the
+      // brief and the organizer's shipped files must exist there (git-ignored via the shared exclude).
+      const brief = this.writeWorkerBrief(it, wtRoot);
       this.saveState();
       return {
         ok: true, worktreeRoot: wtRoot, matchRoot: wtMatchRoot, linked, movedDraftAnswer,
         answer: it.local.startedAt ? answerPaths(wtMatchRoot, id) : undefined,
+        brief,
         note: linked.some((l) => l.includes('TEST_DATABASE_URL')) ? 'This copy got its own TEST_DATABASE_URL (tests truncate between cases, so copies must not share one).' : undefined,
-        next: `Spawn team_feature_worker with: item ${id}, worktreeRoot ${wtRoot}, matchRoot ${wtMatchRoot}, the app folder inside it, the brief/MVS/template from start_work. It edits only inside that matchRoot and never commits, pushes or calls Game APIs.`,
+        next: `spawn_agent team_feature_worker with fork_turns:"none" and a short message: item ${id}, worktreeRoot ${wtRoot}, matchRoot ${wtMatchRoot}, brief file ${brief.briefFile}, shipped files ${brief.filesDir}, the test/typecheck commands and a time box. Do not paste the brief. It edits only inside that matchRoot and never commits, pushes or calls Game APIs.`,
       };
     }
     if (action === 'integrate') {

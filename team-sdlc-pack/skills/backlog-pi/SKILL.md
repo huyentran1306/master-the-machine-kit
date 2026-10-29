@@ -8,7 +8,7 @@ description: Playbook for an MTM Product Incident (PI-xx) - production issue wit
 The clock started at reveal; rank is by the server's receivedAt of a PASSED submission (100/90/75/60%). FAILED = 0, so verify once, properly, then ship. No MVS: Grader has its own criteria. Target <= 10 minutes.
 
 1. `start_work <ID>` immediately (stash/commit current work first). Read description + startInstruction + template. Notes: outcome + repro line only.
-2. Locate (aim 4 minutes). In parallel, spawn `team_repo_scout` with `fork_turns: "none"`, the symptom text and matchRoot ("find root cause, 15 lines, file:line") and keep searching yourself:
+2. Locate (aim 4 minutes). In parallel, spawn `team_repo_scout` with `fork_turns: "none"`, the symptom text, checkoutRoot, folder and matchRoot ("find root cause, 15 lines, file:line"; git history only with `-- "<folder>"`) and keep searching yourself:
    - `rg -n` the symptom words, error codes, endpoints, UI labels, messages.
    - Logs: `logs/`, `*.log`, recon `logs` list; read stack traces to file:line.
    - Recent customer changes cause most incidents: `git -C "<checkoutRoot>" log --oneline -15 -- "<folder>"`, then `git -C "<checkoutRoot>" show --stat <sha> -- "<folder>/"` and the suspicious diff scoped with `-- "<folder>/"`. Commits named with backlog IDs are teams' work; others are the customer's.

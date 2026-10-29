@@ -12,7 +12,7 @@ test('team-orchestrator carries the trap-awareness rules', () => {
   assert.match(text, /## Trap awareness/);
   assert.match(text, /Source of truth, highest first/);
   assert.match(text, /Lowering the bar is the trap signal/);
-  assert.match(text, /fix the code .* and leave the test untouched/);
+  assert.match(text, /fix the code and leave the test untouched/);
 });
 
 test('no skill tells the agent to fix a test merely because it contradicts the code', () => {

@@ -1,4 +1,4 @@
-# Master the Machine Kit3 — 2.3.0
+# Master the Machine Kit3 — 2.4.0
 
 Team pack **Codex**, protocol 4, cho MTM Player. Nhánh `codex/kit3-portal-recovery` chứa bản Kit3 để đội so sánh với `main`.
 
@@ -24,7 +24,7 @@ node .\team-sdlc-pack\scripts\install.mjs --team-workspace "D:\mtm\BAK-Kit3"
 node .\team-sdlc-pack\scripts\check-distribution.mjs --team-workspace "D:\mtm\BAK-Kit3"
 ```
 
-Chỉ tiếp tục khi checker báo **READY**. Trên MTM Player chọn provider **Codex** và load đúng workspace vừa cài. Team identity trong pack là `[FHM] Bá Khí`; metadata package/info/runtime cùng phiên bản `2.3.0`.
+Chỉ tiếp tục khi checker báo **READY**. Trên MTM Player chọn provider **Codex** và load đúng workspace vừa cài. Team identity trong pack là `[FHM] Bá Khí`; metadata package/info/runtime cùng phiên bản `2.4.0`.
 
 Initialize trên Player chỉ tạo round local. Để tập lại cần mã trận mới hoặc Re-match phía BTC.
 
@@ -48,6 +48,18 @@ Repo chỉ chứa runtime Codex, tài liệu và fixture giả. Không đưa cre
 ## Windows contest machine
 
 Use MTM Player **0.9.35**. Install into a fresh workspace using the Node command above (or `team-sdlc-pack/install.ps1`), then run the checker and require **READY**. In Player Init, select Codex, set the Codex CLI path to the installed **codex.exe** (absolute path), and choose the match-authorized model in Init. Keep previous match workspaces separate.
+
+## Changelog — 2.4.0
+
+Fixes from an independent review of 2.3.0 (the helper was unchanged since 2.1.0; the risks were in the subagent text introduced by `fork_turns: "none"`):
+- Subagent profiles now carry the core rules a `"none"` child can no longer inherit: trap signals and source-of-truth order, organizer runners/QA data, exact evidence names, scope, PowerShell rules. Workspace AGENTS.md lets subagents read the brief files they are given.
+- `worktree create` writes `<worktreeRoot>/.mtm-notes/<ID>-brief.md` (item text, startInstruction, MVS, template) and copies the organizer's Start Work files to `<worktreeRoot>/.mtm-notes/<ID>-files/`, so a worker can read them without leaving its worktree. Its `next` hint now says `fork_turns:"none"` and passes paths.
+- The scout's git history commands are scoped to the assigned folder; PI briefs pass checkoutRoot and folder.
+- The quality checker reviews `git status` plus a folder-scoped diff (new files included), accepts in-scope baseline fixes, and reports trap violations (edited existing assertions or migrations, weakened checks).
+- Schema-level baseline fixes are documented as a `.prisma` rule change plus a new migration (`migrate dev --create-only`, then `migrate deploy`).
+- Trap awareness moved after the match loop and the Never list so loop steps 5-9 read as one sequence.
+- `submit_work` is serialized per item (`SUBMIT_IN_PROGRESS`), its retry budget is 60 s so a call stays under the 120 s tool timeout, and a tool timeout is handled as UNCERTAIN in team-recovery. Oversized tool results stay valid JSON.
+- Not yet measured in a live match.
 
 ## Changelog — 2.3.0
 

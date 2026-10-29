@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 const pack = join(fileURLToPath(new URL('..', import.meta.url)), 'team-sdlc-pack');
 const read = rel => readFileSync(join(pack, rel), 'utf8');
 
-const spawningSkills = ['team-orchestrator', 'backlog-bug', 'backlog-cr', 'backlog-pi'];
+const spawningSkills = ['team-orchestrator', 'backlog-bug', 'backlog-cr', 'backlog-pi', 'backlog-task'];
 
 test('every skill that spawns a subagent asks for fork_turns "none"', () => {
   for (const name of spawningSkills) {

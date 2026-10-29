@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "kind": "mtm-team-runtime",
   "name": "team-sdlc-pack",
-  "version": "2.7.3",
+  "version": "2.7.4",
   "protocolVersion": 4,
   "provider": "codex",
   "entrypoint": {

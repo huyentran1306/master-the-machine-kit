@@ -17,6 +17,13 @@ test('flight and contestant backlog titles beat API samples and richer text rows
   assert.equal(parseMatchPage(jsonScript({ ...view, events: [{ backlogId: row.key, title: 'An event headline' }] })).items[0].title, row.title);
 });
 
+test('descriptionMd and minimumVerificationMd from the contestant view reach the item description', () => {
+  const md = { key: 'TASK-91', title: 'Add shelf labels', descriptionMd: '# Add shelf labels\n\nInvented requirement text.', minimumVerificationMd: '# Scenarios\n\nRequired evidence: `shelf.png`.' };
+  const description = parseMatchPage(jsonScript({ backlog: [md] })).items[0].description;
+  assert.match(description, /Invented requirement text\./);
+  assert.match(description, /minimumVerificationMd: # Scenarios/);
+});
+
 test('backlogTitle alias is accepted and code samples alone never supply a title', () => {
   assert.equal(parseMatchPage(sample + jsonScript({ backlog: [{ key: 'TASK-91', backlogTitle: 'Rename shelf markers' }] })).items[0].title, 'Rename shelf markers');
   assert.equal(parseMatchPage(sample).items[0].title, null);

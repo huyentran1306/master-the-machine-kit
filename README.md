@@ -1,6 +1,6 @@
-# Master the Machine Kit3 — 2.7.3
+# Master the Machine Kit3 — 2.7.4
 
-Team pack **Codex**, protocol 4, cho MTM Player. Bản 2.7.3 trên nhánh `codex/kit3_bou_v3`, cập nhật từ nền 2.7.2.
+Team pack **Codex**, protocol 4, cho MTM Player. Bản 2.7.4 trên nhánh `codex/kit3_bou_v4`, cập nhật từ nền 2.7.3.
 
 ## Thay đổi chính
 
@@ -24,7 +24,7 @@ node .\team-sdlc-pack\scripts\install.mjs --team-workspace "D:\mtm\BAK-Kit3"
 node .\team-sdlc-pack\scripts\check-distribution.mjs --team-workspace "D:\mtm\BAK-Kit3"
 ```
 
-Chỉ tiếp tục khi checker báo **READY**. Trên MTM Player chọn provider **Codex** và load đúng workspace vừa cài. Team identity trong pack là `[FHM] Bá Khí`; metadata package/info/runtime cùng phiên bản `2.7.3`.
+Chỉ tiếp tục khi checker báo **READY**. Trên MTM Player chọn provider **Codex** và load đúng workspace vừa cài. Team identity trong pack là `[FHM] Bá Khí`; metadata package/info/runtime cùng phiên bản `2.7.4`.
 
 Initialize trên Player chỉ tạo round local. Để tập lại cần mã trận mới hoặc Re-match phía BTC.
 
@@ -48,6 +48,12 @@ Repo chỉ chứa runtime Codex, tài liệu và fixture giả. Không đưa cre
 ## Windows contest machine
 
 Use MTM Player **0.9.35**. Install into a fresh workspace using the Node command above (or `team-sdlc-pack/install.ps1`), then run the checker and require **READY**. In Player Init, select Codex, set the Codex CLI path to the installed **codex.exe** (absolute path), and choose the match-authorized model in Init. Keep previous match workspaces separate.
+
+## Changelog — 2.7.4
+
+Found by a teammate's review (Huyền), fixed by Claude:
+- **Item text from the contestant JSON view is read.** `descriptionOf` in `portal.mjs` ignored `descriptionMd`, the field that carries the full item text in the organizers' JSON view, and `minimumVerificationMd`, which names the required evidence. With only the JSON view available, items had an empty description and a worker could not see the task. Both fields are now included.
+- Validation: `node --test tests/*.test.mjs` 77/77; fresh install + checker READY; MTM Player 0.9.41 `verifyTeamRuntime` VERIFIED.
 
 ## Changelog — 2.7.3
 

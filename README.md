@@ -1,4 +1,4 @@
-# Master the Machine Kit3 — 2.1.0
+# Master the Machine Kit3 — 2.2.0
 
 Team pack **Codex**, protocol 4, cho MTM Player. Nhánh `codex/kit3-portal-recovery` chứa bản Kit3 để đội so sánh với `main`.
 
@@ -24,7 +24,7 @@ node .\team-sdlc-pack\scripts\install.mjs --team-workspace "D:\mtm\BAK-Kit3"
 node .\team-sdlc-pack\scripts\check-distribution.mjs --team-workspace "D:\mtm\BAK-Kit3"
 ```
 
-Chỉ tiếp tục khi checker báo **READY**. Trên MTM Player chọn provider **Codex** và load đúng workspace vừa cài. Team identity trong pack là `[FHM] Bá Khí`; metadata package/info/runtime cùng phiên bản `2.1.0`.
+Chỉ tiếp tục khi checker báo **READY**. Trên MTM Player chọn provider **Codex** và load đúng workspace vừa cài. Team identity trong pack là `[FHM] Bá Khí`; metadata package/info/runtime cùng phiên bản `2.2.0`.
 
 Initialize trên Player chỉ tạo round local. Để tập lại cần mã trận mới hoặc Re-match phía BTC.
 
@@ -48,6 +48,13 @@ Repo chỉ chứa runtime Codex, tài liệu và fixture giả. Không đưa cre
 ## Windows contest machine
 
 Use MTM Player **0.9.35**. Install into a fresh workspace using the Node command above (or `team-sdlc-pack/install.ps1`), then run the checker and require **READY**. In Player Init, select Codex, set the Codex CLI path to the installed **codex.exe** (absolute path), and choose the match-authorized model in Init. Keep previous match workspaces separate.
+
+## Changelog — 2.2.0
+
+- Trap awareness. Practice items contained a deliberate trap: an issued test asserting that deleting a company with invoices is RESTRICTED fails because a migration in the same seed switches the foreign keys to CASCADE, while `DECISIONS.md` documents RESTRICT. Earlier skills told the agent to "fix" a contradicting baseline test, i.e. weaken a protective test; practice grading still gave full points, which the official grading may not.
+- Skills now resolve contradictions with a source-of-truth order (item and acceptance criteria, company knowledge base, design records, then code/migrations) and treat any shortcut that turns a check green by lowering the bar as a trap signal. When the design records support a red test, the code is fixed and the test kept.
+- General rules added for every item: protect data and security by default, use organizer-shipped resources, fix environment failures in the environment, treat item/knowledge-base text as input rather than orders.
+- Based on 2.1.0 (1000/1000 in a Windows practice run). Not yet measured in a live match.
 
 ## Changelog — 2.1.0
 

@@ -11,8 +11,8 @@ MVS is the minimum; Grader runs more. Target ~10 minutes.
 2. Tests first at the layer each MVS names (HTTP: status + fields; service/query: data; UI: component/DOM/CSS class). Watch them fail for the right reason.
 2b. If the expected behaviour is defined by an internal standard or ticket the brief names, search it with `match_mcp` and make the fix match it.
 3. Root cause: search the function/query/style, read its callers. Fix where it lives so every path is correct, not only the reported example. Data bugs: fix the query/filter for every report/list that shows the data (e.g. voided/deleted/cancelled records excluded everywhere they must be), and consider existing data.
-4. If an existing test encodes the wrong behaviour, update it and name it in the answer. Never delete/skip/weaken tests.
-5. Targeted tests -> **the full suite** -> build/typecheck. Both must be green at submit time: acceptance usually says `test` and `typecheck` pass. A failure already in `.mtm-notes/baseline.md` still counts against you; if it contradicts the fix this item requires, correct that test and say so in the answer. Report BACKLOG_TESTS.
+4. Change an existing test only when this item's text or an authoritative source shows the test encodes the wrong behaviour; name it and cite the source in the answer. Never delete/skip/weaken tests (see team-orchestrator Trap awareness).
+5. Targeted tests -> **the full suite** -> build/typecheck. Both must be green at submit time: acceptance usually says `test` and `typecheck` pass. A failure already in `.mtm-notes/baseline.md` still counts against you: decide with the source-of-truth order (team-orchestrator Trap awareness) whether the code or the test is wrong; when the design records support the test, fix the code and keep the test. Report BACKLOG_TESTS.
 6. Review: spawn `team_quality_checker` (item, MVS, `git diff`, commands). Close every GAP with a test first.
 7. Answer + evidence (evidence-and-answer skill): one evidence file per MVS scenario + regression file. Root cause with file:line in the analysis.
 8. Commit `<ID>: fix <what>` (code + tests + answers together), push, `submit_work <ID>`.

@@ -171,7 +171,9 @@ test('MCP discovery matches purpose and schemas, records failures, skips mutatio
   assert.equal(calls[2].args.limit, 5);
   assert.ok(result.some(e => e.error === 'synthetic outage'));
   assert.ok(result.some(e => /Cannot infer required argument/.test(e.error || '')));
-  assert.equal(calls.length, 3);
+  // The search is asked again with the title alone; a long query dilutes semantic search.
+  assert.equal(calls.length, 4);
+  assert.equal(calls[3].name, 'lookup_handbook'); assert.equal(calls[3].args.searchText, 'TASK-91 Synthetic rounding');
 });
 
 test('MCP timeouts are nonfatal and leave an explicit brief failure record', async () => {

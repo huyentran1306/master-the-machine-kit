@@ -9,7 +9,7 @@ description: Dispatches all game items to workers, integrates, gates, pushes and
 3. Use configure_session's current view. Dispatch every startable item, including PI and late reveals: `start_work compact:true` -> `worktree create` -> worker.
 4. Spawn `team_feature_worker` with `fork_turns: "none"` and a paths-only handoff. Default cap: 3; PI may exceed it by one.
 5. Queue PI first, then nearest deadline, then points per minute. Never skip a missing title.
-6. Set worker time box to min(type target, deadline minus 5 minutes, match end minus 5 minutes), using the Game Master clock.
+6. Set worker time box to min(type target, workerStopAt from the brief: deadline or match end minus a quarter of the time left, 1.5-5 minutes), using the Game Master clock.
 7. READY: immediately integrate -> bounded gate -> push -> submit_work -> remove -> dispatch NEXT. Never hold READY for other work.
 8. Conflict/red gate: delegate fix-up. Never repair item code in main; only a trivial one-line conflict may be resolved there.
 9. Late worker: tell it to stop and return what passes, evidence and a commit; submit READY immediately.
@@ -25,7 +25,7 @@ Use the helper's ranked NEXT/queue; exclude active workers. Configure the cap in
 
 For EVERY startable item call start_work (compact defaults true), worktree create, then spawn `team_feature_worker` with `fork_turns: "none"` and a paths-only handoff. Pass paths, not pasted material: ID/type, checkoutRoot (= worktreeRoot), folder, matchRoot, briefFile, filesDir, checklist/answer paths, scope, time box and requested READY/PARKED result. Commands, playbook, stack/evidence skills, repo-map.md and organizer material are in briefFile. Workers read them. Include in-scope baseline fixes and sources by brief path. Ask workers to use repo-map.md for candidate files and confirm with rg; it may be stale after edits.
 
-Keep ID -> agent/worktree/stop-time in a short ledger. Targets: PI 10m, BUG 10m, TASK 8m, CR 14m, capped by workerStopAt (deadline/match end minus 5 minutes). If the cutoff has arrived, request only a verified deliverable that can fit; never silently skip late reveals. At cutoff send a stop-and-return message; do not wait out another full time box. PARKED: record BLOCKED with the reason, preserve its commit, stop its processes, remove the worktree and free the slot. Retry only with a feasible plan.
+Keep ID -> agent/worktree/stop-time in a short ledger. Targets: PI 10m, BUG 10m, TASK 8m, CR 14m, capped by workerStopAt (deadline/match end minus a quarter of the time left, 1.5-5 minutes). If the cutoff has arrived, request only a verified deliverable that can fit; never silently skip late reveals. At cutoff send a stop-and-return message; do not wait out another full time box. PARKED: record BLOCKED with the reason, preserve its commit, stop its processes, remove the worktree and free the slot. Retry only with a feasible plan.
 
 Ports are assigned by the helper: pair n uses dev=3100+2n and production=3101+2n (parallel.portBase changes the base). Pairs persist and are not reused during the session, including PI overflow. Require explicit port flags/environment and matching browser/runner URLs; never fall back to shared defaults. Require the worktree's isolated TEST_DATABASE_URL. Workers stop their servers/browsers before READY/PARKED.
 

@@ -993,7 +993,9 @@ export class RuntimeSession {
 
   briefContext(it, worktreeRoot = this.checkoutRoot, matchRoot = this.matchRoot) {
     const { left } = effectiveLeft(it, this.now(), this.match.endsAt);
-    const stopAt = left == null ? null : this.now() + (left - 5) * 60000;
+    // Keep time to integrate and submit, but a fixed 5 minutes would leave an 8-minute item 3.
+    const margin = left == null ? 5 : Math.min(5, Math.max(1.5, left * 0.25));
+    const stopAt = left == null ? null : this.now() + Math.max(0.5, left - margin) * 60000;
     return {
       checkoutRoot: worktreeRoot, folder: this.repository?.folder, matchRoot,
       appPath: this.appPath ? path.join(matchRoot, path.relative(this.matchRoot, this.appPath)) : matchRoot,
@@ -1001,7 +1003,7 @@ export class RuntimeSession {
       stackSkill: this.stackSkill ? path.resolve(this.teamWorkspace || this.checkoutRoot, '.agents', 'skills', this.stackSkill, 'SKILL.md') : null,
       evidenceSkill: path.resolve(this.teamWorkspace || this.checkoutRoot, '.agents', 'skills', 'evidence-and-answer', 'SKILL.md'),
       answer: answerPaths(matchRoot, it.id), checklistFile: path.join(matchRoot, 'answers', it.id, 'checklist.md'),
-      deadlineAt: it.deadlineAt ?? null, workerStopAt: stopAt, deadlineMarginMinutes: 5,
+      deadlineAt: it.deadlineAt ?? null, workerStopAt: stopAt, deadlineMarginMinutes: left == null ? 5 : Math.round(Math.min(5, Math.max(1.5, left * 0.25)) * 10) / 10,
       ports: it.local?.worktree?.ports ?? null,
       baseSha: it.local?.worktree?.baseSha ?? this.environmentRevision ?? this.state.envReady?.revision ?? null,
     };

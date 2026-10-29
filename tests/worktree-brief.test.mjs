@@ -110,7 +110,8 @@ test('start_work defaults compact and writes complete briefs without leaking ite
   const { args, s, requests } = await startFixture(t);
   const result = await s.start_work({ backlogItemKey: args.item.id });
   assert.equal(result.ok, true); assert.equal(result.id, args.item.id); assert.equal(result.points, 150);
-  assert.equal(result.workerStopAt, s.now() + 13 * 60000);
+  // 18 minutes left: a quarter (4.5) is kept for integration and submission.
+  assert.equal(result.workerStopAt, s.now() + 13.5 * 60000);
   assert.ok(result.summary.length <= 5);
   assert.ok(JSON.stringify(result).length < 2500);
   for (const key of ['description', 'startInstruction', 'submitTemplate', 'minimumVerificationScenarios', 'files', 'checklist']) assert.equal(key in result, false, key);
@@ -170,10 +171,10 @@ test('compact start and worktree brief retain raw MCP material from differently 
   const out = await s.start_work({ backlogItemKey: args.item.id });
   assert.ok(out.requiredEvidence.some(e => e.name === 'panel-original.png' && e.before));
   let brief = JSON.parse(fs.readFileSync(out.briefFile, 'utf8'));
-  assert.deepEqual(brief.mcpMaterial.map(e => e.purpose), ['discovery', 'data', 'search']);
+  assert.deepEqual(brief.mcpMaterial.map(e => e.purpose).slice(0, 3), ['discovery', 'data', 'search']);
   const raw = JSON.parse(fs.readFileSync(brief.mcpMaterial[1].file, 'utf8'));
   assert.equal(raw.raw.content[0].text, large);
-  assert.deepEqual(calls.filter(c => c.method === 'tools/call').map(c => c.params.name), ['retrieve_case_inputs', 'find_reference_pages']);
+  assert.deepEqual([...new Set(calls.filter(c => c.method === 'tools/call').map(c => c.params.name))], ['retrieve_case_inputs', 'find_reference_pages', 'read_reference_page']);
   assert.deepEqual(calls.find(c => c.params?.name === 'retrieve_case_inputs').params.arguments, { backlog_item_key: args.item.id });
   assert.match(calls.find(c => c.params?.name === 'find_reference_pages').params.arguments.query, /CR-07 Export/);
   const checklist = fs.readFileSync(out.checklistFile, 'utf8');
@@ -183,7 +184,8 @@ test('compact start and worktree brief retain raw MCP material from differently 
   git(args.checkoutRoot, 'add', 'assigned/app.txt'); git(args.checkoutRoot, 'commit', '-qm', 'baseline');
   const wt = await s.worktree({ action: 'create', backlogItemKey: args.item.id });
   brief = JSON.parse(fs.readFileSync(wt.brief.briefFile, 'utf8'));
-  assert.ok(brief.baseSha); assert.equal(brief.mcpMaterial.length, 3);
+  assert.ok(brief.baseSha); assert.ok(brief.mcpMaterial.length >= 3);
+  const initialMaterial = brief.mcpMaterial.length;
   for (const entry of brief.mcpMaterial) {
     assert.ok(entry.file.startsWith(wt.matchRoot + path.sep)); assert.ok(fs.existsSync(entry.file));
     assert.ok(git(wt.worktreeRoot, 'check-ignore', entry.file));
@@ -193,7 +195,7 @@ test('compact start and worktree brief retain raw MCP material from differently 
   assert.equal(brief.mcpMaterial.at(-1).purpose, 'follow-up');
   assert.equal(JSON.parse(fs.readFileSync(brief.mcpMaterial.at(-1).file, 'utf8')).content[0].text, large);
   const replay = await s.start_work({ backlogItemKey: args.item.id });
-  assert.equal(JSON.parse(fs.readFileSync(replay.briefFile, 'utf8')).mcpMaterial.length, 4);
+  assert.equal(JSON.parse(fs.readFileSync(replay.briefFile, 'utf8')).mcpMaterial.length, initialMaterial + 1);
   assert.equal(calls.filter(c => c.method === 'tools/list').length, 1);
 });
 

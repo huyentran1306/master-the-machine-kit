@@ -111,7 +111,7 @@ test('orchestrator dispatches every item with a bounded completion and event loo
   assert.ok(text.indexOf('# Quick card') < 250);
   for (const phrase of ['Read this skill once', '-TotalCount 30', 'Never implement', 'EVERY startable item', 'late reveals',
     'compact:true', 'worktree create', 'Default cap: 3', 'PI may exceed it by one', 'parallel.maxWorkers',
-    'PI first, then nearest deadline, then points per minute', 'deadline minus 5 minutes',
+    'PI first, then nearest deadline, then points per minute', 'minus a quarter of the time left',
     'Never hold READY', 'target <=2 minutes', 'full suite + typecheck', 'build-relevant files',
     'worktree rollback', 'trivial one-line conflict', 'native agent wait', '45,000 ms', 'timeoutMs:1000',
     'no assumed cross-tool wait-any', 'stop-and-return', 'Never view_image', 'git diff --stat', '-Tail 15']) assert.ok(text.includes(phrase), phrase);

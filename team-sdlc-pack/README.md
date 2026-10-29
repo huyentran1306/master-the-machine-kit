@@ -1,4 +1,4 @@
-# team-sdlc-pack 2.7.2 — Digital Project Team (Codex, MTM technical guide 0.5.1)
+# team-sdlc-pack 2.7.3 — Digital Project Team (Codex, MTM technical guide 0.5.1)
 
 Team pack chính thức để thi Master the Machine: mtm-player load pack này, chạy Codex CLI với `team_orchestrator` làm root agent, MCP Helper (`mtm_minimal`) giữ credential trong bộ nhớ, gọi Game API và ghi `progress.ndjson`.
 

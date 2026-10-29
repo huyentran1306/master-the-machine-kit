@@ -1,6 +1,6 @@
-# Master the Machine Kit3 — 2.7.2
+# Master the Machine Kit3 — 2.7.3
 
-Team pack **Codex**, protocol 4, cho MTM Player. Bản 2.7.2 trên nhánh `codex/kit3_bou_v3`, cập nhật từ nền 2.7.1.
+Team pack **Codex**, protocol 4, cho MTM Player. Bản 2.7.3 trên nhánh `codex/kit3_bou_v3`, cập nhật từ nền 2.7.2.
 
 ## Thay đổi chính
 
@@ -24,7 +24,7 @@ node .\team-sdlc-pack\scripts\install.mjs --team-workspace "D:\mtm\BAK-Kit3"
 node .\team-sdlc-pack\scripts\check-distribution.mjs --team-workspace "D:\mtm\BAK-Kit3"
 ```
 
-Chỉ tiếp tục khi checker báo **READY**. Trên MTM Player chọn provider **Codex** và load đúng workspace vừa cài. Team identity trong pack là `[FHM] Bá Khí`; metadata package/info/runtime cùng phiên bản `2.7.2`.
+Chỉ tiếp tục khi checker báo **READY**. Trên MTM Player chọn provider **Codex** và load đúng workspace vừa cài. Team identity trong pack là `[FHM] Bá Khí`; metadata package/info/runtime cùng phiên bản `2.7.3`.
 
 Initialize trên Player chỉ tạo round local. Để tập lại cần mã trận mới hoặc Re-match phía BTC.
 
@@ -48,6 +48,13 @@ Repo chỉ chứa runtime Codex, tài liệu và fixture giả. Không đưa cre
 ## Windows contest machine
 
 Use MTM Player **0.9.35**. Install into a fresh workspace using the Node command above (or `team-sdlc-pack/install.ps1`), then run the checker and require **READY**. In Player Init, select Codex, set the Codex CLI path to the installed **codex.exe** (absolute path), and choose the match-authorized model in Init. Keep previous match workspaces separate.
+
+## Changelog — 2.7.3
+
+From the Group A warm-up match format (10 items in 40 minutes; deadlines of 8, 15, 15 and 18 minutes; an incident answered from production logs), fixed by Claude:
+- **Deadline margin scales with the time left.** Worker stop time keeps a quarter of the remaining time (1.5-5 minutes) for integration and submission instead of a fixed 5 minutes, which left an 8-minute item about 3 minutes of work.
+- **Workers get every read-only company tool's output up front.** Besides test data and knowledge-base search, the helper now calls log/observability tools and any other read-only tool it can fill arguments for, and repeats searches with the item title alone. Workers cannot query the match MCP themselves, so an incident answered from logs no longer needs a NEED_INFO round trip.
+- Validation: `node --test tests/*.test.mjs` 76/76; fresh install + checker READY; MTM Player 0.9.41 `verifyTeamRuntime` VERIFIED.
 
 ## Changelog — 2.7.2
 

@@ -24,7 +24,7 @@ configure_session, login_match, refresh_match, wait_for_update, get_backlog_item
 ORCHESTRATOR_STARTED/RESTARTED (configure_session), PREPARATION_STATUS MATCH_LOGIN (login_match), ENVIRONMENT_READY (report_ready), GAME_START_STATUS BACKLOG_SYNC (START/RESUME_GAME), BACKLOG_STATUS DISCOVERED/IN_PROGRESS/SUBMITTED, BACKLOG_TESTS NOT_RUN (start), GAME_MASTER_API REQUESTED/SUCCEEDED/FAILED around every login, refresh, start and submit request, BLOCKER_OPENED/RESOLVED for helper-detected problems, ORCHESTRATOR_ENDED (final_result end=true / MATCH_ENDED).
 The agent writes PREPARATION_STATUS for GIT_AUTH/REPOSITORY/ENVIRONMENT/BUILD, BACKLOG_TESTS RUNNING/PASSED/FAILED and its own blockers through `report_progress`.
 
-## Dispatch contract (2.7.2)
+## Dispatch contract (2.7.3)
 
 Configure helper `parallel.maxWorkers` (default 3) and `parallel.portBase` (default 3100) in config/game-adapter.json before installation. PI may create one overflow worktree. Provider capacity must accommodate root + cap + one PI worker; release completed agents. Checker/scout remain optional, read-only, worker-requested assistance and must not consume reserved PI capacity.
 
@@ -40,4 +40,4 @@ Port pair n is dev=portBase+2n, production=dev+1. Persist allocation in helper s
 
 Integrate only clean, worker-committed ranges. Replay the same READY SHA without cherry-picking twice. Keep the main gate <=2 minutes (full suite + typecheck; build when the worker lacks a passing build or build-relevant paths changed). Delegate slower integrated-tree checks and all repairs. On a failed unsubmitted gate, worktree rollback creates revert commits only while main still equals that integration; it refuses known pushed/pending/submitted integrations. Pass its retryBaseSha to the worker for rebase --onto <current-main-SHA> <retryBaseSha>, so reverted item commits are replayed. Check the exact integrated tree before push/submit. Never hold other READY work during repair.
 
-With active workers, native agent wait <=45s then wait_for_update timeoutMs:1000 handles completion plus buffered Game Master events without an unsupported wait-any primitive. Shorten waits to worker cutoffs (deadline/match end minus 5 minutes). Check events between integrations too. With no workers, the helper waits up to 55s. Idle event latency is about 46s plus network latency; native completion wakes early. Read the orchestrator skill once; reminders read only the Quick card.
+With active workers, native agent wait <=45s then wait_for_update timeoutMs:1000 handles completion plus buffered Game Master events without an unsupported wait-any primitive. Shorten waits to worker cutoffs (deadline/match end minus a quarter of the time left, 1.5-5 minutes). Check events between integrations too. With no workers, the helper waits up to 55s. Idle event latency is about 46s plus network latency; native completion wakes early. Read the orchestrator skill once; reminders read only the Quick card.

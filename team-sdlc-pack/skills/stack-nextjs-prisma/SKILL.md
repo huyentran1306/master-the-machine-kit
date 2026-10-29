@@ -5,7 +5,7 @@ description: Stack notes for an MTM match whose customer system is a Next.js (Ap
 
 # Stack: Next.js + tRPC + Prisma + PostgreSQL (vitest)
 
-App root is `<matchRoot>/<app.path>` (usually `src/`). Run every command from there. `recon_repo` gives the exact commands; the usual ones with pnpm:
+App root is `<matchRoot>/<app.path>` (usually `src/`). Run every command from there. Use appPath and commands from the worker brief (recon_repo during preparation); the usual ones with pnpm:
 `pnpm install --frozen-lockfile` · `pnpm test` (vitest) · `pnpm typecheck` · `pnpm build` · `pnpm exec prisma migrate deploy` · `pnpm db:seed`
 
 ## Where things live (typical layout)
@@ -40,4 +40,4 @@ Search the user-visible string first (label, error code, column header, route se
 - Timestamps are `timestamptz`; day bucketing uses the settings timezone, not the server's.
 
 ## Before submitting
-`pnpm typecheck` + `pnpm build` + the affected test files (and the full suite once if it is under ~3 minutes). Evidence: command + summary counts per MVS scenario; for UI, a screenshot. Never commit `.env`, `node_modules`, `data/uploads` or a changed `exam-info.json`.
+`pnpm typecheck` + `pnpm build` + the affected test files and the full suite once. Evidence: command + summary counts per MVS scenario; for UI, a screenshot. Never commit `.env`, `node_modules`, `data/uploads` or a changed `exam-info.json`.

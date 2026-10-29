@@ -8,11 +8,11 @@ description: Work on a customer system whose stack the kit has no specific notes
 The kit's rules (Start Work, answers/evidence, one submission, push before submit) never change with the stack. Only the commands do.
 
 ## 1. Commands (3 minutes, in this order)
-1. `recon_repo` -> `app.path`, `app.stack`, install/build/test/oneTest, `ci` (commands a CI workflow really runs: most reliable), `other` (per-stack defaults).
+1. Use the worker brief commands/appPath and baselinePath; during preparation use recon_repo.
 2. The repository `README.md` / `CONTRIBUTING.md` / `docs/` and any `env-require/README.md`: the setup section is the contract.
 3. Build files: `Makefile` / `Taskfile.yml` targets, `package.json` scripts, `pom.xml` profiles, `*.csproj`, `pyproject.toml` `[tool.*]`, `go.mod`, `composer.json`, `Gemfile`, `mix.exs`.
 4. Test runner config (`vitest.config`, `jest.config`, `pytest.ini`, `phpunit.xml`, `*.Tests.csproj`, `src/test/java`) tells you where tests live and how to run one file.
-Write the chosen commands into `<checkoutRoot>/.mtm-notes/baseline.md`: install, build, full test, single test, how long each takes, which tests already fail.
+Write the chosen commands into the worker brief directory's baseline.md (preparation: `<checkoutRoot>/.mtm-notes/baseline.md`): install, build, full test, single test, how long each takes, which tests already fail.
 
 ## 2. Keep the loop cheap
 - Iterate with the single-test command; run the full suite once on the commit.

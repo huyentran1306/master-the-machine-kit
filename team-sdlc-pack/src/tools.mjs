@@ -24,7 +24,7 @@ export const TOOLS = [
   },
   {
     name: 'wait_for_update',
-    description: 'Long-poll the match page. Returns the instant anything changes (new item, state/edit, match status), so call it with no timeoutMs and let it wait: a long wait costs nothing and each extra wake-up costs a full turn. Use whenever nothing is actionable. Never end your turn instead of calling this while the match runs.',
+    description: 'Wait for Game Master events. With active workers: native agent wait <=45s, then call this with timeoutMs:1000 to drain events/check the clock. Without workers omit timeoutMs. Never end the turn while the match runs.',
     inputSchema: obj({ timeoutMs: { type: 'integer', minimum: 1000, maximum: 55000 } }),
     handler: (s, a) => s.wait_for_update(a),
   },
@@ -36,8 +36,8 @@ export const TOOLS = [
   },
   {
     name: 'start_work',
-    description: 'POST Start Work for one OPEN item (required before editing). Returns startInstruction, submitTemplate, MVS and on-start files; materializes <folder>/answers/<ID>/submit.json + evidence/; logs IN_PROGRESS and BACKLOG_TESTS NOT_RUN. Idempotent (replay).',
-    inputSchema: obj({ backlogItemKey: key, matchUuid: { type: 'string', description: 'Only if the view says the match UUID is unknown and you read it from pageText.' } }, ['backlogItemKey']),
+    description: 'POST Start Work for one OPEN item. Default compact:true writes full worker brief/files and draft answer, returning only dispatch metadata and paths. compact:false retains full material in the result. Idempotent; logs IN_PROGRESS and BACKLOG_TESTS NOT_RUN.',
+    inputSchema: obj({ backlogItemKey: key, compact: { type: 'boolean', default: true }, matchUuid: { type: 'string', description: 'Only if the view says the match UUID is unknown and you read it from pageText.' } }, ['backlogItemKey']),
     handler: (s, a) => s.start_work(a),
   },
   {
@@ -66,8 +66,8 @@ export const TOOLS = [
   },
   {
     name: 'worktree',
-    description: 'Parallel lane for a started item: create (git worktree under <checkoutRoot>/.mtm-wt/<ID>, node_modules linked) for a team_feature_worker; integrate (commit the worktree and cherry-pick into the main checkout); remove; list.',
-    inputSchema: obj({ action: { type: 'string', enum: ['create', 'integrate', 'remove', 'list'] }, backlogItemKey: key, message: { type: 'string', description: 'Commit message for integrate: "<ID>: <what>"' } }, ['action']),
+    description: 'Worker lifecycle: create isolated worktree/brief with unique dev/production ports (3 workers, PI overflow +1); integrate clean worker commits; rollback a failed unsubmitted integration using revert commits; remove; list. Never commits unfinished worker files.',
+    inputSchema: obj({ action: { type: 'string', enum: ['create', 'integrate', 'rollback', 'remove', 'list'] }, backlogItemKey: key, message: { type: 'string', description: 'Legacy argument; worker supplies its own commit message.' } }, ['action']),
     handler: (s, a) => s.worktree(a),
   },
   {

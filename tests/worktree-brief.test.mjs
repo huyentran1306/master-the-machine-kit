@@ -3,9 +3,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import http from 'node:http';
 import { execFileSync } from 'node:child_process';
 import { writeItemBrief } from '../team-sdlc-pack/src/item-brief.mjs';
 import { RuntimeSession } from '../team-sdlc-pack/src/runtime-session.mjs';
+import { rank, alerts } from '../team-sdlc-pack/src/planner.mjs';
+import { TOOLS } from '../team-sdlc-pack/src/tools.mjs';
 
 const git = (root, ...args) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', windowsHide: true }).trim();
 const material = {
@@ -20,6 +23,7 @@ function setup(t) {
     fs.rmSync(root, { recursive: true, force: true });
   });
   git(root, 'init', '-q');
+  git(root, 'config', 'core.autocrlf', 'false');
   const matchRoot = path.join(root, 'assigned');
   fs.mkdirSync(matchRoot);
   return { checkoutRoot: root, matchRoot, item: { id: 'CR-07', type: 'CR', title: 'Export', description: 'Export all rows.', acceptanceCriteria: ['All rows'] }, material };
@@ -77,4 +81,172 @@ test('worktree create returns ignored, readable child paths and moves only the d
   assert.ok(out.next.includes(out.brief.briefFile));
   assert.ok(out.next.includes(out.brief.filesDir));
   assert.deepEqual(JSON.parse(fs.readFileSync(out.brief.briefFile, 'utf8')).submitTemplate, material.submitTemplate);
+});
+
+async function startFixture(t) {
+  const args = setup(t);
+  const requests = [];
+  const srv = http.createServer(async (req, res) => {
+    let raw = ''; for await (const part of req) raw += part;
+    requests.push(JSON.parse(raw));
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ backlogType: 'CR', ...material, replay: requests.length > 1 }));
+  });
+  await new Promise(resolve => srv.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => { srv.close(resolve); srv.closeAllConnections(); }));
+  const origin = `http://127.0.0.1:${srv.address().port}`;
+  const s = new RuntimeSession({ teamWorkspace: args.checkoutRoot });
+  s.checkoutRoot = args.checkoutRoot; s.matchRoot = args.matchRoot; s.repository = { folder: 'assigned' };
+  s.phase = 'GAME'; s.bearer = 'synthetic-token'; s.match.uuid = '11111111-2222-4333-8444-555555555555';
+  s.match.status = 'IN_PROGRESS'; s.apiBase = origin; s.allowedApiOrigins = [origin];
+  s.now = () => 1_000_000; s.match.endsAt = s.now() + 40 * 60000;
+  s.items.set(args.item.id, { ...args.item, description: 'SYNTHETIC_DESCRIPTION '.repeat(1000), maxPoints: 150,
+    deadlineAt: s.now() + 18 * 60000, local: {} });
+  s.commands = { test: 'node --test', build: 'npm run build' }; s.appPath = path.join(args.matchRoot, 'src');
+  return { args, s, requests };
+}
+
+test('start_work defaults compact and writes complete briefs without leaking item material', async t => {
+  const { args, s, requests } = await startFixture(t);
+  const result = await s.start_work({ backlogItemKey: args.item.id });
+  assert.equal(result.ok, true); assert.equal(result.id, args.item.id); assert.equal(result.points, 150);
+  assert.equal(result.workerStopAt, s.now() + 13 * 60000);
+  assert.ok(result.summary.length <= 5);
+  assert.ok(JSON.stringify(result).length < 2500);
+  for (const key of ['description', 'startInstruction', 'submitTemplate', 'minimumVerificationScenarios', 'files', 'checklist']) assert.equal(key in result, false, key);
+  assert.doesNotMatch(JSON.stringify(result), /SYNTHETIC_DESCRIPTION|Run the supplied verifier|DRAFT/);
+  assert.ok(path.isAbsolute(result.playbook)); assert.ok(result.playbook.endsWith(path.join('backlog-cr', 'SKILL.md')));
+  const brief = JSON.parse(fs.readFileSync(result.briefFile, 'utf8'));
+  assert.equal(brief.item.description, s.items.get(args.item.id).description);
+  assert.equal(brief.startInstruction, material.startInstruction);
+  assert.deepEqual(brief.minimumVerificationScenarios, material.minimumVerificationScenarios);
+  assert.deepEqual(brief.submitTemplate, material.submitTemplate);
+  assert.deepEqual(brief.commands, s.commands);
+  assert.ok(fs.existsSync(result.answer.submitJson)); assert.ok(fs.existsSync(result.checklistFile));
+  assert.equal(fs.readFileSync(brief.files['qa/data.json'], 'utf8'), material.files['qa/data.json']);
+  assert.deepEqual(requests, [{ backlogItemKey: args.item.id }]);
+  assert.equal(TOOLS.find(t => t.name === 'start_work').inputSchema.properties.compact.default, true);
+  const replay = await s.start_work({ backlogItemKey: args.item.id, compact: true });
+  assert.equal(replay.briefFile, result.briefFile);
+});
+
+test('start_work full mode retains description, template, checklist and supplied files', async t => {
+  const { args, s } = await startFixture(t);
+  const result = await s.start_work({ backlogItemKey: args.item.id, compact: false });
+  assert.equal(result.ok, true); assert.match(result.description, /SYNTHETIC_DESCRIPTION/);
+  assert.deepEqual(result.submitTemplate, material.submitTemplate);
+  assert.deepEqual(result.minimumVerificationScenarios, material.minimumVerificationScenarios);
+  assert.equal(result.files['qa/data.json'], material.files['qa/data.json']);
+  assert.ok(result.checklist.length); assert.ok(result.providedRunners.length);
+});
+
+function worktreeSession(t, adapter) {
+  const args = setup(t);
+  git(args.checkoutRoot, 'config', 'user.name', 'Synthetic');
+  git(args.checkoutRoot, 'config', 'user.email', 'fixture@example.invalid');
+  fs.writeFileSync(path.join(args.matchRoot, 'app.txt'), 'baseline\n');
+  fs.writeFileSync(path.join(args.matchRoot, '.gitignore'), '.env\n');
+  fs.writeFileSync(path.join(args.matchRoot, '.env'), 'TEST_DATABASE_URL="postgresql://localhost/synthetic_test"\n');
+  git(args.checkoutRoot, 'add', 'assigned'); git(args.checkoutRoot, 'commit', '-qm', 'baseline');
+  const s = new RuntimeSession({ teamWorkspace: args.checkoutRoot, adapter });
+  s.checkoutRoot = args.checkoutRoot; s.matchRoot = args.matchRoot; s.repository = { folder: 'assigned' };
+  s.materialCache = {};
+  const create = async (id, type = 'TASK') => {
+    if (!s.items.has(id)) s.items.set(id, { id, type, local: { startedAt: Date.now() } });
+    s.materialCache[id] = { files: {}, submitTemplate: { backlogId: id } };
+    return s.worktree({ action: 'create', backlogItemKey: id });
+  };
+  return { s, args, create };
+}
+
+test('three workers and one PI get distinct persistent ports, private test DBs and remapped paths', async t => {
+  const { s, args, create } = worktreeSession(t);
+  const outputs = await Promise.all(['TASK-91', 'BUG-92', 'CR-93'].map(id => create(id)));
+  assert.ok(outputs.every(o => o.ok));
+  assert.equal((await create('TASK-94')).error, 'TOO_MANY_WORKERS');
+  outputs.push(await create('PI-95', 'PI'));
+  assert.equal(outputs[3].ok, true);
+  assert.equal((await create('PI-96', 'PI')).error, 'TOO_MANY_WORKERS');
+  const ports = outputs.flatMap(o => Object.values(o.ports)); assert.equal(new Set(ports).size, 8);
+  assert.deepEqual(ports, [3100, 3101, 3102, 3103, 3104, 3105, 3106, 3107]);
+  for (const out of outputs) {
+    const brief = JSON.parse(fs.readFileSync(out.brief.briefFile, 'utf8'));
+    assert.deepEqual(brief.ports, out.ports); assert.equal(brief.checkoutRoot, out.worktreeRoot);
+    assert.equal(brief.matchRoot, out.matchRoot); assert.equal(brief.answer.submitJson, out.answer.submitJson);
+    const env = fs.readFileSync(path.join(out.matchRoot, '.env'), 'utf8');
+    assert.match(env, /synthetic_test_wt_/); assert.equal(s.items.get(path.basename(out.worktreeRoot)).local.worktree.envIsolated, true);
+  }
+  const repeat = await create('TASK-91'); assert.deepEqual(repeat.ports, outputs[0].ports);
+  assert.equal(fs.readFileSync(path.join(args.matchRoot, '.env'), 'utf8'), 'TEST_DATABASE_URL="postgresql://localhost/synthetic_test"\n');
+  await s.worktree({ action: 'remove', backlogItemKey: 'TASK-91' });
+  await s.worktree({ action: 'remove', backlogItemKey: 'PI-95' });
+  const replacement = await create('TASK-94'); assert.deepEqual(replacement.ports, { dev: 3108, production: 3109 });
+});
+
+test('helper worker cap and port base are configurable', async t => {
+  const { s, create } = worktreeSession(t, { parallel: { maxWorkers: 1, portBase: 4200 } });
+  assert.deepEqual((await create('TASK-91')).ports, { dev: 4200, production: 4201 });
+  assert.equal((await create('TASK-92')).error, 'TOO_MANY_WORKERS');
+  assert.deepEqual((await create('PI-93', 'PI')).ports, { dev: 4202, production: 4203 });
+  assert.equal(s.view().maxWorkers, 1);
+});
+
+test('integration requires worker commits, preserves multiple commits, replays and supports fix-ups', async t => {
+  const { s, args, create } = worktreeSession(t);
+  const out = await create('TASK-91');
+  const integrate = () => s.worktree({ action: 'integrate', backlogItemKey: 'TASK-91' });
+  assert.equal((await integrate()).error, 'WORKER_DIRTY', 'draft answer must be committed by worker');
+  git(out.worktreeRoot, 'add', 'assigned'); git(out.worktreeRoot, 'commit', '-qm', 'answer');
+  fs.writeFileSync(path.join(out.matchRoot, 'app.txt'), 'implemented\n');
+  git(out.worktreeRoot, 'add', 'assigned'); git(out.worktreeRoot, 'commit', '-qm', 'implementation');
+  const result = await integrate(); assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(fs.readFileSync(path.join(args.matchRoot, 'app.txt'), 'utf8'), 'implemented\n');
+  assert.ok(fs.existsSync(path.join(args.matchRoot, 'answers/TASK-91/submit.json')));
+  assert.equal((await integrate()).replay, true);
+  const before = git(args.checkoutRoot, 'rev-parse', 'HEAD');
+  fs.writeFileSync(path.join(out.matchRoot, 'app.txt'), 'verified fix-up\n');
+  git(out.worktreeRoot, 'add', 'assigned'); git(out.worktreeRoot, 'commit', '-qm', 'fix-up');
+  assert.equal((await integrate()).ok, true);
+  assert.equal(git(args.checkoutRoot, 'rev-list', '--count', `${before}..HEAD`), '1');
+  assert.equal(fs.readFileSync(path.join(args.matchRoot, 'app.txt'), 'utf8'), 'verified fix-up\n');
+});
+
+test('conflict aborts without changing main and delegates repair', async t => {
+  const { s, args, create } = worktreeSession(t);
+  const out = await create('TASK-91');
+  fs.writeFileSync(path.join(out.matchRoot, 'app.txt'), 'worker\n');
+  git(out.worktreeRoot, 'add', 'assigned'); git(out.worktreeRoot, 'commit', '-qm', 'worker');
+  fs.writeFileSync(path.join(args.matchRoot, 'app.txt'), 'main\n');
+  git(args.checkoutRoot, 'add', 'assigned'); git(args.checkoutRoot, 'commit', '-qm', 'main');
+  const before = git(args.checkoutRoot, 'rev-parse', 'HEAD');
+  const result = await s.worktree({ action: 'integrate', backlogItemKey: 'TASK-91' });
+  assert.equal(result.error, 'CONFLICT'); assert.match(result.next, /Send the worker a fix-up/);
+  assert.equal(git(args.checkoutRoot, 'rev-parse', 'HEAD'), before);
+  assert.equal(git(args.checkoutRoot, 'status', '--short'), '');
+});
+
+test('red gate rollback restores main and permits a complete worker retry', async t => {
+  const { s, args, create } = worktreeSession(t);
+  const out = await create('TASK-91');
+  fs.writeFileSync(path.join(out.matchRoot, 'app.txt'), 'candidate\n');
+  git(out.worktreeRoot, 'add', 'assigned'); git(out.worktreeRoot, 'commit', '-qm', 'candidate');
+  assert.equal((await s.worktree({ action: 'integrate', backlogItemKey: 'TASK-91' })).ok, true);
+  assert.equal((await s.worktree({ action: 'rollback', backlogItemKey: 'TASK-91' })).ok, true);
+  assert.equal(fs.readFileSync(path.join(args.matchRoot, 'app.txt'), 'utf8'), 'baseline\n');
+  fs.writeFileSync(path.join(out.matchRoot, 'app.txt'), 'fixed candidate\n');
+  git(out.worktreeRoot, 'add', 'assigned'); git(out.worktreeRoot, 'commit', '-qm', 'repair');
+  assert.equal((await s.worktree({ action: 'integrate', backlogItemKey: 'TASK-91' })).ok, true);
+  assert.equal(fs.readFileSync(path.join(args.matchRoot, 'app.txt'), 'utf8'), 'fixed candidate\n');
+  s.state.submissions['TASK-91'] = { state: 'UNCERTAIN' };
+  assert.equal((await s.worktree({ action: 'rollback', backlogItemKey: 'TASK-91' })).error, 'INTEGRATION_ALREADY_SENT');
+});
+
+test('dispatch order is PI, nearest deadline, then points per minute, including late items', () => {
+  const now = 1_000_000;
+  const item = (id, type, maxPoints, extra = {}) => ({ id, type, maxPoints, ...extra });
+  const items = [item('TASK-91', 'TASK', 80), item('CR-92', 'CR', 200), item('BUG-93', 'BUG', 20, { deadlineAt: now + 30 * 60000 }),
+    item('TASK-94', 'TASK', 10, { deadlineAt: now + 60000 }), item('PI-95', 'PI', 10),
+    item('CR-96', 'CR', 1000, { local: { startedAt: now, worktree: {} } })];
+  assert.deepEqual(rank(items, now, now + 40 * 60000).ranked.map(r => r.id), ['PI-95', 'TASK-94', 'BUG-93', 'CR-92', 'TASK-91']);
+  assert.match(alerts(items, now, now + 40 * 60000).join('\n'), /Dispatch a worker now/);
 });

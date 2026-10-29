@@ -12,7 +12,7 @@ Paths (relative to `<matchRoot>` = `<checkoutRoot>/<folder>`):
 
 ## Filling the template
 - Keep every key and the structure of `submitTemplate`; fill every field. Do not add keys the template does not have unless an instruction asks for them.
-- **Use what Start Work shipped.** `start_work` returns `providedFiles` and `providedRunners` (absolute paths). A check runner the organizer sends loads the OFFICIAL QA data and the item is graded on its output: run it exactly as shipped and keep what it writes. Your own script, or your own data, produces numbers that cannot match the expected results - it looks green to you and scores zero. Only write your own check when nothing was shipped.
+- **Use what Start Work shipped.** The worker brief lists organizer files by absolute path under filesDir. A check runner the organizer sends loads the OFFICIAL QA data and the item is graded on its output: run it exactly as shipped and keep what it writes. Your own script, or your own data, produces numbers that cannot match the expected results - it looks green to you and scores zero. Only write your own check when nothing was shipped.
 - **Evidence file names are part of the spec.** When the MVS or the brief names an evidence file (`install.log`, `audit.log`, `typecheck.log`, `test.log`, `<ID>-TC-01.json`), produce that exact name - no alias, no extra suffix. A grader looks for the name it asked for.
 - `backlogId` = the item ID. `status`: the value the template/startInstruction defines for a finished item (e.g. SUBMITTED / DONE / COMPLETED). **PARTIAL and NOT_RUN are read as 'not done' and score accordingly** - before you write either, go back and run the provided runner, or the narrowest real check that exists. Use PARTIAL only when a requirement is genuinely impossible, and say why in one line. Never leave DRAFT / NOT_STARTED.
 - `gitRevision` inside the answer (if the template has it): leave as is; the helper sets it to the submitted SHA. The SHA always also goes at the request root (helper).
@@ -34,7 +34,7 @@ Name: `<ID>-TC-01.md`, `<ID>-TC-02.md`, ... plus `<ID>-regression.md` for the fu
 - Actual: <observed output, the relevant lines only>
 - Result: PASSED
 ```
-- Paste only the relevant output lines (test names + summary counts), never whole logs.
+- Redirect long command output to evidence/log files. Print only exit code + Get-Content -Tail 15 or Select-String summaries. View each screenshot at most once, only when it is the evidence being judged.
 - UI items: a screenshot is strong evidence, taken with a headless browser started as a command (never Computer Use, which needs an operator approval). In order of preference:
   1. `pnpm exec playwright screenshot --viewport-size=1440,900 "http://localhost:<port>/<page>" "<matchRoot>/answers/<ID>/evidence/<ID>-after-1440.png"` when the repo has Playwright.
   2. A headless Chrome/Edge binary, whichever this machine actually has - macOS: `"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"`; Windows: `& "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"`; Linux: `google-chrome` or `chromium` - with `--headless=new --disable-gpu --window-size=1440,900 --screenshot="<absolute path>" "<url>"`.
@@ -49,4 +49,4 @@ If a rule came from the match MCP server (internal standard, fixture set, ticket
 - `submit.json` parses (`node -e "JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'))" "<path>"`).
 - Every `evidence/<file>` you referenced exists. Remove `.gitkeep` only if real evidence exists (harmless either way).
 - Stage answers with the code: `git -C "<checkoutRoot>" add "<folder>/answers/<ID>"`.
-- `submit_work <ID> dryRun:true` lists anything missing in the commit.
+- Self-review every criterion against evidence, commit, then return READY/PARKED with SHA, counts and risks. The orchestrator owns dryRun, push and submit; workers never call them.

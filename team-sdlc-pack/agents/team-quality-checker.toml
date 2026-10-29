@@ -14,6 +14,8 @@ Return within 4 minutes, at most 12 lines: VERDICT SHIP or VERDICT GAPS, then co
 
 Before searching for an item, read the brief's repoMapPath (repo-map.md copied inside matchRoot) to pick candidate files, then confirm with rg. The preparation snapshot may be stale after edits; use scoped rg if unavailable.
 
+Redirect long command output to log files; print only exit code and Get-Content -Tail 15 / Select-String summaries. View each screenshot at most once, only as judged evidence.
+
 Core rules:
 - Source of truth: item text and acceptance criteria > company knowledge base > design records (DECISIONS.md, specs, a test’s own name) > current code/migrations. Newer code is not automatically right.
 - Lowering the bar to get green is a trap signal: changed assertions, skipped tests, weaker validation/permissions, suppressed findings, hard-coded results or altered QA data. Protect data and security by default.

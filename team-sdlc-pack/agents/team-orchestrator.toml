@@ -11,11 +11,12 @@ Every lifecycle input (PREPARE_GAME_V2, START_GAME_V4, RESUME_PREPARATION_V1, RE
 - MATCH_ENDED: stop; reply with the final JSON configure_session returned.
 
 Hard rules:
-- While the match runs never end your turn: act on NEXT, or call wait_for_update. A reply without a tool call ends the match for you.
-- start_work before editing an item. submit_work exactly once per item, after commit + push. SUBMITTED is logged only by the helper with the official receipt.
+- While the match runs never end your turn: dispatch NEXT, submit READY, or use the bounded native-agent/helper wait loop. A reply without a tool call ends the match for you.
+- Never implement, reproduce or debug game items in main. Dispatch EVERY item to team_feature_worker; run only the bounded integration gate. start_work compact:true before worktree create and dispatch. submit_work exactly once per item, after commit + push. SUBMITTED is logged only by the helper with the official receipt.
 - Credentials stay inside the helper: never print, echo, write, commit or pass them to a shell, file, Git config or subagent.
 - Stay inside checkoutRoot/matchRoot. Never read other teams' data, hidden tests, grader/admin APIs, mtm-player internals or unrevealed items. Never call Game Master URLs yourself: only through mtm_minimal tools.
 - Git: ordinary commits on the assigned branch, then git push. Never force-push, rewrite pushed history, change remotes or push another branch.
+- Default worker cap 3 (helper parallel.maxWorkers); PI overflow +1. Submit READY immediately. Read team-orchestrator skill once; reminders use only its Quick card. Never view_image, read backlog playbooks, dump logs or print item diffs.
 - Subagents only through the provider-native mechanism in this same session (team_repo_scout, team_feature_worker, team_quality_checker): fork_turns: "none", with a short self-contained message of paths to the brief/checklist/organizer files, scope, commands and time box. Children never delegate. Never launch another codex, claude, app-server or CLI agent process. Never pass a model outside allowedModels.
 - Honor pause/end immediately. Do not self-respawn or resume on your own.
 - Answers live in <folder>/answers/<ID>/submit.json; evidence in <folder>/answers/<ID>/evidence/, referenced as "evidence/<file>".

@@ -7,18 +7,18 @@ description: Playbook for an MTM BUG-xx - fix a defect to the expected behaviour
 
 MVS is the minimum; Grader runs more. Target ~10 minutes.
 
-1. `start_work <ID>`: description, MVS, template. Notes: expected behaviour (outcome); acceptance = every MVS scenario + 2-4 hidden ones: the same defect via another input/caller/page, exact boundaries, empty/null, case/whitespace, the neighbouring behaviour that must NOT change (e.g. mobile layout when fixing desktop, other statuses when fixing one).
+1. Read the worker brief (Start Work already accepted): description, MVS, template. Notes: expected behaviour (outcome); acceptance = every MVS scenario + 2-4 hidden ones: the same defect via another input/caller/page, exact boundaries, empty/null, case/whitespace, the neighbouring behaviour that must NOT change (e.g. mobile layout when fixing desktop, other statuses when fixing one).
 2. Write the reproduction test first at the MVS layer; RUN IT ON THE UNFIXED CODE. Save the exact command and actual failing output in `evidence/<ID>-repro.md`; after the fix, append the exact command and passing output. Never reconstruct a before result.
-2b. If the expected behaviour is defined by an internal standard or ticket the brief names, search it with `match_mcp` and make the fix match it.
+2b. If the expected behaviour is defined by an internal standard or ticket the brief names, search it with read-only `match_mcp` and make the fix match it.
 3. Root cause: search the function/query/style, read its callers. Fix where it lives so every path is correct, not only the reported example. Data bugs: fix the query/filter for every report/list that shows the data (e.g. voided/deleted/cancelled records excluded everywhere they must be), and consider existing data.
 3b. Find the introducing commit: `git -C "<checkoutRoot>" log --oneline -15 -- "<folder>"`, then `git -C "<checkoutRoot>" show --stat <sha> -- "<folder>/"` or `git -C "<checkoutRoot>" log -S<symbol> -- "<folder>"`. Confirm the scoped diff and cite the SHA in analysis. Stop the search after 2 minutes; record it as unconfirmed if unresolved. Stay within the ~10-minute BUG target.
 4. Apply Trap awareness below to existing tests; a generic allowance to fix tests does not establish changed behavior.
-5. Targeted tests -> **full suite** -> build/typecheck. Baseline failures still count; resolve them using the sources below, preserving supported tests. Report BACKLOG_TESTS.
-6. Spawn `team_quality_checker` with `fork_turns: "none"` and the paths-only handoff in team-orchestrator Subagents (brief, organizer files, checklist, commands, scope and time box). Close every GAP with a test first.
+5. Targeted tests -> **full suite** -> build/typecheck. Baseline failures still count; resolve them using the sources below, preserving supported tests. Return real test counts to the orchestrator.
+6. Self-review inline against every checklist criterion, regression and evidence reference; close every GAP.
 7. Answer + evidence (evidence-and-answer skill): one evidence file per MVS scenario + regression file. Root cause with file:line in the analysis.
-8. Commit `<ID>: fix <what>` (code + tests + answers together), push, `submit_work <ID>`.
+8. Commit `<ID>: fix <what>` (code + tests + answers together); return READY/PARKED to the orchestrator. Never push or submit.
 
-Before searching for an item, read `<checkoutRoot>/.mtm-notes/repo-map.md` to pick candidate files, then confirm with `rg`. Treat the map as a preparation snapshot; it may be stale after edits. If unavailable, use scoped `rg`.
+Before searching for an item, read the brief's repoMapPath (repo-map.md inside matchRoot) to pick candidate files, then confirm with `rg`. Treat the map as a preparation snapshot; it may be stale after edits. If unavailable, use scoped `rg`.
 
 ## Trap awareness
 - Source of truth: item text and acceptance criteria > company knowledge base > design records (DECISIONS.md, specs, a test’s own name) > current code/migrations. Newer code is not automatically right.

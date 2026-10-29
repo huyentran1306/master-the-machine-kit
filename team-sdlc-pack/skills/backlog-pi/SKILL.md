@@ -7,20 +7,20 @@ description: Playbook for an MTM Product Incident (PI-xx) - production issue wit
 
 The clock started at reveal; rank is by the server's receivedAt of a PASSED submission (100/90/75/60%). FAILED = 0, so verify once, properly, then ship. No MVS: Grader has its own criteria. Target <= 10 minutes.
 
-1. `start_work <ID>` immediately (stash/commit current work first). Read description + startInstruction + template. Notes: outcome + repro line only.
-2. Locate (aim 4 minutes). Spawn `team_repo_scout` with `fork_turns: "none"` and the paths-only handoff in team-orchestrator Subagents: checkoutRoot, folder, matchRoot, brief and organizer-file paths, scope, 4-minute time box, return root cause in 15 lines with file:line. Keep searching yourself:
+1. Read the worker brief (Start Work already accepted). Read description + startInstruction + template. Notes: outcome + repro line only.
+2. Locate (aim 4 minutes). If cheap, request read-only scout help from the orchestrator with checkoutRoot, folder, matchRoot, brief and organizer-file paths, scope and a <=2-minute limit. Continue your own search:
    - `rg -n` the symptom words, error codes, endpoints, UI labels, messages.
    - Logs: `logs/`, `*.log`, recon `logs` list; read stack traces to file:line.
    - Recent customer changes cause most incidents: `git -C "<checkoutRoot>" log --oneline -15 -- "<folder>"`, then `git -C "<checkoutRoot>" show --stat <sha> -- "<folder>/"` and the suspicious diff scoped with `-- "<folder>/"`. Commits named with backlog IDs are teams' work; others are the customer's.
    - Keep `fact:` (file:line / log line), `guess:`, `unknown:` in notes. Never fix a guess.
 3. Reproduce with the smallest failing test next to existing tests (or a scripted request). No repro = no trusted fix.
 4. Fix the root cause with the smallest safe change, where it lives (all paths through that code). Keep any rule the faulty change added on purpose. No refactoring.
-5. Run the repro + the affected module's tests; run the full suite too unless baseline says it is slow and the clock forbids it (PI is a race, but a red suite still fails acceptance). Build/typecheck once. Report BACKLOG_TESTS.
+5. Run the repro + the affected module's tests; run the full suite; record any timeout as NOT_RUN, never green. Build/typecheck once. Return real test counts to the orchestrator.
 6. Answer: incident summary, root cause with file:line + the commit that introduced it, impact, fix, verification, prevention note. Evidence: `<ID>-repro.md` (before -> after) + `<ID>-regression.md`.
-7. Commit (`<ID>: fix <symptom>`), push, `submit_work <ID>`. Then pop the stashed WIP (`git stash list`; `git stash pop 'stash@{N}'`).
+7. Self-review the checklist inline; commit code, tests, evidence and answer (`<ID>: fix <symptom>`). Return READY/PARKED; never push or submit.
 - `!! PI SPRINT` = stop expanding scope and ship the verified fix now.
 
-Before searching for an item, read `<checkoutRoot>/.mtm-notes/repo-map.md` to pick candidate files, then confirm with `rg`. Treat the map as a preparation snapshot; it may be stale after edits. If unavailable, use scoped `rg`.
+Before searching for an item, read the brief's repoMapPath (repo-map.md inside matchRoot) to pick candidate files, then confirm with `rg`. Treat the map as a preparation snapshot; it may be stale after edits. If unavailable, use scoped `rg`.
 
 ## Trap awareness
 - Source of truth: item text and acceptance criteria > company knowledge base > design records (DECISIONS.md, specs, a test’s own name) > current code/migrations. Newer code is not automatically right.

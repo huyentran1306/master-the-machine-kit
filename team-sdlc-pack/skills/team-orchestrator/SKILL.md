@@ -1,77 +1,51 @@
 ---
 name: team-orchestrator
-description: Coordinates the Digital Project Team during an MTM match after START_GAME_V4 or RESUME_GAME_V1 - picks backlog work, delegates, integrates, tests, commits, pushes and submits until the match is FINISHED.
+description: Dispatches all game items to workers, integrates, gates, pushes and submits until FINISHED.
 ---
 
-# Match loop (game phase)
+# Quick card
+1. Read this skill once. Later use only `Get-Content <skill> -TotalCount 30`; never re-read whole skills or backlog playbooks.
+2. Never implement, reproduce, test individual scenarios or debug an item yourself. Keep main clean; run only the integration gate below.
+3. Use configure_session's current view. Dispatch every startable item, including PI and late reveals: `start_work compact:true` -> `worktree create` -> worker.
+4. Spawn `team_feature_worker` with `fork_turns: "none"` and a paths-only handoff. Default cap: 3; PI may exceed it by one.
+5. Queue PI first, then nearest deadline, then points per minute. Never skip a missing title.
+6. Set worker time box to min(type target, deadline minus 5 minutes, match end minus 5 minutes), using the Game Master clock.
+7. READY: immediately integrate -> bounded gate -> push -> submit_work -> remove -> dispatch NEXT. Never hold READY for other work.
+8. Conflict/red gate: delegate fix-up. Never repair item code in main; only a trivial one-line conflict may be resolved there.
+9. Late worker: tell it to stop and return what passes, evidence and a commit; submit READY immediately.
+10. Active workers, nothing actionable: native agent wait <=45s -> `wait_for_update timeoutMs:1000` -> process events/completions -> repeat.
+11. No active workers: `wait_for_update` without timeoutMs. On pause stop workers; on mustEnd call `final_result end:true` immediately.
+12. Never view_image, print item diffs or dump logs. Use `git diff --stat`, exit codes and `Get-Content -Tail 15` / `Select-String` summaries.
 
-Goal: the most PASSED points, fast, with few tokens. FAILED or unsubmitted = 0. PI is a race (100/90/75/60% by finishing order). Grader (an AI grader) also checks scenarios beyond MVS and reads your submit.json + evidence.
+# Dispatch
+Prioritize passed points, then speed, then credits. Start from configure_session's view without a redundant refresh. Restore NEED_PREPARE_INPUT once with the prior lifecycle input. Never end the turn while the match runs.
 
-`configure_session` already ran BACKLOG_SYNC and returned the view. Every helper result carries `next`, `alerts`, `events` and `keepAlive`: obey `!!` alerts first.
+Use the helper's ranked NEXT/queue; exclude active workers. Configure the cap in helper `config/game-adapter.json`: `parallel.maxWorkers` (default 3). Reserve provider capacity for root + cap + one PI worker. If provider capacity refuses PI, stop and park the lowest-priority worker, release its slot, then dispatch PI immediately. Do not implement the PI yourself.
 
-**The first thing you do is `start_work`.** The view in the `configure_session` result is current, so calling `refresh_match` or `session_status` before the first item buys nothing and costs match minutes. If `configure_session` answers `NEED_PREPARE_INPUT`, the helper restarted and lost the login: send the earlier PREPARE_GAME_V2 input once. That single call restores the login *and* resumes the round, so its result already carries the view - go straight to `start_work` from there too.
+For EVERY startable item call start_work (compact defaults true), worktree create, then spawn `team_feature_worker` with `fork_turns: "none"` and a paths-only handoff. Pass paths, not pasted material: ID/type, checkoutRoot (= worktreeRoot), folder, matchRoot, briefFile, filesDir, checklist/answer paths, scope, time box and requested READY/PARKED result. Commands, playbook, stack/evidence skills, repo-map.md and organizer material are in briefFile. Workers read them. Include in-scope baseline fixes and sources by brief path. Ask workers to use repo-map.md for candidate files and confirm with rg; it may be stale after edits.
 
-## Loop
-1. Take NEXT from the view. Nothing actionable -> `wait_for_update` with **no timeoutMs**, then repeat. Never end the turn while the match runs. It is a long poll: it comes back the instant an item is released or the match status changes, so a long wait never delays you, while every extra wake-up re-reads the whole conversation and is the single biggest cost in a match. Once every revealed item is submitted and the match is still running, keep waiting the same way - do not poll on a timer to re-confirm what you already know.
-2. `start_work <ID>` (before any edit). Work happens in the application folder `recon_repo` reported as `app.path` (often `<matchRoot>/src`); `answers/` stays at `matchRoot`. The result names the playbook and, when the stack has one, a stack skill (`stack-nextjs-prisma`, else `stack-unknown`): read it once per match. It returns brief, startInstruction, submitTemplate, MVS, files, answer paths and the playbook. Read the playbook once: `.agents/skills/backlog-<pi|bug|cr|task>/SKILL.md`. The description is in the result; use `get_backlog_item` only if it is missing. **A backlog item with `title: null` is not a broken item** - the match page simply did not render a title the parser trusts. Call `get_backlog_item` for its text and work it normally; never skip or deprioritise an item because its title is missing.
-2b. **Does the item point outside the repository?** A brief that names an internal standard, a QA fixture set, a ticket, a policy or "the official <something>" means the answer is not in the code. Call `match_mcp action:"tools"` once per match to see whether the organizers provide a match MCP server (the customer's internal material), then `action:"call"` to search it. Quote the document id you used in the answer. If there is no such server, or it does not have it: choose the most conventional interpretation, write it under assumptions, and ship. Never report an item as blocked because a reference was not available - an unsubmitted item scores 0.
-3. Contract (1 minute, in `<checkoutRoot>/.mtm-notes/<ID>.md`, git-ignored): outcome; acceptance = every MVS line + 2-4 hidden scenarios; files in scope; assumptions. For a PI write only outcome + repro first.
-   `start_work` already returns `checklist`, `acceptanceCriteria` and `requiredScenarioNames` for this item, and writes `answers/<ID>/checklist.md`. Work that checklist in order — it is the definition of done, and it is there because a rule read at minute 0 fades by minute 30. Plan before you edit: decide the approach and the files in scope first, then implement. Mixing the two is how items drift out of scope.
-4. Implement with the smallest correct change. Tests first where possible. Report `BACKLOG_TESTS` RUNNING, then PASSED/FAILED with real counts (`required` = MVS count). Save the runner output as `answers/<ID>/evidence/test.log` and reference it from `submit.json`: `submit_work` refuses an item with no recorded test run (`allowUntested:true` only for an item that genuinely cannot be tested).
-4b. **Three failing runs on one item means the approach is wrong, not that you need another patch.** `report_progress` and the planner say `STUCK <ID>` at that point. Re-read the failing assertion against the acceptance criteria, then either change approach or park the item and take NEXT. A hard item parked at minute 15 costs far less than one that eats the rest of the match.
-4c. Run the **full suite and build/typecheck** before submission. Baseline failures still count: apply Trap awareness below. When design records support a failing test, fix the code and keep the test. For schema fixes, change the `.prisma` rule and add a new migration using the stack skill. Record baseline fixes and their sources in the brief and answer.
-5. Evidence + answer: follow `.agents/skills/evidence-and-answer/SKILL.md`.
-6. For CR/BUG, any item over 3 files, or above ~80 points, spawn `team_quality_checker` with `fork_turns: "none"` and the paths-only handoff under Subagents. It checks every criterion against evidence; close each GAP. Small TASK/PI: self-review in 3 lines against the checklist.
-7. Commit and push (separate commands, from checkoutRoot):
-   `git -C "<checkoutRoot>" status --short` -> `git -C "<checkoutRoot>" add <files> "<folder>/answers/<ID>"` -> `git -C "<checkoutRoot>" commit -m "<ID>: <what>"` -> `git -C "<checkoutRoot>" push origin <branch>`.
-   Push rejected: `git pull --rebase origin <branch>`, rerun the item's tests, push again. Never force-push.
-8. `submit_work <ID>` (optionally `dryRun:true` first when unsure). It refuses with exact errors if anything is missing; fix, commit, push, call again. `UNCERTAIN` -> call `submit_work <ID>` again without changing anything (same idempotency key).
-9. After `SUBMITTED`: do not wait for grading. Back to 1.
+Keep ID -> agent/worktree/stop-time in a short ledger. Targets: PI 10m, BUG 10m, TASK 8m, CR 14m, capped by workerStopAt (deadline/match end minus 5 minutes). If the cutoff has arrived, request only a verified deliverable that can fit; never silently skip late reveals. At cutoff send a stop-and-return message; do not wait out another full time box. PARKED: record BLOCKED with the reason, preserve its commit, stop its processes, remove the worktree and free the slot. Retry only with a feasible plan.
 
-## Priorities and time
-- PI first: when `!! PI <ID> revealed` appears, finish the current step, commit a tested state or `git stash push -u -m "WIP <ID>"`, and start the PI (unless NEXT says finish-first). After the PI is submitted, `git stash list` and pop your WIP.
-- Then items whose deadline is near, then best points per minute. Targets: PI 10m, BUG 10m, TASK 8m, CR 14m.
-- `!! WRAP UP` -> stop adding scope, ship what passes. `!! OVER BUDGET` -> submit what passes, or stash + mark parked (report BACKLOG_STATUS BLOCKED with a summary) and take NEXT. `!! ABANDON` -> stash as DEAD, take NEXT. Last 6 minutes: start nothing that cannot finish.
-- Deadlines and the match clock are the Game Master's (helper view), never your machine clock.
+Ports are assigned by the helper: pair n uses dev=3100+2n and production=3101+2n (parallel.portBase changes the base). Pairs persist and are not reused during the session, including PI overflow. Require explicit port flags/environment and matching browser/runner URLs; never fall back to shared defaults. Require the worktree's isolated TEST_DATABASE_URL. Workers stop their servers/browsers before READY/PARKED.
 
-## Parallel lane (when it pays)
-Use when 2+ non-PI items are startable, the repo is ready, and the items touch different areas. Max 2 workers.
-Discipline, in order of importance: **one worktree per worker; non-overlapping file sets; a `TEST_DATABASE_URL` of its own** (the helper rewrites it when it creates the worktree — never let two lanes share a test database, the suites truncate it between cases and will fail each other at random). You keep `start_work`, `submit_work` and the progress log; workers never call a Game API and never push. Cost grows with every lane, so add one only when the second item is worth more than the tokens the lane costs.
-1. `start_work <ID2>` then `worktree create <ID2>` (it moves the draft `answers/<ID2>/` into the worktree; give the worker the `answer` paths it returns, never the main checkout's).
-2. Spawn `team_feature_worker` with `fork_turns: "none"` and the paths-only handoff under Subagents: use `brief.briefFile`, `brief.filesDir` and `answer` paths returned by `worktree create`; set checkoutRoot to worktreeRoot. Time box: 8-12 minutes. Keep working on your own item.
-3. When it reports: `worktree integrate <ID2> message:"<ID2>: <what>"` (your own work must be committed or stashed first), run its tests in main, optionally spawn `team_quality_checker` with `fork_turns: "none"` and the paths-only handoff under Subagents, push, `submit_work <ID2>`, `worktree remove <ID2>`.
-4. Conflict -> integrate aborts and main is unchanged: redo the small change in main or resolve by hand.
-For a PI, the only parallel lane is a read-only `team_repo_scout` spawned with `fork_turns: "none"` and the paths-only handoff under Subagents.
+# Complete one READY item
+1. Read only its short result: status, commit SHA, counts, evidence paths, build status, risks and CONTRADICTION/TEST-CHANGE lines. Record real BACKLOG_TESTS counts. Verify its commit is the worktree HEAD; ask it to commit any unfinished files.
+2. Call worktree integrate. The helper cherry-picks the worker's committed item range; it never stages worker WIP. Scope inspection: status and diff --stat only.
+3. Run a single integration gate in main, target <=2 minutes: full suite + typecheck. Run build only if the worker did not pass it, or build-relevant files changed (dependencies/lockfiles, build config, schema/generated code, entrypoints/routes/assets). Use preparation timings; if the required gate cannot fit, return it to a worker on current main for the long verification and later run only the remaining checks for that exact tree. Never report a timeout as green. Redirect logs to ignored .mtm-notes; print exit codes and <=15 summary lines. No screenshots or scenario debugging in main.
+4. Gate green: push the assigned branch, then submit_work immediately. SUBMITTED -> worktree remove, release the finished agent slot, check Game Master events with wait_for_update timeoutMs:1000, dispatch NEXT; never wait for grading. UNCERTAIN/tool timeout -> replay unchanged body/key, never recommit. Push rejection -> recovery flow; never force-push.
+5. Conflict: helper aborts the cherry-pick; send worker current main SHA and conflict paths to rebase, fix, verify and commit. Only a trivial one-line conflict may be resolved in main. Red/timed-out gate: worktree rollback (revert only the just-integrated, unsubmitted range), send worker log paths and main SHA for fix-up, then process other READY items. After rollback, pass retryBaseSha and require rebase --onto <current-main-SHA> <retryBaseSha> to replay the failed range (ordinary rebase may skip reverted commits); a fresh worker may use a recreated worktree and saved commit. Never fix a red gate yourself. Re-run the bounded gate before pushing/submitting.
 
-## Subagents
-- `team_repo_scout` (read-only): PI root-cause hunt in parallel with your own search; CR requirement breakdown when the spec is long.
-- `team_feature_worker`: parallel lane only, inside its worktree.
-- `team_quality_checker` (read-only): CR/BUG review before commit.
-Every spawn uses `fork_turns: "none"`; children never spawn children. Send a short self-contained message containing ID/type, absolute checkoutRoot, folder, matchRoot (worktreeRoot for workers), briefFile, filesDir, checklist/answer paths, test commands, scope, time box and requested result. Pass paths, not pasted material or conversation history.
-For workers, `worktree create` writes the brief and organizer copies inside matchRoot. For scouts/checkers, prepare `<matchRoot>/.mtm-briefs/<ID>/brief.json` containing the item text, startInstruction, MVS, template, commands and scope; copy Start Work's `providedFiles` to its `files/` directory, preserving relative paths. Git-ignore `/<folder>/.mtm-briefs/` via the checkout's local exclude. Copy any cited KB excerpts and baseline notes there too; do not send children to `.git/mtm-team/` or the main checkout from a worktree.
-Copy `.mtm-notes/repo-map.md` into the child's brief directory and include its path as `repoMapPath`; worktree briefs copy it automatically. Tell children to confirm snapshot candidates with `rg` in their own matchRoot.
-For checkers include the item's starting commit as base and list in-scope baseline fixes with sources. Review commands: `git -C "<checkoutRoot>" status --short --untracked-files=all -- "<folder>"` and `git -C "<checkoutRoot>" diff <base> -- "<folder>"`; read untracked files directly.
-Never pass credentials. If a child misses its time box, continue without it. Record actual collaboration in the answer.
+# Wait loop
+Use actual provider-native agent wait (wait / wait_agent) and helper wait_for_update sequentially; there is no assumed cross-tool wait-any or cancellation primitive.
+- Drain delivered worker results and service READY first. Process pause/end immediately; dispatch PI before ordinary queued items. Replay start_work compact:true on edited items and forward the updated brief path; shorten worker cutoffs.
+- With active workers and no actionable work, wait on unfinished agents for at most 45,000 ms, shortened to the next cutoff; if less than the native minimum remains, service the cutoff now. Completion returns early. Then call wait_for_update with timeoutMs:1000 to drain buffered Game Master events and refresh the clock. Process both results and repeat. Exclude completed agents from future waits. Do not issue separate timer/status polls.
+- The helper polls in the background every 20s; native wait cannot wake on that queue. This loop bounds normal event detection to about 46s plus network latency, while worker completion wakes early. Never use an unbounded helper wait with active workers. When none remain, use the helper's default 55s long poll, then repeat while running.
+- On mustEnd/FINISHED stop workers, call final_result end:true, reply with its reply JSON and stop. On PAUSED stop worker activity and await the lifecycle resume; never log ORCHESTRATOR_ENDED for pause.
 
-## Shell (Windows PowerShell)
-- One command per call, or `;` separators. Never `&&`/`||` (PowerShell 5.1). No head/tail/sed: `Select-Object -First N`, `Get-Content -Tail N`.
-- Search with `rg -n` (fallback `git grep -n`). Open only needed ranges. Quote paths with spaces.
-- Edit files with apply_patch. Never write JSON with Set-Content/Out-File (BOM/encoding problems).
-- Single-quote args with `{}` or `-D...`: `'stash@{0}'`, `'-Dtest=FooTest'`.
-- Long builds/tests: wait on the same session until done; do not start parallel copies.
-- **`mustEnd` on any tool result means the match is over**: call `final_result {"end":true}` immediately. It writes ORCHESTRATOR_ENDED, the last event mtm-player waits for; until then the round stays open and looks unfinished. Nothing you do after the match ends can score.
-- A `byte-identical to another item's evidence` warning from `submit_work` means a lane copied the wrong evidence folder: delete what does not belong to this item from `answers/<ID>/evidence/`, recommit, and submit. It is a warning, so you may still submit if time is short - but a grader reading another item's screenshots counts against the evidence.
+# Optional assistance and hygiene
+Require inline checklist self-review from every worker. Keep checker/scout profiles available; do not use them routinely. On a worker's explicit request, with spare provider capacity and time, spawn `team_quality_checker` or `team_repo_scout` with `fork_turns: "none"` and a paths-only handoff (same worktree brief, review base, scope, <=2-minute limit). Relay the short findings to the worker. Reserve the PI slot; children never delegate.
 
-## Never
-- Read, search or `git log/show/diff` content of other match folders or outside `<folder>/`.
-- Submit twice, submit without start_work, or submit an unpushed commit.
-- Stop because a "company standard", fixture or document is unavailable: choose the most conventional interpretation, write it under assumptions, ship.
-- Spend more than 3 minutes fighting the environment (DB, browser, network): use the narrowest check that runs, mark scenarios you could not run as NOT_RUN with the reason, and ship.
-- Edit `challenge/` files, `exam-info.json`, `env-require/`, other teams' folders, mtm-player files, or the pack.
-- Commit `.env`, `node_modules`, build output, uploads or local data.
-- End the turn while the match is IN_PROGRESS or PAUSED-without-input. On `!! MATCH FINISHED`: `final_result end:true`, reply with its `reply` JSON, stop.
-
-Before searching for an item, read `<checkoutRoot>/.mtm-notes/repo-map.md` to pick candidate files, then confirm with `rg`. Treat the map as a preparation snapshot; it may be stale after edits. If unavailable, use scoped `rg`.
+Batch independent read-only shell commands. Quote Windows paths; use PowerShell, no && or ||. Never print credentials, whole logs, item diffs or organizer files. Never view_image. Never read backlog playbooks yourself. Never access other match folders, hidden tests, grader/admin endpoints or Player internals; never edit challenge files or commit local env/build data. Spend at most 3 minutes on environment trouble; delegate it and preserve honest NOT_RUN evidence.
 
 ## Trap awareness
 - Source of truth: item text and acceptance criteria > company knowledge base > design records (DECISIONS.md, specs, a test’s own name) > current code/migrations. Newer code is not automatically right.

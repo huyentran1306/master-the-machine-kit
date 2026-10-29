@@ -44,7 +44,8 @@ test('each delegation site requires no history and a brief passed by path', () =
       assert.match(line, /paths-only handoff/, dir);
     }
   }
-  assert.ok(sites >= 9);
+  assert.ok(sites >= 2, 'dispatch and optional worker-requested assistance remain available');
+  for (const kind of ['bug', 'cr', 'pi', 'task']) assert.doesNotMatch(read(`skills/backlog-${kind}/SKILL.md`), /spawn `team_quality_checker`/i);
   const handoff = read('skills/team-orchestrator/SKILL.md');
   for (const field of ['checkoutRoot', 'folder', 'matchRoot', 'briefFile', 'filesDir', 'checklist', 'time box', 'in-scope baseline fixes']) assert.ok(handoff.includes(field));
   assert.match(handoff, /Pass paths, not pasted material/);
@@ -66,7 +67,7 @@ test('all playbooks and isolated profiles carry the same source and trap rules',
     assert.doesNotMatch(text, /fix a baseline test that contradicts|correct that test and say so|company with invoices/i);
   }
   const loop = read('skills/team-orchestrator/SKILL.md');
-  assert.ok(loop.indexOf('## Trap awareness') > loop.indexOf('9. After `SUBMITTED`'));
+  assert.ok(loop.indexOf('## Trap awareness') > loop.indexOf('# Complete one READY item'));
 });
 
 test('children retain shell, resource, evidence and scope rules without parent skills', () => {
@@ -101,4 +102,36 @@ test('schema fixes and timeout recovery have explicit safe sequences', () => {
   assert.match(recovery, /tool timeout.*UNCERTAIN/);
   assert.match(recovery, /Replay.*stored body\/key; never recommit/);
   assert.match(recovery, /SUBMIT_IN_PROGRESS/);
+});
+
+test('orchestrator dispatches every item with a bounded completion and event loop', () => {
+  const text = read('skills/team-orchestrator/SKILL.md');
+  const card = text.split('# Quick card\n')[1].split('\n# Dispatch')[0];
+  assert.ok(card.trim().split('\n').length <= 30);
+  assert.ok(text.indexOf('# Quick card') < 250);
+  for (const phrase of ['Read this skill once', '-TotalCount 30', 'Never implement', 'EVERY startable item', 'late reveals',
+    'compact:true', 'worktree create', 'Default cap: 3', 'PI may exceed it by one', 'parallel.maxWorkers',
+    'PI first, then nearest deadline, then points per minute', 'deadline minus 5 minutes',
+    'Never hold READY', 'target <=2 minutes', 'full suite + typecheck', 'build-relevant files',
+    'worktree rollback', 'trivial one-line conflict', 'native agent wait', '45,000 ms', 'timeoutMs:1000',
+    'no assumed cross-tool wait-any', 'stop-and-return', 'Never view_image', 'git diff --stat', '-Tail 15']) assert.ok(text.includes(phrase), phrase);
+  assert.doesNotMatch(text, /Parallel lane \(when it pays\)|Keep working on your own item|Max 2 workers|redo the (small )?change in main|stash push/);
+  const profile = read('agents/team-orchestrator.toml');
+  assert.match(profile, /Never implement, reproduce or debug game items in main/);
+  assert.doesNotMatch(read('skills/team-recovery/SKILL.md'), /keep coding|finish, test, commit|resolve keeping both/);
+});
+
+test('worker owns the complete lifecycle and compact committed result', () => {
+  const text = read('agents/team-feature-worker.toml');
+  for (const phrase of ['playbook', 'reproduce', 'fix', 'full suite', 'typecheck', 'build', 'QA data',
+    'engineering record', 'Self-review inline', 'final commit', 'STATUS: READY | PARKED', 'COMMIT:',
+    'TESTS:', 'CHECKS:', 'EVIDENCE:', 'REVIEW:', 'RISKS:', 'CONTRADICTION:', 'TEST-CHANGE',
+    'Never call Game APIs', 'Never push', 'brief.ports.dev', 'brief.ports.production', 'TEST_DATABASE_URL',
+    'workerStopAt', '-Tail 15', 'View each screenshot at most once']) assert.ok(text.includes(phrase), phrase);
+  assert.doesNotMatch(text, /Never commit/);
+  for (const kind of ['bug', 'cr', 'pi', 'task']) {
+    const playbook = read(`skills/backlog-${kind}/SKILL.md`);
+    assert.match(playbook, /READY\/PARKED/);
+    assert.doesNotMatch(playbook, /`start_work <ID>`|`submit_work <ID>`|Report BACKLOG_TESTS|stash/);
+  }
 });

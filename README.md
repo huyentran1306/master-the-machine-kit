@@ -1,6 +1,6 @@
-# Master the Machine Kit3 — 2.6.0
+# Master the Machine Kit3 — 2.7.0
 
-Team pack **Codex**, protocol 4, cho MTM Player. Bản 2.6.0 trên nhánh `codex/kit3_bou_v5`, phát triển từ bản 2.5.0 trên `codex/kit3_bou_v3`.
+Team pack **Codex**, protocol 4, cho MTM Player. Bản 2.7.0 trên nhánh `codex/kit3_bou_v6`, cập nhật từ nền 2.6.0.
 
 ## Thay đổi chính
 
@@ -24,7 +24,7 @@ node .\team-sdlc-pack\scripts\install.mjs --team-workspace "D:\mtm\BAK-Kit3"
 node .\team-sdlc-pack\scripts\check-distribution.mjs --team-workspace "D:\mtm\BAK-Kit3"
 ```
 
-Chỉ tiếp tục khi checker báo **READY**. Trên MTM Player chọn provider **Codex** và load đúng workspace vừa cài. Team identity trong pack là `[FHM] Bá Khí`; metadata package/info/runtime cùng phiên bản `2.6.0`.
+Chỉ tiếp tục khi checker báo **READY**. Trên MTM Player chọn provider **Codex** và load đúng workspace vừa cài. Team identity trong pack là `[FHM] Bá Khí`; metadata package/info/runtime cùng phiên bản `2.7.0`.
 
 Initialize trên Player chỉ tạo round local. Để tập lại cần mã trận mới hoặc Re-match phía BTC.
 
@@ -48,6 +48,20 @@ Repo chỉ chứa runtime Codex, tài liệu và fixture giả. Không đưa cre
 ## Windows contest machine
 
 Use MTM Player **0.9.35**. Install into a fresh workspace using the Node command above (or `team-sdlc-pack/install.ps1`), then run the checker and require **READY**. In Player Init, select Codex, set the Codex CLI path to the installed **codex.exe** (absolute path), and choose the match-authorized model in Init. Keep previous match workspaces separate.
+
+## Changelog — 2.7.0
+
+Written by Codex. Optimize the official 40-minute Windows match for passed points, then speed, then credits. Retain the existing source, baseline, evidence and submission safeguards.
+
+- **Dispatcher-only game phase:** assign every startable item, including PI and late reveals, to a feature worker with `fork_turns: "none"` and a paths-only handoff. The helper ranks PI first, then nearest deadline, then points per minute, excluding occupied worktrees. Default to three workers; allow one extra PI. Configure `parallel.maxWorkers` in `team-sdlc-pack/config/game-adapter.json` before installing. Reserve provider capacity for the orchestrator, the cap, and one PI; if the provider refuses that extra slot, park a lower-priority worker. This removes the main-checkout implementation lane that delayed ready submissions, late reveals and integrations during rehearsal.
+- **Whole-item workers:** workers own playbooks, reproduction, implementation, targeted/full-suite checks, required typecheck/build, organizer runners and QA data, evidence, answer, engineering record, inline checklist review and final commits. Return READY/PARKED, SHA, counts, check status, evidence paths, risks and required contradiction/test-change lines. Never call Game APIs or push. Keep checker/scout profiles only for worker-requested, read-only assistance when a spare slot and <=2 minutes are available; reserve PI capacity. This removes routine per-item reviewer overhead while preserving criterion-based review.
+- **Immediate integration and submission:** integrate committed worker ranges, run one gate in main (target <=2 minutes: full suite + typecheck; build only when absent/failed in the worker or build-relevant files changed), push, submit and remove immediately. If a required check cannot fit, delegate long verification of the integrated tree; never call a timed-out gate green. Conflicts and red gates go back to a worker. Only a trivial one-line conflict may be resolved in main. A guarded rollback reverts the just-integrated, unsubmitted range, freeing main for other READY items; replay the complete failed range on retry. Preserve uncertain submission bodies/keys unchanged.
+- **Deadline margin and event loop:** end worker time boxes five minutes before the earlier item deadline or match end; ask late workers to stop and return what passes. With active workers, wait natively for completion for at most 45 seconds (shorter near cutoff), then drain/check Game Master events with `wait_for_update timeoutMs:1000`. Also check events between integrations. With no workers, use the helper's 55-second long poll. Normal idle event latency is about 46 seconds plus network latency; completion wakes early. This is a sequential loop using available primitives, not an assumed cross-tool wait-any. The margin addresses the narrow deadline buffer observed in rehearsal.
+- **Small orchestrator context:** `start_work` now defaults to `compact:true`, writes full material in ignored brief/files paths and returns only dispatch metadata, paths and a short summary. `compact:false` retains the full result. Read the orchestrator skill once; use only its <=30-line Quick card for reminders. Never view images or item diffs in the orchestrator; print only stats, exit codes and <=15 log-summary lines. Workers redirect long logs and view each judged screenshot at most once. Rehearsal showed that the organizer meter counted the orchestrator thread alone, repeated skill/material reads enlarged that context, and each subsequent call resent it; fewer/smaller turns also help independently of that meter behavior.
+- **Concurrent environment isolation:** persist a unique port pair per worktree: dev `3100 + 2n`, production `3101 + 2n`, including PI overflow. Configure `parallel.portBase` in the same helper config. Write the pair into each brief; require server flags/environment and browser/runner URLs to use it. Keep the existing per-worktree test-DB rewrite, copy preparation notes into the brief, and remap application/checklist paths. Workers stop their processes before returning and use private dependencies before installs or client generation that would mutate a shared link.
+- **Regression coverage:** add static dispatch/lifecycle contracts and synthetic runtime tests for compact/full mode, material files, deadline margin, caps, ports/DBs, queue order, committed integration, replay, conflict abort and rollback/fix-up. Version package/runtime/info consistently at 2.7.0. No organizer pages, item descriptions, team records, credentials or match transcripts were added.
+
+Validation: pending final full-suite and fresh-install checks. No live-match performance claim.
 
 ## Changelog — 2.6.0
 

@@ -100,7 +100,7 @@ export function buildChecklist({ id, type, startInstruction = '', description = 
       ? `Cover all ${requiredScenarios} required verification scenario(s), plus the hidden cases the criteria imply.`
       : 'Cover the stated scenarios plus the hidden cases the criteria imply.',
     'Before submitting, walk the criteria one by one and point each at the evidence line that proves it. A criterion with no evidence is not done.',
-    'Commit and push, then submit on that exact revision.',
+    'Self-review every criterion inline; commit code, tests, evidence and answer, then return READY/PARKED with SHA and counts. The orchestrator integrates, pushes and submits.',
   ];
 
   const lines = [`# ${id} — checklist`, '', '## Acceptance criteria'];

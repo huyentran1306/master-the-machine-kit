@@ -49,50 +49,28 @@ export function rank(items, now, endsAt, opts = {}) {
   const est = (it) => o.estMinutes[it.type] ?? 10;
   const ranked = [];
   const skipped = [];
-  const piActive = items.some((it) => it.type === 'PI' && it.local?.startedAt && !isSubmitted(it) && !isClosed(it, now));
   for (const it of items) {
     const l = it.local || {};
-    if (isSubmitted(it)) continue;
-    if (isClosed(it, now)) {
-      if (l.startedAt) skipped.push({ id: it.id, why: `${it.availability || 'deadline passed'}: cannot be submitted any more` });
+    if (isSubmitted(it) || isClosed(it, now) || l.worktree) continue;
+    if (l.parked || l.notOpenRefused || ['LOCKED', 'HIDDEN', 'UPCOMING'].includes(it.availability)) {
+      skipped.push({ id: it.id, why: l.parked ? 'parked: resume only when feasible' : 'not open yet' });
       continue;
     }
     const { left } = effectiveLeft(it, now, endsAt);
-    const started = !!l.startedAt;
-    if (!started && left != null && left < (o.minFeasibleMinutes[it.type] ?? 4)) {
-      skipped.push({ id: it.id, why: `only ${Math.max(0, left).toFixed(1)}m left: not worth starting` });
-      continue;
-    }
-    let tier;
-    let why;
-    const dl = it.deadlineAt != null ? (it.deadlineAt - now) / 60000 : null;
-    if (l.notOpenRefused && !started) { tier = 7; why = 'server said not OPEN yet; retry when its state changes'; }
-    else if (l.parked) { tier = 6; why = `parked${l.parkReason ? `: ${l.parkReason}` : ''}`; }
-    else if (!started && (l.startRefusals || 0) >= 2) { tier = 6; why = 'start refused twice'; }
-    else if (it.type === 'PI') { tier = 0; why = started ? 'PI in progress: finish it' : 'PI race: points decay with finishing rank'; }
-    else if (started && !piActive && dl != null && dl >= 2 && dl < est({ type: 'PI' }) + 2) { tier = -1; why = `finish first: ${dl.toFixed(1)}m to its deadline`; }
-    else if (started) { tier = 1; why = l.owner && l.owner !== 'orchestrator' ? `in progress (${l.owner})` : 'in progress: finish it'; }
-    else if (dl != null && dl <= o.urgentMinutes) { tier = 2; why = `deadline in ${Math.max(0, dl).toFixed(1)}m`; }
-    else { tier = 3; why = `${it.maxPoints ?? '?'} pts / ~${est(it)}m`; }
-    const minF = o.minFeasibleMinutes[it.type] ?? 4;
-    const tightAt = tier === 2 ? Math.max(minF + 2, est(it) * 0.6) : est(it);
-    if (!started && (tier === 2 || tier === 3) && left != null && left < tightAt) {
-      tier = 3.5;
-      why += `; tight (${left.toFixed(1)}m left)`;
-    }
-    ranked.push({ id: it.id, type: it.type, tier, why, left: left == null ? null : Math.round(left * 10) / 10, value: (Number(it.maxPoints) || 0) / est(it), started, maxPoints: it.maxPoints ?? null });
+    const tier = it.type === 'PI' ? 0 : it.deadlineAt != null ? 1 : 2;
+    const why = tier === 0 ? 'PI race: dispatch now, cap +1 allowed'
+      : tier === 1 ? 'nearest deadline; reserve 5 minutes to integrate and submit'
+      : String(it.maxPoints ?? '?') + ' pts / ~' + est(it) + 'm';
+    ranked.push({ id: it.id, type: it.type, tier, why, left: left == null ? null : Math.round(left * 10) / 10,
+      deadline: it.deadlineAt ?? Infinity, value: (Number(it.maxPoints) || 0) / est(it), started: !!l.startedAt, maxPoints: it.maxPoints ?? null });
   }
   ranked.sort((a, b) => a.tier - b.tier
-    || (a.tier === 0 ? Number(b.started) - Number(a.started) : 0)
-    || (a.tier === 2 ? (a.left ?? 1e9) - (b.left ?? 1e9) : 0)
-    || (a.tier >= 3 && a.tier < 4 ? b.value - a.value : 0)
-    || (b.maxPoints || 0) - (a.maxPoints || 0)
-    || (o.typeOrder[a.type] ?? 9) - (o.typeOrder[b.type] ?? 9)
-    || a.id.localeCompare(b.id, 'en', { numeric: true }));
-  return { ranked: ranked.map(({ value, ...r }) => r), skipped };
+    || (a.tier === 1 ? a.deadline - b.deadline : 0)
+    || b.value - a.value || a.id.localeCompare(b.id, 'en', { numeric: true }));
+  return { ranked: ranked.map(({ value, deadline, ...r }) => r), skipped };
 }
 
-/** Short orders/notes for the model. `current` = the item the orchestrator is working on. */
+/** Short orders/notes for the model. `current` = the most recently started item before dispatch. */
 export function alerts(items, now, endsAt, { current, paused, status } = {}, opts = {}) {
   const o = plannerOptions(opts);
   const out = [];
@@ -105,12 +83,12 @@ export function alerts(items, now, endsAt, { current, paused, status } = {}, opt
   for (const it of items) {
     const l = it.local || {};
     if (isSubmitted(it) || isClosed(it, now)) {
-      if (l.startedAt && !isSubmitted(it) && isClosed(it, now) && it.id === current) out.push(`!! ABANDON ${it.id}: closed/deadline passed, cannot be submitted. Stash its changes (git stash push -u -m "DEAD ${it.id}") and take NEXT.`);
+      if (l.startedAt && !isSubmitted(it) && isClosed(it, now) ) out.push(`!! ABANDON ${it.id}: closed/deadline passed, cannot be submitted. Stop its worker, preserve the commit and take NEXT.`);
       continue;
     }
     if (it.type === 'PI' && !l.startedAt) {
       const ago = it.revealedAt ? ` ${((now - it.revealedAt) / 60000).toFixed(1)}m ago` : '';
-      out.push(`!! PI ${it.id} revealed${ago} and not started: it is a race. Commit-or-stash current work and start it now (unless NEXT says finish-first).`);
+      out.push(`!! PI ${it.id} revealed${ago} and not started: it is a race. Dispatch a worker now; PI may exceed the worker cap by one.`);
     }
     if (!l.startedAt || paused) continue;
     // Attempt-based, alongside the time boxes below: three failing runs on one item means the
@@ -122,14 +100,14 @@ export function alerts(items, now, endsAt, { current, paused, status } = {}, opt
     const { left, by } = effectiveLeft(it, now, endsAt);
     const isCur = it.id === current;
     if (left != null && left <= o.wrapUpMinutes) {
-      out.push(`${isCur ? '!!' : 'note:'} WRAP UP ${it.id}: ${Math.max(0, left).toFixed(1)}m left (${by}). Stop adding scope; evidence, commit, push, submit.`);
+      out.push(`${isCur ? '!!' : 'note:'} WRAP UP ${it.id}: ${Math.max(0, left).toFixed(1)}m left (${by}). Tell the worker to stop and return what passes; integrate and submit READY immediately.`);
       continue;
     }
-    if (isCur && l.startedAt) {
+    if (l.startedAt) {
       const spent = (now - l.startedAt) / 60000;
       const estM = o.estMinutes[it.type] ?? 10;
       if (it.type === 'PI' && spent > estM) out.push(`!! PI SPRINT ${it.id}: ${spent.toFixed(1)}m spent (target ${estM}m). Ship the verified fix now.`);
-      else if (it.type !== 'PI' && spent > estM * o.budgetFactor) out.push(`!! OVER BUDGET ${it.id}: ${spent.toFixed(1)}m spent (budget ${(estM * o.budgetFactor).toFixed(0)}m). Submit what passes now, or stash + park it and take NEXT.`);
+      else if (it.type !== 'PI' && spent > estM * o.budgetFactor) out.push(`!! OVER BUDGET ${it.id}: ${spent.toFixed(1)}m spent (budget ${(estM * o.budgetFactor).toFixed(0)}m). Submit what passes now, or park its worker and take NEXT.`);
     }
   }
   return out;

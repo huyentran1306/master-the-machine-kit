@@ -27,7 +27,7 @@ function writeInside(root, relative, text) {
 }
 
 /** Materialize a self-contained handoff within the child's permitted match folder. */
-export function writeItemBrief({ checkoutRoot, worktreeRoot = checkoutRoot, matchRoot, item, material, commands = {} }) {
+export function writeItemBrief({ checkoutRoot, worktreeRoot = checkoutRoot, matchRoot, item, material, commands = {}, context = {} }) {
   if (!material) throw new Error('Start Work material is missing; start the item before creating its worktree.');
   const folder = path.relative(worktreeRoot, matchRoot).replace(/\\/g, '/');
   partsOf(folder);
@@ -46,14 +46,17 @@ export function writeItemBrief({ checkoutRoot, worktreeRoot = checkoutRoot, matc
   const sourceMap = path.join(checkoutRoot, '.mtm-notes', 'repo-map.md');
   const repoMapPath = fs.existsSync(sourceMap)
     ? writeInside(matchRoot, `${relative}/repo-map.md`, fs.readFileSync(sourceMap, 'utf8')) : null;
+  const sourceBaseline = path.join(checkoutRoot, '.mtm-notes', 'baseline.md');
+  const baselinePath = fs.existsSync(sourceBaseline)
+    ? writeInside(matchRoot, `${relative}/baseline.md`, fs.readFileSync(sourceBaseline, 'utf8')) : null;
   const brief = {
     item: { id: item.id, type: item.type, title: item.title ?? null, description: item.description ?? '', acceptanceCriteria: item.acceptanceCriteria ?? null },
     startInstruction: material.startInstruction ?? '',
     minimumVerificationScenarios: material.minimumVerificationScenarios ?? null,
     submitTemplate: material.submitTemplate ?? null,
-    commands, files, repoMapPath,
+    commands, files, repoMapPath, baselinePath, ...context,
   };
   const briefFile = writeInside(matchRoot, `${relative}/brief.json`, JSON.stringify(brief, null, 2) + '\n');
   fs.mkdirSync(filesDir, { recursive: true });
-  return { briefFile, filesDir, files, repoMapPath };
+  return { briefFile, filesDir, files, repoMapPath, baselinePath };
 }

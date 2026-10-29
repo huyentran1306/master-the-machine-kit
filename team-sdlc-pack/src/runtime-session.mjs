@@ -34,10 +34,10 @@ export const DEFAULT_ADAPTER = {
   // maxWaitMs is a ceiling, not a sleep: wait_for_update returns the moment the page changes,
   // so a longer ceiling costs no reaction time and removes agent turns. Each idle turn re-reads
   // the whole conversation, which is where this match's tokens actually go.
-  polling: { successMs: 5000, errorMs: 10000, backgroundMs: 20000, maxWaitMs: 170000 },
+  polling: { successMs: 5000, errorMs: 10000, backgroundMs: 20000, maxWaitMs: 55000 },
   submit: { acceptedStatuses: ['ACCEPTED', 'RECEIVED'], retryBudgetMs: SUBMIT_LIMITS.retryMs },
   planner: {},
-  parallel: { maxWorkers: 2 },
+  parallel: { maxWorkers: 3, portBase: 3100 },
 };
 
 function deepMerge(a, b) {
@@ -475,7 +475,7 @@ export class RuntimeSession {
   nextHint() {
     switch (this.phase) {
       case 'PREPARATION': return 'Preparation: GIT_AUTH -> REPOSITORY -> ENVIRONMENT -> BUILD (report_progress each start/end), login_match, report_ready, then reply with its final JSON and end the turn.';
-      case 'GAME': return 'Game: take NEXT from the view (start_work -> implement/test -> evidence -> commit/push -> submit_work). Never end the turn while the match runs; when idle call wait_for_update.';
+      case 'GAME': return 'Game: dispatch every item (start_work compact:true -> worktree create -> team_feature_worker). Integrate READY, bounded gate, push, submit_work, remove. Never implement in main; use the bounded worker/event wait loop.';
       case 'PAUSED': return 'Paused: stop work and end the turn with final_result status BLOCKED.';
       case 'ENDED': return 'Ended: reply with the final JSON and stop.';
       default: return 'Call configure_session with the lifecycle input (raw text including its marker line).';
@@ -869,7 +869,8 @@ export class RuntimeSession {
     if (this.lastPollError) out.pollError = this.lastPollError;
     if (this.lastParse && !this.lastParse.structured) out.parse = `page structure unknown (${this.lastParse.warnings.join('; ')}): read pageText; pass matchUuid to start_work if needed`;
     if (pageText && this.lastPageText) out.pageText = truncate(this.lastPageText, 12000);
-    if (this.phase === 'GAME' && this.match.status !== 'FINISHED') out.keepAlive = 'Match running: do not end your turn. Act on NEXT, or call wait_for_update with no timeoutMs - it returns the instant anything changes, so waiting long is free and waking up often is not.';
+    out.maxWorkers = this.adapter.parallel.maxWorkers;
+    if (this.phase === 'GAME' && this.match.status !== 'FINISHED') out.keepAlive = 'Match running: dispatch NEXT or submit READY immediately. With workers: native agent wait <=45s, then wait_for_update timeoutMs:1000. Without workers: wait_for_update with no timeoutMs.';
     return out;
   }
 
@@ -966,7 +967,22 @@ export class RuntimeSession {
     return readJson(path.join(this.stateDir, 'items', id, 'start.json'), this.materialCache?.[id] || null);
   }
 
-  async start_work({ backlogItemKey, matchUuid } = {}) {
+  briefContext(it, worktreeRoot = this.checkoutRoot, matchRoot = this.matchRoot) {
+    const { left } = effectiveLeft(it, this.now(), this.match.endsAt);
+    const stopAt = left == null ? null : this.now() + (left - 5) * 60000;
+    return {
+      checkoutRoot: worktreeRoot, folder: this.repository?.folder, matchRoot,
+      appPath: this.appPath ? path.join(matchRoot, path.relative(this.matchRoot, this.appPath)) : matchRoot,
+      playbook: path.resolve(this.teamWorkspace || this.checkoutRoot, '.agents', 'skills', PLAYBOOK[it.type] || 'backlog-task', 'SKILL.md'),
+      stackSkill: this.stackSkill ? path.resolve(this.teamWorkspace || this.checkoutRoot, '.agents', 'skills', this.stackSkill, 'SKILL.md') : null,
+      evidenceSkill: path.resolve(this.teamWorkspace || this.checkoutRoot, '.agents', 'skills', 'evidence-and-answer', 'SKILL.md'),
+      answer: answerPaths(matchRoot, it.id), checklistFile: path.join(matchRoot, 'answers', it.id, 'checklist.md'),
+      deadlineAt: it.deadlineAt ?? null, workerStopAt: stopAt, deadlineMarginMinutes: 5,
+      ports: it.local?.worktree?.ports ?? null,
+    };
+  }
+
+  async start_work({ backlogItemKey, matchUuid, compact = true } = {}) {
     const id = String(backlogItemKey || '').trim();
     if (!ITEM_KEY_RE.test(id) && !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,31}$/.test(id)) return { ok: false, error: 'BAD_KEY' };
     if (this.phase !== 'GAME') return { ok: false, error: 'NOT_IN_GAME', message: `phase is ${this.phase}`, next: this.nextHint() };
@@ -1043,6 +1059,19 @@ export class RuntimeSession {
     }
     if (!it.local.worktree) this.state.current = id;
     this.saveState();
+    const context = root && this.checkoutRoot ? this.briefContext(it, it.local.worktree?.worktreeRoot || this.checkoutRoot, root) : null;
+    const brief = context ? writeItemBrief({
+      checkoutRoot: this.checkoutRoot, worktreeRoot: context.checkoutRoot, matchRoot: root,
+      item: { ...it, description: it.description || textBlockFor(this.lastPageText || '', id) || '' },
+      material, commands: this.commands, context,
+    }) : null;
+    if (compact) return this.clean({
+      ok: !!brief, ...(brief ? {} : { error: 'MATCH_ROOT_MISSING' }), id, type: it.type,
+      points: it.maxPoints ?? null, deadlineAt: it.deadlineAt ?? null, workerStopAt: context?.workerStopAt ?? null,
+      briefFile: brief?.briefFile ?? null, filesDir: brief?.filesDir ?? null,
+      answer: context?.answer ?? null, checklistFile, playbook: context?.playbook ?? null,
+      summary: ['Start accepted; full material is in briefFile.', 'Create the worktree; hand its returned paths to a worker.'],
+    });
     const filesOut = {};
     for (const [rel, content] of Object.entries(material.files)) {
       const s = typeof content === 'string' ? content : JSON.stringify(content);
@@ -1554,7 +1583,7 @@ export class RuntimeSession {
     });
   }
 
-  // ---------- parallel lane (worktrees) ----------
+  // ---------- worker worktrees ----------
   /** Moves an untracked draft answers/<ID>/ from the main checkout into the worktree. Returns true if moved. */
   async moveDraftAnswer(id, wtMatchRoot) {
     if (!this.matchRoot || !this.checkoutRoot) return false;
@@ -1570,6 +1599,10 @@ export class RuntimeSession {
   }
 
   async worktree({ action, backlogItemKey, message } = {}) {
+    return this.withLock(() => this.worktreeAction({ action, backlogItemKey, message }));
+  }
+
+  async worktreeAction({ action, backlogItemKey } = {}) {
     const id = backlogItemKey;
     if (!this.checkoutRoot) return { ok: false, error: 'NOT_CONFIGURED' };
     const base = path.join(this.checkoutRoot, '.mtm-wt');
@@ -1580,8 +1613,17 @@ export class RuntimeSession {
     if (!it) return { ok: false, error: 'UNKNOWN_ITEM' };
     if (action === 'create') {
       if (!it.local?.startedAt || !this.readMaterial(id)) return { ok: false, error: 'NOT_STARTED', next: 'Call start_work before worktree create.' };
-      const active = [...this.items.values()].filter((i) => i.local?.worktree && !isSubmitted(i)).length;
-      if (active >= (this.adapter.parallel.maxWorkers || 2)) return { ok: false, error: 'TOO_MANY_WORKERS', message: `at most ${this.adapter.parallel.maxWorkers} parallel worktrees` };
+      const active = [...this.items.values()].filter((i) => i.id !== id && i.local?.worktree && !isSubmitted(i)).length;
+      const cap = Math.max(1, Math.floor(Number(this.adapter.parallel.maxWorkers) || 3));
+      if (!it.local.worktree && active >= cap + (it.type === 'PI' ? 1 : 0)) return { ok: false, error: 'TOO_MANY_WORKERS', message: `at most ${cap} workers; PI may use one extra slot` };
+      let ports = it.local.worktree?.ports;
+      if (!ports) {
+        const slot = this.state.nextPortSlot || 0;
+        const dev = Number(this.adapter.parallel.portBase) + slot * 2;
+        if (!Number.isInteger(dev) || dev < 1024 || dev + 1 > 65535) return { ok: false, error: 'BAD_PORT_RANGE' };
+        ports = { dev, production: dev + 1 };
+        this.state.nextPortSlot = slot + 1;
+      }
       G.ensureExcluded(this.checkoutRoot, '/.mtm-wt/');
       const wtRoot = path.join(base, id);
       if (!fs.existsSync(wtRoot)) {
@@ -1589,51 +1631,86 @@ export class RuntimeSession {
         if (r.code !== 0) return { ok: false, error: 'WORKTREE_FAILED', message: (r.stderr || r.stdout).trim().slice(0, 400) };
       }
       const wtMatchRoot = path.join(wtRoot, this.repository.folder);
+      const baseSha = it.local.worktree?.baseSha || await G.revParse(wtRoot, 'HEAD');
+      it.local.worktree = { ...it.local.worktree, worktreeRoot: wtRoot, matchRoot: wtMatchRoot, branch: `mtm-wt/${id}`, baseSha, ports };
+      const context = this.briefContext(it, wtRoot, wtMatchRoot);
       const brief = writeItemBrief({
         checkoutRoot: this.checkoutRoot, worktreeRoot: wtRoot, matchRoot: wtMatchRoot,
         item: { ...it, description: it.description || textBlockFor(this.lastPageText || '', id) || '' },
-        material: this.readMaterial(id), commands: this.commands,
+        material: this.readMaterial(id), commands: this.commands, context,
       });
       const linked = linkDependencies(this.matchRoot, wtMatchRoot, { envSuffix: `_wt_${id.toLowerCase().replace(/[^a-z0-9]+/g, '_')}` });
-      it.local.worktree = { worktreeRoot: wtRoot, matchRoot: wtMatchRoot, branch: `mtm-wt/${id}`, envIsolated: linked.some((l) => l.includes('TEST_DATABASE_URL')) };
+      it.local.worktree.envIsolated = linked.some((l) => l.includes('TEST_DATABASE_URL'));
       it.local.owner = 'team_feature_worker';
       if (this.state.current === id) this.state.current = null;
       // start_work before create leaves an untracked answers/<ID>/ in the main checkout: it would block
       // integrate (MAIN_DIRTY) or collide with the cherry-pick. The worktree owns the answer from now on.
       const movedDraftAnswer = await this.moveDraftAnswer(id, wtMatchRoot);
       if (it.local.startedAt) materializeAnswer(wtMatchRoot, id, this.readMaterial(id)?.submitTemplate ?? null);
+      if (movedDraftAnswer && this.appPath && fs.existsSync(context.checklistFile)) {
+        const checklist = fs.readFileSync(context.checklistFile, 'utf8');
+        fs.writeFileSync(context.checklistFile, checklist.split(this.appPath).join(context.appPath));
+      }
       this.saveState();
       return {
-        ok: true, worktreeRoot: wtRoot, checkoutRoot: wtRoot, folder: this.repository.folder, matchRoot: wtMatchRoot, linked, movedDraftAnswer, brief,
+        ok: true, worktreeRoot: wtRoot, checkoutRoot: wtRoot, folder: this.repository.folder, matchRoot: wtMatchRoot, linked, movedDraftAnswer, brief, ports, workerStopAt: context.workerStopAt,
         answer: it.local.startedAt ? answerPaths(wtMatchRoot, id) : undefined,
         note: linked.some((l) => l.includes('TEST_DATABASE_URL')) ? 'This copy got its own TEST_DATABASE_URL (tests truncate between cases, so copies must not share one).' : undefined,
-        next: `Spawn team_feature_worker with fork_turns:"none". Pass paths, not pasted material: item ${id}, checkoutRoot/worktreeRoot ${wtRoot}, folder ${this.repository.folder}, matchRoot ${wtMatchRoot}, briefFile ${brief.briefFile}, filesDir ${brief.filesDir}, and the returned answer paths. Add scope, test commands and a time box. The worker stays inside matchRoot and never delegates, commits, pushes or calls Game APIs.`,
+        next: `Spawn team_feature_worker with fork_turns:"none". Pass paths, not pasted material: item ${id}, checkoutRoot/worktreeRoot ${wtRoot}, folder ${this.repository.folder}, matchRoot ${wtMatchRoot}, briefFile ${brief.briefFile}, filesDir ${brief.filesDir}, and the returned answer paths. Add scope and a time box ending by workerStopAt. Use brief ports dev=${ports.dev}, production=${ports.production}; override fixed runner ports. The worker commits its complete item, returns READY/PARKED, and never delegates, pushes or calls Game APIs.`,
       };
     }
     if (action === 'integrate') {
       const wt = it.local.worktree;
       if (!wt) return { ok: false, error: 'NO_WORKTREE' };
-      const ident = await G.userIdentity(this.checkoutRoot);
-      const c = await G.commitAll(wt.worktreeRoot, message || `${id}: implement`, ident);
-      if (!c.ok && c.error !== 'nothing to commit') return { ok: false, error: 'COMMIT_FAILED', message: c.error };
-      const sha = c.ok ? c.sha : await G.revParse(wt.worktreeRoot, 'HEAD');
+      const workerDirty = await G.statusPorcelain(wt.worktreeRoot);
+      if (!workerDirty || workerDirty.length) return { ok: false, error: 'WORKER_DIRTY', next: 'Ask the worker to finish evidence, self-review and commit before READY.' };
+      const sha = await G.revParse(wt.worktreeRoot, 'HEAD');
+      if (sha === wt.integratedWorkerSha) return { ok: true, integratedSha: wt.integratedSha, replay: true };
+      const common = (await G.git(this.checkoutRoot, ['merge-base', 'HEAD', sha])).stdout.trim();
+      const mainHead = await G.revParse(this.checkoutRoot, 'HEAD');
+      const previousBase = wt.retryBaseSha || wt.integratedWorkerSha;
+      const baseSha = common === mainHead ? common
+        : previousBase && await G.isAncestor(this.checkoutRoot, previousBase, sha) ? previousBase : common;
+      if (!baseSha || baseSha === sha) return { ok: false, error: 'NO_WORKER_COMMIT' };
+      const merges = await G.git(this.checkoutRoot, ['rev-list', '--merges', `${baseSha}..${sha}`]);
+      if (merges.code || merges.stdout.trim()) return { ok: false, error: 'NONLINEAR_WORKER_HISTORY', next: 'Ask the worker to rebase its item commits onto current main.' };
       const mainDirty = (await G.statusPorcelain(this.checkoutRoot))?.filter((l) => !l.includes('.mtm-wt/')) || [];
-      if (mainDirty.length) return { ok: false, error: 'MAIN_DIRTY', message: `commit or stash your own work in the main checkout first: ${mainDirty.slice(0, 5).join(', ')}`, worktreeCommit: sha };
-      const p = await G.cherryPick(this.checkoutRoot, sha);
-      if (!p.ok) return { ok: false, error: 'CONFLICT', conflicts: p.conflicts, message: p.error, worktreeCommit: sha, next: 'Cherry-pick aborted; main is unchanged. Resolve by hand (git cherry-pick <sha>, fix, git cherry-pick --continue) or redo the change in main.' };
+      if (mainDirty.length) return { ok: false, error: 'MAIN_DIRTY', message: `Preserve unexpected main changes and delegate their recovery: ${mainDirty.slice(0, 5).join(', ')}`, worktreeCommit: sha };
+      const mainBefore = await G.revParse(this.checkoutRoot, 'HEAD');
+      const p = await G.cherryPick(this.checkoutRoot, `${baseSha}..${sha}`);
+      if (!p.ok) return { ok: false, error: 'CONFLICT', conflicts: p.conflicts, message: p.error, worktreeCommit: sha, next: 'Cherry-pick aborted; main is unchanged. Send the worker a fix-up: rebase its item onto current main, resolve, verify and commit; never redo the item in main.' };
+      Object.assign(wt, { integratedWorkerSha: sha, integratedSha: p.sha, mainBefore, integrationBase: baseSha });
+      delete wt.retryBaseSha;
       it.local.owner = 'orchestrator';
-      return { ok: true, integratedSha: p.sha, next: `Run the tests for ${id} in the main checkout, report BACKLOG_TESTS, git push, then submit_work ${id}.` };
+      this.saveState();
+      return { ok: true, integratedSha: p.sha, next: `Run the <=2-minute integration gate (full suite + typecheck; build if needed), report BACKLOG_TESTS, push, submit_work ${id}, remove. Red gate: worktree rollback, delegate fix-up; never debug in main.` };
+    }
+    if (action === 'rollback') {
+      const wt = it.local.worktree;
+      if (!wt?.integratedSha || isSubmitted(it)) return { ok: false, error: 'NO_UNSUBMITTED_INTEGRATION' };
+      const submission = this.state.submissions[id];
+      const remoteHead = this.repository.branch ? await G.remoteTrackingHead(this.checkoutRoot, this.repository.branch) : null;
+      if (submission && ['PENDING', 'UNCERTAIN', 'SUBMITTED'].includes(submission.state)
+          || remoteHead && await G.isAncestor(this.checkoutRoot, wt.integratedSha, remoteHead)) return { ok: false, error: 'INTEGRATION_ALREADY_SENT', next: 'Preserve the submitted/pushed tree; replay unresolved submissions unchanged.' };
+      if (await G.revParse(this.checkoutRoot, 'HEAD') !== wt.integratedSha || (await G.statusPorcelain(this.checkoutRoot))?.length) return { ok: false, error: 'MAIN_CHANGED', next: 'Delegate recovery; do not revert unrelated work.' };
+      const r = await G.git(this.checkoutRoot, ['revert', '--no-edit', `${wt.mainBefore}..${wt.integratedSha}`]);
+      if (r.code) { await G.git(this.checkoutRoot, ['revert', '--abort']); return { ok: false, error: 'ROLLBACK_FAILED' }; }
+      wt.retryBaseSha = wt.integrationBase;
+      delete wt.integratedSha; delete wt.integratedWorkerSha; delete wt.mainBefore;
+      it.local.owner = 'team_feature_worker';
+      this.saveState();
+      return { ok: true, retryBaseSha: wt.retryBaseSha, next: 'Main restored by revert commits. Send the worker a fix-up; rebase --onto current-main retryBaseSha to replay the complete failed range, verify and commit before READY. Process other READY items now.' };
     }
     if (action === 'remove') {
       const wt = it.local.worktree;
       if (!wt) return { ok: true, removed: false };
       unlinkDependencies(wt.matchRoot);
       const r = await G.worktreeRemove(this.checkoutRoot, wt.worktreeRoot);
-      delete it.local.worktree;
+      if (r.code === 0) delete it.local.worktree;
       this.saveState();
-      return { ok: r.code === 0, removed: true, message: r.stderr.trim().slice(0, 300) || undefined };
+      return { ok: r.code === 0, removed: r.code === 0, message: r.stderr.trim().slice(0, 300) || undefined };
     }
-    return { ok: false, error: 'BAD_ACTION', message: 'action is create | integrate | remove | list' };
+    return { ok: false, error: 'BAD_ACTION', message: 'action is create | integrate | rollback | remove | list' };
   }
 }
 

@@ -25,7 +25,9 @@
   },
   "matchView": {
     "pagePathTemplate": "{matchPageUrl}/{matchId}",
-    "extraJsonPaths": ["/api/v1/match/{matchId}"],
+    "extraJsonPaths": [
+      "/api/v1/match/{matchId}"
+    ],
     "assignmentCheck": "block",
     "repoHostAliases": {},
     "mcpUrl": null
@@ -61,6 +63,7 @@
     "budgetFactor": 1.5
   },
   "parallel": {
-    "maxWorkers": 2
+    "maxWorkers": 3,
+    "portBase": 3100
   }
 }

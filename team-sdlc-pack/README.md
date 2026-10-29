@@ -1,8 +1,10 @@
-# team-sdlc-pack 2.6.0 — Digital Project Team (Codex, MTM technical guide 0.5.1)
+# team-sdlc-pack 2.7.0 — Digital Project Team (Codex, MTM technical guide 0.5.1)
 
 Team pack chính thức để thi Master the Machine: mtm-player load pack này, chạy Codex CLI với `team_orchestrator` làm root agent, MCP Helper (`mtm_minimal`) giữ credential trong bộ nhớ, gọi Game API và ghi `progress.ndjson`.
 
-2.6.0: record contradictions and authorized baseline test changes in existing answer fields; refuse changes to baseline migrations; read the ignored preparation repo map before searching; preserve BUG reproduction output before/after and cite the introducing commit; prefer structured backlog titles over page samples. `recon_repo` returns `repoMapPath`; submit preflight/dryRun returns `touchedBaseline` and exact repair instructions.
+2.7.0: dispatch every item to a worker; default three workers plus one PI overflow. Use compact Start Work briefs, deadline-minus-five-minute cutoffs, inline worker review and final commits, immediate integration/gate/push/submit, and bounded worker/event waits. Configure the cap and port base in `config/game-adapter.json` (`parallel.maxWorkers: 3`, `parallel.portBase: 3100`); reserve provider capacity for root + cap + one PI. See the orchestrator Quick card and [runtime details](docs/README.md).
+
+Inherited safeguards: record contradictions and authorized baseline test changes in existing answer fields; refuse changes to baseline migrations; read the ignored preparation repo map before searching; preserve BUG reproduction output before/after and cite the introducing commit; prefer structured backlog titles over page samples. `recon_repo` returns `repoMapPath`; submit preflight/dryRun returns `touchedBaseline` and exact repair instructions.
 
 ## Cấu trúc
 ```
@@ -31,7 +33,7 @@ Checker phải in `READY`. Sau mỗi lần sửa pack: cài lại. Không cài l
 
 ## Luồng trong trận
 - PREPARE_GAME_V2 → `configure_session` → GIT_AUTH/REPOSITORY/ENVIRONMENT/BUILD → `login_match` → `report_ready` (ENVIRONMENT_READY) → kết thúc lượt bằng JSON.
-- START_GAME_V4 → `configure_session` (BACKLOG_SYNC + DISCOVERED) → vòng lặp: `start_work` → code/test → evidence + `answers/<ID>/submit.json` → commit + push → `submit_work` (1 lần, có receipt mới log SUBMITTED) → `wait_for_update` khi rảnh. Không bao giờ kết thúc lượt khi trận còn chạy.
+- START_GAME_V4 → `configure_session` (BACKLOG_SYNC + DISCOVERED) → vòng lặp: `start_work compact:true` → `worktree create` → worker (code/tests/evidence/answer/self-review/commit) → integrate + bounded gate → push → `submit_work` (1 lần, có receipt mới log SUBMITTED) → `wait_for_update` khi rảnh. Không bao giờ kết thúc lượt khi trận còn chạy.
 - RESUME_GAME_V1 → reconcile log/Git/receipt, replay submit dở dang cùng idempotency key.
 - MATCH_PAUSED_V1 / MATCH_ENDED_V1 → dừng ngay.
 

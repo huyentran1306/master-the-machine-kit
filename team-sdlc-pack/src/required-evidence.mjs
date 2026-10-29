@@ -2,9 +2,14 @@
 const CUE = /\b(?:evidence|artifacts?|baseline|captur\w*|screenshots?|sav\w*|commit\w*|record\w*)\b/i;
 const BEFORE = /\bbaseline\b|\bbefore\b[^.!?\n]{0,60}\b(?:fix\w*|chang\w*|edit\w*|implement\w*)\b|\bunfixed\b/i;
 const FILE = /(?:[\w-]+\/)*[\w-][\w.-]*\.[a-zA-Z][a-zA-Z0-9]{0,9}\b/g;
+// The answer file, organizer templates/schemas and verification specs are named next to
+// evidence rules but are never evidence themselves; requiring them would block submission.
+const NOT_EVIDENCE = /^(?:submit\.json|.*-submit(?:\.schema)?\.json|.*\.schema\.json|.*minimum-verification-scenarios\.md)$/i;
+const baseName = p => String(p).replace(/\\/g, '/').split('/').pop().toLowerCase();
 
 export function extractRequiredEvidence(item = {}, material = {}) {
   const found = new Map();
+  const provided = new Set(Object.keys(material.files || {}).map(baseName));
   const scan = (value, context = '') => {
     if (Array.isArray(value)) { value.forEach(v => scan(v, context)); return; }
     if (value && typeof value === 'object') {
@@ -32,6 +37,7 @@ export function extractRequiredEvidence(item = {}, material = {}) {
         if (!token.startsWith('evidence/') && (token.includes('/') || /\.(?:[cm]?[jt]sx?|py|sql|toml|ya?ml|prisma|html|css)$/i.test(token))) continue;
         const name = token.replace(/^evidence\//, '');
         if (name.split('/').some(p => !p || p === '.' || p === '..')) continue;
+        if (NOT_EVIDENCE.test(baseName(name)) || provided.has(baseName(name))) continue;
         const before = BEFORE.test(surrounding);
         found.set(name, { name, before: before || found.get(name)?.before || false });
       }

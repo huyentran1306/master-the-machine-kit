@@ -42,6 +42,17 @@ test('wrapped requirements, indented evidence lists and serialized templates pre
   }), [{ name: 'wrapped.png', before: true }, { name: 'listed.json', before: false }, { name: 'serialized.log', before: false }]);
 });
 
+test('answer file, organizer templates/schemas, verification specs and provided files are not evidence', () => {
+  const description = [
+    '## Submission',
+    'Create `answers/X-9/` with `submit.json` (copied from `challenge/X-9-submit.json`) and an `evidence/` child folder.',
+    'Follow the evidence rules and file names in `X-9-minimum-verification-scenarios.md`. Validate against `X-9-submit.schema.json`.',
+    'Record the output of `X-9-fixture.csv` and capture `home_before_change.png` before changing the page.',
+  ].join('\n');
+  assert.deepEqual(extractRequiredEvidence({ description }, { files: { 'challenge/X-9-fixture.csv': 'a,b' } }),
+    [{ name: 'home_before_change.png', before: true }]);
+});
+
 const git = (cwd, ...args) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', windowsHide: true }).trim();
 function fixture(t) {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'kit3-material-'));

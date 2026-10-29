@@ -1,6 +1,6 @@
-# Master the Machine Kit3 — 2.1.0
+# Master the Machine Kit3 — 2.5.0
 
-Team pack **Codex**, protocol 4, cho MTM Player. Nhánh `codex/kit3-portal-recovery` chứa bản Kit3 để đội so sánh với `main`.
+Team pack **Codex**, protocol 4, cho MTM Player. Bản 2.5.0 trên nhánh `codex/kit3_bou_v4`, phát triển từ `codex/kit3_bou_v1`.
 
 ## Thay đổi chính
 
@@ -24,7 +24,7 @@ node .\team-sdlc-pack\scripts\install.mjs --team-workspace "D:\mtm\BAK-Kit3"
 node .\team-sdlc-pack\scripts\check-distribution.mjs --team-workspace "D:\mtm\BAK-Kit3"
 ```
 
-Chỉ tiếp tục khi checker báo **READY**. Trên MTM Player chọn provider **Codex** và load đúng workspace vừa cài. Team identity trong pack là `[FHM] Bá Khí`; metadata package/info/runtime cùng phiên bản `2.1.0`.
+Chỉ tiếp tục khi checker báo **READY**. Trên MTM Player chọn provider **Codex** và load đúng workspace vừa cài. Team identity trong pack là `[FHM] Bá Khí`; metadata package/info/runtime cùng phiên bản `2.5.0`.
 
 Initialize trên Player chỉ tạo round local. Để tập lại cần mã trận mới hoặc Re-match phía BTC.
 
@@ -48,6 +48,20 @@ Repo chỉ chứa runtime Codex, tài liệu và fixture giả. Không đưa cre
 ## Windows contest machine
 
 Use MTM Player **0.9.35**. Install into a fresh workspace using the Node command above (or `team-sdlc-pack/install.ps1`), then run the checker and require **READY**. In Player Init, select Codex, set the Codex CLI path to the installed **codex.exe** (absolute path), and choose the match-authorized model in Init. Keep previous match workspaces separate.
+
+## Changelog — 2.5.0
+
+Written by Codex from the 2.1.0 baseline after reviewing the Claude-written 2.1.1–2.4.0 commits and diff on `codex/kit3_bou_v3`. That branch was not modified or merged. The v1 match workflow is retained except for the changes below; 2.5.0 has not been measured in a live match.
+
+- Retained v3's useful ideas: `fork_turns: "none"`, brief paths instead of copied context, per-item submission locks, source-based trap handling, scoped Git review and new migrations for schema fixes.
+- Rewrote every child profile with the same compact source-of-truth, organizer-resource, evidence, scope and PowerShell rules. V3's checker/scout lacked parts of those rules; a child without parent history must be able to act independently. Every backlog playbook now carries the same trap policy, outside the numbered loop. Generic permission to fix tests does not prove that intended behavior changed.
+- Worktree briefs and organizer copies now live under `<matchRoot>/.mtm-briefs/<ID>/`, with returned absolute paths and local Git exclusions. This avoids exceptions to child read scope. The writer preserves file contents and relative imports, rejects unsafe paths, and includes item text, startInstruction, MVS and template.
+- Review explicitly includes untracked tests/migrations and named baseline fixes; scout history and PI briefs include checkoutRoot and folder. Schema fixes update both `.prisma` and a new migration, review SQL before deploy, and never accept reset prompts. Documented a fallback when `migrate dev --create-only` refuses non-interactive use.
+- Reimplemented per-item submit refusal and bounded the whole asynchronous path: 20 s preflight, at most 60 s for HTTP/retries/status checks, and 5 s final refresh. V3 only lowered a retry setting; request timeouts and refresh waits could still overrun the 120 s tool timeout. Timed-out submissions retain their body/key for replay, never recommit.
+- Oversized results use a valid JSON envelope whose final escaped length is bounded; short outcome/receipt/end-control fields survive. V3's envelope stayed parseable but escaping could exceed its size cap.
+- Added static contract checks plus runtime tests for worktree creation/ignoring, concurrency, lock cleanup, replay, deadlines and JSON truncation. Package/runtime/info versions agree at 2.5.0.
+
+Validation on Windows: `node --test tests/*.test.mjs` — **38/38 passed** (18 existing, 20 new). A fresh workspace under `os.tmpdir()` passed installation; both `scripts/install.mjs` and a separate `scripts/check-distribution.mjs` run printed **READY**, including the MCP handshake for 2.5.0.
 
 ## Changelog — 2.1.0
 

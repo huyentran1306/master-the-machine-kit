@@ -6,7 +6,7 @@ description: Stack notes for an MTM match whose customer system is a Next.js (Ap
 # Stack: Next.js + tRPC + Prisma + PostgreSQL (vitest)
 
 App root is `<matchRoot>/<app.path>` (usually `src/`). Run every command from there. `recon_repo` gives the exact commands; the usual ones with pnpm:
-`pnpm install --frozen-lockfile` · `pnpm test` (vitest) · `pnpm typecheck` · `pnpm build` · `pnpm exec prisma migrate deploy` · `pnpm db:seed` · `pnpm exec prisma migrate dev --name <slug>`
+`pnpm install --frozen-lockfile` · `pnpm test` (vitest) · `pnpm typecheck` · `pnpm build` · `pnpm exec prisma migrate deploy` · `pnpm db:seed`
 
 ## Where things live (typical layout)
 - `src/app/**` — routes and pages (App Router). `src/app/(app)/...` authed pages, `src/app/api/**` route handlers.
@@ -19,13 +19,12 @@ App root is `<matchRoot>/<app.path>` (usually `src/`). Run every command from th
 ## Finding the code for an item
 Search the user-visible string first (label, error code, column header, route segment): `rg -n "<text>" src prisma`. From a page, follow the tRPC procedure name to `server/api/routers`, then to `server/services`, then to the Prisma model. A validation message usually comes from `src/schemas`.
 
-## Database changes (CR)
-1. Edit the right `prisma/schema/*.prisma` file (one module per file).
-2. `pnpm exec prisma migrate dev --name <item-slug>` — creates `prisma/migrations/<timestamp>_<slug>/migration.sql`. **Commit the migration folder**: the grader clones the revision and applies migrations.
+## Database changes (including baseline fixes)
+1. Change the rule in the right `.prisma` file (for example `onDelete`) AND add a new migration. A SQL-only correction leaves the schema inconsistent and can be reversed by later generation.
+2. Run non-interactively: `pnpm exec prisma migrate dev --create-only --name <item-slug>`, review the generated SQL for only the intended changes, then `pnpm exec prisma migrate deploy`. If generation requests a reset or refuses a non-interactive shell, stop; use the installed CLI's migration-diff command to create a new migration against a disposable development/shadow database, review SQL, then deploy. Never answer reset prompts. **Commit schema and new migration together** and rerun the full suite.
 3. Never edit an existing migration; never `migrate reset` (it drops data). If a trigger/constraint is needed, add raw SQL inside the new migration.
 4. Keep existing data valid: a new NOT NULL column needs a default or a backfill statement in the migration.
 5. Run `pnpm exec prisma generate` if types look stale, then `pnpm typecheck`.
-6. Restoring a relation/constraint rule (e.g. a red pre-existing test shows `onDelete` must be `Restrict`, not `Cascade`): change the rule in the `.prisma` schema AND ship it as a new migration, or the next `migrate dev` reverts it. Non-interactive and safe: `pnpm exec prisma migrate dev --create-only --name <slug>`, review the generated SQL (only the intended constraint), then `pnpm exec prisma migrate deploy` and run the full suite. This applies to any item, not only CRs.
 
 ## Tests (vitest)
 - One file per area in `tests/`; follow `helpers.ts` (`truncateAll()` in `beforeEach`, fixture builders). Prefer service/router-level tests over UI tests: they are what the grader can run.

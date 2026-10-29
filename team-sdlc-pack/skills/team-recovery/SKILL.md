@@ -29,8 +29,8 @@ The helper re-logs in automatically. Persistent failure: keep coding the current
 The helper opens blocker `BEARER_REJECTED`. Do not retry in a loop. Continue local work; retry start/submit after `wait_for_update` shows a change or a new lifecycle input arrives.
 
 ## Submit outcomes
+- A `submit_work` tool timeout or missing response is UNCERTAIN. Replay `submit_work <ID>` with the stored body/key; never recommit or change the answer to recover a timeout. `SUBMIT_IN_PROGRESS` means the original call still owns the item: wait, then replay. A stored receipt means it is already done.
 - `UNCERTAIN`: change nothing; call `submit_work <ID>` again (same key + body). Repeat after `wait_for_update` if the network is down.
-- A tool timeout or no answer from `submit_work` counts as `UNCERTAIN`: do not change or recommit; call `submit_work <ID>` again (it replays the stored body; `SUBMIT_IN_PROGRESS` means the first call is still running - wait, then call again).
 - `REJECTED BACKLOG_NOT_STARTED`: `start_work <ID>`, then `submit_work <ID>`.
 - `REJECTED ALREADY_SUBMITTED`: it is done; take NEXT.
 - `REJECTED VALIDATION_ERROR/INVALID_SUBMISSION`: fix the named field in submit.json, commit, push, submit again.

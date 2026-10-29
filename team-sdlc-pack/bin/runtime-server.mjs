@@ -8,11 +8,11 @@ import { fileURLToPath } from 'node:url';
 import { RuntimeSession } from '../src/runtime-session.mjs';
 import { TOOLS } from '../src/tools.mjs';
 import { drainNetwork } from '../src/http.mjs';
+import { serializeToolValue } from '../src/tool-result.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PACK_ROOT = path.resolve(HERE, '..');
 const SUPPORTED_PROTOCOLS = ['2025-06-18', '2025-03-26', '2024-11-05'];
-const MAX_RESULT_CHARS = 60000;
 
 function readJson(f) {
   try {
@@ -42,11 +42,7 @@ function send(msg) {
 }
 
 function toolResult(value, isError = false) {
-  let text = JSON.stringify(value);
-  // Keep the result valid JSON when it is too long: callers parse it.
-  if (text.length > MAX_RESULT_CHARS) {
-    text = JSON.stringify({ truncated: true, originalLength: text.length, preview: text.slice(0, MAX_RESULT_CHARS - 200) });
-  }
+  const text = serializeToolValue(value);
   // mtm-player reads HTTP telemetry only from structuredContent.networkActivity (src/http.mjs).
   const networkActivity = drainNetwork();
   const out = { content: [{ type: 'text', text }], isError };

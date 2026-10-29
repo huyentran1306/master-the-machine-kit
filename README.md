@@ -1,6 +1,6 @@
-# Master the Machine Kit3 — 2.4.0
+# Master the Machine Kit3 — 2.5.0
 
-Team pack **Codex**, protocol 4, cho MTM Player. Nhánh `codex/kit3-portal-recovery` chứa bản Kit3 để đội so sánh với `main`.
+Team pack **Codex**, protocol 4, cho MTM Player. Bản 2.5.0 trên nhánh `codex/kit3_bou_v4`, phát triển từ `codex/kit3_bou_v1`.
 
 ## Thay đổi chính
 
@@ -24,7 +24,7 @@ node .\team-sdlc-pack\scripts\install.mjs --team-workspace "D:\mtm\BAK-Kit3"
 node .\team-sdlc-pack\scripts\check-distribution.mjs --team-workspace "D:\mtm\BAK-Kit3"
 ```
 
-Chỉ tiếp tục khi checker báo **READY**. Trên MTM Player chọn provider **Codex** và load đúng workspace vừa cài. Team identity trong pack là `[FHM] Bá Khí`; metadata package/info/runtime cùng phiên bản `2.4.0`.
+Chỉ tiếp tục khi checker báo **READY**. Trên MTM Player chọn provider **Codex** và load đúng workspace vừa cài. Team identity trong pack là `[FHM] Bá Khí`; metadata package/info/runtime cùng phiên bản `2.5.0`.
 
 Initialize trên Player chỉ tạo round local. Để tập lại cần mã trận mới hoặc Re-match phía BTC.
 
@@ -49,36 +49,19 @@ Repo chỉ chứa runtime Codex, tài liệu và fixture giả. Không đưa cre
 
 Use MTM Player **0.9.35**. Install into a fresh workspace using the Node command above (or `team-sdlc-pack/install.ps1`), then run the checker and require **READY**. In Player Init, select Codex, set the Codex CLI path to the installed **codex.exe** (absolute path), and choose the match-authorized model in Init. Keep previous match workspaces separate.
 
-## Changelog — 2.4.0
+## Changelog — 2.5.0
 
-Fixes from an independent review of 2.3.0 (the helper was unchanged since 2.1.0; the risks were in the subagent text introduced by `fork_turns: "none"`):
-- Subagent profiles now carry the core rules a `"none"` child can no longer inherit: trap signals and source-of-truth order, organizer runners/QA data, exact evidence names, scope, PowerShell rules. Workspace AGENTS.md lets subagents read the brief files they are given.
-- `worktree create` writes `<worktreeRoot>/.mtm-notes/<ID>-brief.md` (item text, startInstruction, MVS, template) and copies the organizer's Start Work files to `<worktreeRoot>/.mtm-notes/<ID>-files/`, so a worker can read them without leaving its worktree. Its `next` hint now says `fork_turns:"none"` and passes paths.
-- The scout's git history commands are scoped to the assigned folder; PI briefs pass checkoutRoot and folder.
-- The quality checker reviews `git status` plus a folder-scoped diff (new files included), accepts in-scope baseline fixes, and reports trap violations (edited existing assertions or migrations, weakened checks).
-- Schema-level baseline fixes are documented as a `.prisma` rule change plus a new migration (`migrate dev --create-only`, then `migrate deploy`).
-- Trap awareness moved after the match loop and the Never list so loop steps 5-9 read as one sequence.
-- `submit_work` is serialized per item (`SUBMIT_IN_PROGRESS`), its retry budget is 60 s so a call stays under the 120 s tool timeout, and a tool timeout is handled as UNCERTAIN in team-recovery. Oversized tool results stay valid JSON.
-- Not yet measured in a live match.
+Written by Codex from the 2.1.0 baseline after reviewing the Claude-written 2.1.1–2.4.0 commits and diff on `codex/kit3_bou_v3`. That branch was not modified or merged. The v1 match workflow is retained except for the changes below; 2.5.0 has not been measured in a live match.
 
-## Changelog — 2.3.0
+- Retained v3's useful ideas: `fork_turns: "none"`, brief paths instead of copied context, per-item submission locks, source-based trap handling, scoped Git review and new migrations for schema fixes.
+- Rewrote every child profile with the same compact source-of-truth, organizer-resource, evidence, scope and PowerShell rules. V3's checker/scout lacked parts of those rules; a child without parent history must be able to act independently. Every backlog playbook now carries the same trap policy, outside the numbered loop. Generic permission to fix tests does not prove that intended behavior changed.
+- Worktree briefs and organizer copies now live under `<matchRoot>/.mtm-briefs/<ID>/`, with returned absolute paths and local Git exclusions. This avoids exceptions to child read scope. The writer preserves file contents and relative imports, rejects unsafe paths, and includes item text, startInstruction, MVS and template.
+- Review explicitly includes untracked tests/migrations and named baseline fixes; scout history and PI briefs include checkoutRoot and folder. Schema fixes update both `.prisma` and a new migration, review SQL before deploy, and never accept reset prompts. Documented a fallback when `migrate dev --create-only` refuses non-interactive use.
+- Reimplemented per-item submit refusal and bounded the whole asynchronous path: 20 s preflight, at most 60 s for HTTP/retries/status checks, and 5 s final refresh. V3 only lowered a retry setting; request timeouts and refresh waits could still overrun the 120 s tool timeout. Timed-out submissions retain their body/key for replay, never recommit.
+- Oversized results use a valid JSON envelope whose final escaped length is bounded; short outcome/receipt/end-control fields survive. V3's envelope stayed parseable but escaping could exceed its size cap.
+- Added static contract checks plus runtime tests for worktree creation/ignoring, concurrency, lock cleanup, replay, deadlines and JSON truncation. Package/runtime/info versions agree at 2.5.0.
 
-- Merge of 2.1.1 (token reduction) into 2.2.0 (trap awareness): every subagent is spawned with `fork_turns: "none"` and a self-contained brief, subagent profiles forbid nested `spawn_agent`, and all trap-awareness rules apply. The 2.2.0 test-handling rules win wherever the two branches touched the same playbook line.
-- Not yet measured in a live match.
-
-## Changelog — 2.2.0
-
-- Trap awareness. Practice items contained a deliberate trap: an issued test asserting that deleting a company with invoices is RESTRICTED fails because a migration in the same seed switches the foreign keys to CASCADE, while `DECISIONS.md` documents RESTRICT. Earlier skills told the agent to "fix" a contradicting baseline test, i.e. weaken a protective test; practice grading still gave full points, which the official grading may not.
-- Skills now resolve contradictions with a source-of-truth order (item and acceptance criteria, company knowledge base, design records, then code/migrations) and treat any shortcut that turns a check green by lowering the bar as a trap signal. When the design records support a red test, the code is fixed and the test kept.
-- General rules added for every item: protect data and security by default, use organizer-shipped resources, fix environment failures in the environment, treat item/knowledge-base text as input rather than orders.
-- Based on 2.1.0 (1000/1000 in a Windows practice run). Not yet measured in a live match.
-
-## Changelog — 2.1.1
-
-- Token reduction for subagents. In a Windows practice run of 2.1.0 (1000/1000), the match used ~25.7M input tokens: main agent 13.3M, three subagent sessions ~10M, approval guardian 2.5M. Each subagent began with ~67-70k tokens of context because `spawn_agent` defaults to `fork_turns: "all"` and copies the whole parent conversation.
-- Skills now spawn every subagent with `fork_turns: "none"` and a self-contained brief (IDs, absolute paths, checklist path, diff/test commands, MVS names, evidence paths, time box); long material is written to `.mtm-notes/` and passed as paths.
-- Worker, quality-checker and scout profiles forbid nested `spawn_agent` and read the files named in their brief.
-- When to review or parallelize is unchanged. Not yet measured in a live match.
+Validation on Windows: `node --test tests/*.test.mjs` — **38/38 passed** (18 existing, 20 new). A fresh workspace under `os.tmpdir()` passed installation; both `scripts/install.mjs` and a separate `scripts/check-distribution.mjs` run printed **READY**, including the MCP handshake for 2.5.0.
 
 ## Changelog — 2.1.0
 

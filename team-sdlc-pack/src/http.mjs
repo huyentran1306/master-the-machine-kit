@@ -109,19 +109,21 @@ export function drainNetwork() {
 
 export async function request(url, opts = {}) {
   const {
-    method = 'GET', headers = {}, body, jar, allowedOrigins, timeoutMs = 20000, maxBytes = 3_000_000, maxRedirects = 5,
+    method = 'GET', headers = {}, body, jar, allowedOrigins, timeoutMs = 20000, maxBytes = 3_000_000, maxRedirects = 5, deadlineAt = Infinity,
   } = opts;
   let current = url;
   let m = method;
   let b = body;
   const hdrs = { ...headers };
   for (let hop = 0; hop <= maxRedirects; hop++) {
+    const remaining = deadlineAt - Date.now();
+    if (remaining <= 0) throw httpError('TIMEOUT', 'HTTP deadline exceeded');
     checkOriginAllowed(current, allowedOrigins);
     const h = { ...hdrs };
     const cookie = jar?.header(current);
     if (cookie) h.cookie = cookie;
     const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), timeoutMs);
+    const timer = setTimeout(() => ac.abort(), Math.min(timeoutMs, remaining));
     let res;
     try {
       res = await fetch(current, { method: m, headers: h, body: b, redirect: 'manual', signal: ac.signal });

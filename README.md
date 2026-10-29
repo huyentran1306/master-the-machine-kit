@@ -1,6 +1,6 @@
-# Master the Machine Kit3 — 2.5.0
+# Master the Machine Kit3 — 2.6.0
 
-Team pack **Codex**, protocol 4, cho MTM Player. Bản 2.5.0 trên nhánh `codex/kit3_bou_v4`, phát triển từ `codex/kit3_bou_v1`.
+Team pack **Codex**, protocol 4, cho MTM Player. Bản 2.6.0 trên nhánh `codex/kit3_bou_v5`, phát triển từ bản 2.5.0 trên `codex/kit3_bou_v3`.
 
 ## Thay đổi chính
 
@@ -24,7 +24,7 @@ node .\team-sdlc-pack\scripts\install.mjs --team-workspace "D:\mtm\BAK-Kit3"
 node .\team-sdlc-pack\scripts\check-distribution.mjs --team-workspace "D:\mtm\BAK-Kit3"
 ```
 
-Chỉ tiếp tục khi checker báo **READY**. Trên MTM Player chọn provider **Codex** và load đúng workspace vừa cài. Team identity trong pack là `[FHM] Bá Khí`; metadata package/info/runtime cùng phiên bản `2.5.0`.
+Chỉ tiếp tục khi checker báo **READY**. Trên MTM Player chọn provider **Codex** và load đúng workspace vừa cài. Team identity trong pack là `[FHM] Bá Khí`; metadata package/info/runtime cùng phiên bản `2.6.0`.
 
 Initialize trên Player chỉ tạo round local. Để tập lại cần mã trận mới hoặc Re-match phía BTC.
 
@@ -48,6 +48,18 @@ Repo chỉ chứa runtime Codex, tài liệu và fixture giả. Không đưa cre
 ## Windows contest machine
 
 Use MTM Player **0.9.35**. Install into a fresh workspace using the Node command above (or `team-sdlc-pack/install.ps1`), then run the checker and require **READY**. In Player Init, select Codex, set the Codex CLI path to the installed **codex.exe** (absolute path), and choose the match-authorized model in Init. Keep previous match workspaces separate.
+
+## Changelog — 2.6.0
+
+Written by Codex. Preserve the 40-minute match workflow; prioritize passed points, then speed, then credits.
+
+- **Contradiction record:** orchestrator, backlog playbooks and isolated children must record `CONTRADICTION: <artifact A> vs <artifact B>; source: <authoritative source>; decision: <what was changed and why>` in the template's existing engineering record analysis/risks field. Continue with the safe, design-consistent choice. The checker reports an unrecorded resolution as a GAP, making spec/test conflicts explicit instead of encouraging silent test edits.
+- **Committed baseline guard:** submit preflight and dryRun compare against the prepared revision, falling back to the first commit that added the assigned folder. Modified/deleted baseline migrations always fail. Each modified/deleted baseline test needs `TEST-CHANGE <repo-relative or folder-relative path>: <source>` in the committed answer, or must be reverted. New tests/migrations remain allowed. Exact errors and `touchedBaseline` lists identify affected paths; working-copy annotations cannot waive a committed change. Citation syntax is checked mechanically; the checker verifies that the real item, KB document or design record requires the behavior change.
+- **Preparation repo map:** `recon_repo` generates `.mtm-notes/repo-map.md` once, excludes it locally from Git and returns `repoMapPath`. The bounded Node-only snapshot covers commands/app root, Next.js routes, tRPC procedures, service exports, Prisma relations/onDelete, test names, design records and generic directory counts/exports. Parsing is best-effort and cannot block preparation. Read candidate paths before searching, then confirm with `rg`; snapshots may be stale. Child briefs carry an in-scope copy.
+- **BUG evidence:** run the reproduction test on unfixed code and preserve exact commands plus failing-before/passing-after output in `<ID>-repro.md`. Cite the introducing commit from folder-scoped history; stop that search after two minutes and report it unconfirmed if unresolved. Keep the existing BUG time target while making the fix verifiable.
+- **Backlog titles:** prefer contestant `backlog[].title`/`backlogTitle` and flight projection data over text heuristics. Previously, the next-line fallback could consume a sample command, command text passed the title filter, and richness-based merging could favor page text. Exclude code blocks, reject commands/URLs/API endpoint text, and restrict fallback to the item's block. Regression fixtures use invented text; external references were read only for structure and were not copied into this public repository.
+
+Validation on Windows: `node --test tests/*.test.mjs` — **52/52 passed** (38 existing, 14 new). Fresh installation under `os.tmpdir()` and the separate distribution checker returned **READY**, including the 2.6.0 MCP handshake. No live-match performance claim.
 
 ## Changelog — 2.5.0
 

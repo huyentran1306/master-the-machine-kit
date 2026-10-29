@@ -6,6 +6,34 @@ const read = name => fs.readFileSync(new URL(`../team-sdlc-pack/${name}`, import
 const skills = ['team-orchestrator', 'backlog-bug', 'backlog-cr', 'backlog-pi', 'backlog-task'];
 const profiles = ['team-feature-worker', 'team-quality-checker', 'team-repo-scout'];
 
+test('contradictions and baseline test changes have explicit records without template keys', () => {
+  for (const file of [...skills.map(s => `skills/${s}/SKILL.md`), ...profiles.map(p => `agents/${p}.toml`), 'skills/evidence-and-answer/SKILL.md']) {
+    const text = read(file);
+    assert.ok(text.includes('CONTRADICTION: <artifact A> vs <artifact B>; source: <authoritative source>; decision: <what was changed and why>'), file);
+    assert.match(text, /analysis or risks field/);
+    assert.match(text, /never add keys/);
+    assert.match(text, /TEST-CHANGE <repo-relative or folder-relative path>: <source>/);
+    assert.match(text, /safe, design-consistent choice/);
+  }
+  assert.match(read('agents/team-quality-checker.toml'), /contradiction resolved without a CONTRADICTION line.*as a GAP/);
+});
+
+test('localization reads the preparation snapshot before confirming with rg', () => {
+  for (const file of [...skills.map(s => `skills/${s}/SKILL.md`), 'skills/game-preparation/SKILL.md', ...profiles.map(p => `agents/${p}.toml`)]) {
+    const text = read(file);
+    for (const phrase of ['repo-map.md', 'candidate files', 'rg', 'stale after edits']) assert.ok(text.includes(phrase), `${file}: ${phrase}`);
+  }
+});
+
+test('BUG evidence requires an actual unfixed run and a bounded folder-scoped introducing-commit search', () => {
+  for (const skill of ['backlog-bug', 'evidence-and-answer']) {
+    const text = read(`skills/${skill}/SKILL.md`);
+    for (const phrase of ['reproduction test first', 'RUN IT ON THE UNFIXED CODE', '<ID>-repro.md', 'exact command', 'failing', 'passing', 'introducing commit', 'cite the SHA in analysis', '2 minutes', '~10-minute BUG target']) assert.ok(text.includes(phrase), `${skill}: ${phrase}`);
+    for (const cmd of ['log --oneline -15 -- "<folder>"', 'show --stat <sha> -- "<folder>/"', 'log -S<symbol> -- "<folder>"']) assert.ok(text.includes(`git -C "<checkoutRoot>" ${cmd}`));
+  }
+  assert.match(read('src/checklist.mjs'), /RUN IT ON THE UNFIXED CODE/);
+});
+
 test('each delegation site requires no history and a brief passed by path', () => {
   let sites = 0;
   for (const dir of fs.readdirSync(new URL('../team-sdlc-pack/skills/', import.meta.url))) {

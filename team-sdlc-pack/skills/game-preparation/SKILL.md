@@ -31,7 +31,7 @@ Read `README.md` and `env-require/README.md` first: they state the real setup st
 
 ## 3. ENVIRONMENT
 - Use `pwsh` on Windows. When `.env.example` has DB password placeholders, read `MTM_SOLOVA_DB_PASSWORD` from the process environment; if absent, use `[Environment]::GetEnvironmentVariable('MTM_SOLOVA_DB_PASSWORD','User')` in pwsh. If present, URL-encode it (e.g. `[Uri]::EscapeDataString`) and replace only the app-role password in `DATABASE_URL` and `TEST_DATABASE_URL`, preserving the documented role, host, port and database names. Never echo the password or resulting URLs; keep `.env` untracked (use a local Git exclude if necessary).
-- `recon_repo` -> envelope, app path, install/build/test/typecheck commands, env keys, DB/docker files.
+- `recon_repo` -> envelope, app path, commands and `repoMapPath` (`<checkoutRoot>/.mtm-notes/repo-map.md`, git-ignored). Generate once during preparation; before searching for an item, read the map to pick candidate files, then confirm with `rg`. Treat it as a snapshot that may be stale after edits.
 - **If `env-require/` exists, follow its README exactly** - it is the match's own setup contract:
   1. Check the toolchain it names (`node --version`, `pnpm --version`, `git --version`, DB client). Missing user-level tool: `corepack enable pnpm`. Never install system software (DB server, JDK, SDK, browsers) during the match: the operator does that before the clock; report ENVIRONMENT BLOCKED naming what is missing.
   2. `<app.path>/.env.example` -> `.env` (copy, fill the placeholders the README describes; secrets stay local, never committed). Keep host/port/database names exactly as documented.

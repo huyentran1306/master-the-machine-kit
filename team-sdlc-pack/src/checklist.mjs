@@ -69,7 +69,7 @@ export function scenarioNames(mvs) {
 }
 
 const BY_TYPE = {
-  BUG: ['Reproduce the failure first and record the reproduction in evidence — a fix with no reproduction is a guess.',
+  BUG: ['Write the reproduction test first; RUN IT ON THE UNFIXED CODE. Save exact commands and failing before/passing after output in evidence/<ID>-repro.md. Cite the introducing commit from folder-scoped history in analysis; stop searching after 2 minutes and record it as unconfirmed.',
     'Fix the cause, not the symptom; keep the change inside the smallest file set that fixes it.'],
   CR: ['Find the authoritative spec for this change (the match MCP server often holds it: call match_mcp before assuming it is unavailable).',
     'Follow the spec exactly — field names, order, formats. A CR is graded against the spec, not against what looks reasonable.'],

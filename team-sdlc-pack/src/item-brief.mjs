@@ -43,14 +43,17 @@ export function writeItemBrief({ checkoutRoot, worktreeRoot = checkoutRoot, matc
     files[name] = writeInside(matchRoot, `${relative}/files/${name}`,
       typeof content === 'string' ? content : JSON.stringify(content, null, 2));
   }
+  const sourceMap = path.join(checkoutRoot, '.mtm-notes', 'repo-map.md');
+  const repoMapPath = fs.existsSync(sourceMap)
+    ? writeInside(matchRoot, `${relative}/repo-map.md`, fs.readFileSync(sourceMap, 'utf8')) : null;
   const brief = {
     item: { id: item.id, type: item.type, title: item.title ?? null, description: item.description ?? '', acceptanceCriteria: item.acceptanceCriteria ?? null },
     startInstruction: material.startInstruction ?? '',
     minimumVerificationScenarios: material.minimumVerificationScenarios ?? null,
     submitTemplate: material.submitTemplate ?? null,
-    commands, files,
+    commands, files, repoMapPath,
   };
   const briefFile = writeInside(matchRoot, `${relative}/brief.json`, JSON.stringify(brief, null, 2) + '\n');
   fs.mkdirSync(filesDir, { recursive: true });
-  return { briefFile, filesDir, files };
+  return { briefFile, filesDir, files, repoMapPath };
 }

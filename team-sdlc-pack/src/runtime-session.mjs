@@ -13,6 +13,8 @@ import * as G from './git.mjs';
 import { materializeAnswer, answerPaths, countScenarios, checkAnswer } from './answers.mjs';
 import { rank, alerts as plannerAlerts, diffItems, isSubmitted, isClosed, effectiveLeft } from './planner.mjs';
 import { recon } from './recon.mjs';
+import { ensureRepoMap } from './repo-map.mjs';
+import { guardBaseline } from './baseline-guard.mjs';
 import { validate, validateFinalResult } from './schema.mjs';
 import { McpHttpClient, resultText } from './mcp-http.mjs';
 import { buildChecklist, looksLikeTestOutput } from './checklist.mjs';
@@ -1131,6 +1133,7 @@ export class RuntimeSession {
   async preflight(id, gitRevision, opts = {}) {
     const errors = [];
     const warnings = [];
+    let touchedBaseline = { revision: null, tests: [], migrations: [] };
     const it = this.items.get(id);
     errors.push(...this.submitGateErrors());
     if (!it) errors.push(`${id} is unknown: refresh_match`);
@@ -1182,7 +1185,11 @@ export class RuntimeSession {
         }
         // Compare against the revision the match started from, not the moving branch head.
         const baseline = this.environmentRevision || this.state.envReady?.revision;
-        const base = (baseline && await G.revParse(cwd, baseline)) || await G.revParse(cwd, `origin/${this.repository.branch}`);
+        const guarded = await guardBaseline({ cwd, folder, sha, baseline, answer });
+        const { errors: guardErrors, ...touched } = guarded;
+        touchedBaseline = touched;
+        errors.push(...guardErrors);
+        const base = guarded.revision;
         if (base) {
           const changed = (await G.git(cwd, ['diff', '--name-only', `${base}...${sha}`, '--', folder])).stdout.split('\n').filter(Boolean);
           const forbidden = changed.filter((f) => new RegExp(`^${folder}/(exam-info\\.json|env-require/|challenge/)`).test(f));
@@ -1253,7 +1260,7 @@ export class RuntimeSession {
         }
       }
     } catch { /* an evidence cross-check must never block a submission */ }
-    return { errors, warnings, sha, answer, evidenceRefs: check.evidenceRefs, testStatus: tests?.status || 'NOT_REPORTED' };
+    return { errors, warnings, sha, answer, touchedBaseline, evidenceRefs: check.evidenceRefs, testStatus: tests?.status || 'NOT_REPORTED' };
   }
 
   async submit_work(args = {}) {
@@ -1303,7 +1310,7 @@ export class RuntimeSession {
         return { ok: false, error: 'PREFLIGHT_TIMEOUT', next: 'Nothing was sent. Retry submit_work with the same commit after checking local Git access.' };
       }
       if (pf.errors.length || dryRun) {
-        return this.clean({ ok: !pf.errors.length, dryRun, refused: pf.errors.length > 0, errors: pf.errors, warnings: pf.warnings, gitRevision: pf.sha, evidenceRefs: pf.evidenceRefs, next: pf.errors.length ? 'Fix every error, commit, push, then call submit_work again. Nothing was sent.' : 'Preflight passed: call submit_work without dryRun.' });
+        return this.clean({ ok: !pf.errors.length, dryRun, refused: pf.errors.length > 0, errors: pf.errors, warnings: pf.warnings, gitRevision: pf.sha, touchedBaseline: pf.touchedBaseline, evidenceRefs: pf.evidenceRefs, next: pf.errors.length ? 'Fix every error, commit, push, then call submit_work again. Nothing was sent.' : 'Preflight passed: call submit_work without dryRun.' });
       }
       const answer = { ...pf.answer };
       if (Object.hasOwn(answer, 'gitRevision')) answer.gitRevision = pf.sha;
@@ -1513,6 +1520,7 @@ export class RuntimeSession {
   recon_repo() {
     if (!this.matchRoot || !fs.existsSync(this.matchRoot)) return { ok: false, error: 'NO_MATCH_ROOT', message: 'Check out the repository first.' };
     const map = recon(this.matchRoot);
+    Object.assign(map, ensureRepoMap({ checkoutRoot: this.checkoutRoot, matchRoot: this.matchRoot, recon: map }));
     this.stackSkill = map.stackSkill || null;
     this.appPath = map.app?.path && map.app.path !== '.' ? path.join(this.matchRoot, map.app.path) : this.matchRoot;
     // Keep the commands: start_work names the real test command in each item's checklist.
@@ -1520,7 +1528,7 @@ export class RuntimeSession {
     if (this.stateDir) writeJson(path.join(this.stateDir, 'repo-map.json'), map);
     this.state.recon = { stackSkill: this.stackSkill, appPath: this.appPath, commands: this.commands };
     this.saveState();
-    return { ok: true, map, next: map.stackSkill ? `Read .agents/skills/${map.stackSkill}/SKILL.md once; run app commands from ${this.appPath}.` : undefined };
+    return { ok: true, map, repoMapPath: map.repoMapPath, next: map.stackSkill ? `Read .agents/skills/${map.stackSkill}/SKILL.md once; run app commands from ${this.appPath}.` : undefined };
   }
 
   async recoveryReport() {

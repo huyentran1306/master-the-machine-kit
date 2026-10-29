@@ -60,7 +60,7 @@ export const TOOLS = [
   },
   {
     name: 'recon_repo',
-    description: 'Compact repository map of matchRoot: package manager, install/build/test/typecheck/audit commands, frameworks, test tools, docker/env/db files, logs, docs, challenge files.',
+      description: 'Read-only source recon of matchRoot: commands, stack and files. Create the ignored .mtm-notes/repo-map.md preparation snapshot once; return repoMapPath for routes, procedures, models, tests and exports.',
     inputSchema: obj({}),
     handler: (s) => s.recon_repo(),
   },

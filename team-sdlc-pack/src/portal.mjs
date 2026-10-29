@@ -92,6 +92,24 @@ function objectsAround(seg, needleRe, maxTries = 10) {
   return found;
 }
 
+// The contestant backlog array outranks event headlines and incidental item-id references.
+// Scan just its direct objects, including when nested inside a flight initialProjection.
+function backlogRows(seg) {
+  const rows = [];
+  for (const m of seg.matchAll(/"backlog"\s*:\s*\[/g)) {
+    let pos = m.index + m[0].length;
+    while (pos < seg.length) {
+      while (/[\s,]/.test(seg[pos] || '') && pos < seg.length) pos++;
+      if (seg[pos] !== '{') break;
+      const row = extractJsonObject(seg, pos);
+      if (!row) break;
+      rows.push(row.value);
+      pos = row.end;
+    }
+  }
+  return rows;
+}
+
 /**
  * A backlog title the page actually showed, or null.
  *
@@ -109,6 +127,10 @@ export function usableTitle(raw) {
   if (wordChars < 4) return null;                       // "}' and friends
   if (wordChars / s.length < 0.5) return null;          // mostly punctuation: a fragment, not prose
   if (/^[{}[\]"'`,;:|<>\\/]/.test(s)) return null;      // starts mid-JSON or mid-tag
+  if (/(?:https?:\/\/|\/api\/|\b(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+\/)/i.test(s)) return null;
+  if (/^(?:[$>]\s*)?(?:curl|wget|httpie|Invoke-WebRequest|Invoke-RestMethod|fetch|git|npm|npx|pnpm|yarn|node|python|pwsh|powershell|cmd)(?:\s|\()/i.test(s)) return null;
+  if (/^(?:API\s+)?(?:endpoint|request URL)\s*:/i.test(s)) return null;
+  if (/^(?:\d+\s*(?:pt|pts|points)|open|closed|visible|working|submitted|passed|failed|not started)$/i.test(s)) return null;
   return s;
 }
 
@@ -197,7 +219,7 @@ function descriptionOf(o) {
 
 function itemFromObject(key, o) {
   const it = { id: key, type: key.split('-')[0], title: null, maxPoints: null, availability: null, teamStatus: null, result: null, score: null, deadlineAt: null, revealedAt: null, deadlineMinutes: null, description: null };
-  const title = pick(o, ['title', 'name', 'summary', 'headline']);
+  const title = pick(o, ['title', 'backlogTitle', 'name', 'summary', 'headline']);
   if (typeof title === 'string') it.title = usableTitle(title);
   const type = pick(o, ['type', 'backlogType', 'kind', 'itemType']);
   if (typeof type === 'string' && /^(TASK|CR|BUG|PI)$/i.test(type)) it.type = type.toUpperCase();
@@ -245,13 +267,14 @@ function itemsFromText(text) {
   const byId = new Map();
   const re = new RegExp(`\\b(${KEY_SRC})\\b`);
   lines.forEach((line, idx) => {
-    const m = line.match(re);
-    if (!m || byId.has(m[1])) return;
+    // A title belongs to an item row/heading, never an API example that mentions an id.
+    const m = line.match(new RegExp(`^[-*#\\s|]*(${KEY_SRC})\\b`));
+    if (!m || byId.get(m[1])?.title) return;
     const id = m[1];
     const it = { id, type: id.split('-')[0], title: null, maxPoints: null, availability: null, teamStatus: null, result: null, score: null, deadlineAt: null, revealedAt: null, description: null };
     const rest = line.slice(line.indexOf(id) + id.length).replace(/^[\s|:·\-—]+/, '');
-    const t = rest.split('|').map((x) => x.trim()).filter(Boolean)[0] || lines[idx + 1] || '';
-    // Try the text after the id, then the next line; a fragment that is not a title stays null.
+    const t = rest.split('|').map((x) => x.trim()).filter(Boolean)[0] || '';
+    // Only the same row or the next line in this item block may supply a title.
     if (t && !re.test(t)) it.title = usableTitle(t);
     if (!it.title) { const n = lines[idx + 1]; if (n && !re.test(n)) it.title = usableTitle(n); }
     const pts = (line + ' ' + (lines[idx + 1] || '')).match(/\b(?:max\s*)?(\d{2,4})\s*(?:pt|pts|points|điểm)\b/i) || line.match(/\|\s*(\d{2,4})\s*\|/);
@@ -326,10 +349,22 @@ export function parseMatchPage(html, { matchId, serverNow = Date.now() } = {}) {
 
   // Structured items.
   let items = new Map();
+  const structuredTitles = new Map();
+  const backlogTitles = new Map();
   let matchObj = null;
   for (const seg of segs) {
+    for (const row of backlogRows(seg)) {
+      const key = [row.key, row.backlogId, row.backlogItemKey, row.id].find(v => typeof v === 'string' && KEY_RE.test(v));
+      const title = usableTitle(row.title) || usableTitle(row.backlogTitle);
+      if (key && title) backlogTitles.set(key, title);
+    }
     for (const { value, obj } of objectsAround(seg, new RegExp(`"(${KEY_SRC})"`, 'g'))) {
       const it = itemFromObject(value, obj);
+      // Ignore React props and request/answer examples; only item identity fields bind a title.
+      if (['id', 'key', 'backlogId', 'backlogItemKey'].some(k => obj[k] === value)) {
+        const title = usableTitle(obj.title) || usableTitle(obj.backlogTitle);
+        if (title) structuredTitles.set(value, title);
+      }
       items.set(value, items.has(value) ? merge(items.get(value), it) : it);
     }
     if (matchId && !matchObj) {
@@ -341,10 +376,14 @@ export function parseMatchPage(html, { matchId, serverNow = Date.now() } = {}) {
   const structured = items.size > 0;
 
   // Text fallback / enrichment.
-  const textItems = itemsFromText(pageText);
+  const titleText = htmlToText(html
+    .replace(/<(pre|code|kbd|samp)\b[^>]*>[\s\S]*?<\/\1>/gi, '\n')
+    .replace(/<\/(article|section|tr|li)>/gi, '\n[ITEM BLOCK END]\n'));
+  const textItems = itemsFromText(titleText);
   for (const [id, t] of textItems) items.set(id, items.has(id) ? merge(items.get(id), t) : t);
   items = [...items.values()].filter((it) => KEY_RE.test(it.id));
   for (const it of items) {
+    it.title = backlogTitles.get(it.id) || structuredTitles.get(it.id) || textItems.get(it.id)?.title || null;
     if (it.title) it.title = String(it.title).replace(/\s+/g, ' ').trim();
     it.specHash = crypto.createHash('sha1').update(`${it.title}|${it.maxPoints}|${it.deadlineAt}|${it.description || ''}`).digest('hex').slice(0, 12);
   }

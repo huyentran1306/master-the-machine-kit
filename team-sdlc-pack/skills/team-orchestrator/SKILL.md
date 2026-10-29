@@ -48,7 +48,7 @@ Matches contain deliberate traps: two artifacts that contradict each other, a sh
 Use when 2+ non-PI items are startable, the repo is ready, and the items touch different areas. Max 2 workers.
 Discipline, in order of importance: **one worktree per worker; non-overlapping file sets; a `TEST_DATABASE_URL` of its own** (the helper rewrites it when it creates the worktree — never let two lanes share a test database, the suites truncate it between cases and will fail each other at random). You keep `start_work`, `submit_work` and the progress log; workers never call a Game API and never push. Cost grows with every lane, so add one only when the second item is worth more than the tokens the lane costs.
 1. `start_work <ID2>` then `worktree create <ID2>` (it moves the draft `answers/<ID2>/` into the worktree; give the worker the `answer` paths it returns, never the main checkout's).
-2. Spawn `team_feature_worker` with: ID, type, brief, startInstruction, MVS, template, worktreeRoot, matchRoot, time box (8-12 min). Keep working on your own item meanwhile.
+2. Spawn `team_feature_worker` with `fork_turns: "none"` and a brief (see Subagents): ID, type, worktreeRoot, matchRoot, answer paths, the paths of the brief/MVS/template files, test commands, time box (8-12 min). Keep working on your own item meanwhile.
 3. When it reports: `worktree integrate <ID2> message:"<ID2>: <what>"` (your own work must be committed or stashed first), run its tests in the main checkout, optional `team_quality_checker`, push, `submit_work <ID2>`, `worktree remove <ID2>`.
 4. Conflict -> integrate aborts and main is unchanged: redo the small change in main or resolve by hand.
 Never parallelize a PI with its own investigation unless using `team_repo_scout` (read-only).
@@ -57,7 +57,8 @@ Never parallelize a PI with its own investigation unless using `team_repo_scout`
 - `team_repo_scout` (read-only): PI root-cause hunt in parallel with your own search; CR requirement breakdown when the spec is long.
 - `team_feature_worker`: parallel lane only, inside its worktree.
 - `team_quality_checker` (read-only): CR/BUG review before commit.
-Give each one a complete, self-contained prompt (paths, IDs, brief, MVS, commands). Never give credentials. If a subagent has not answered in its time box, continue without it. Note subagent use in the answer's collaboration field if the template has one.
+**Always call `spawn_agent` with `fork_turns: "none"`.** The default (`"all"`) copies your whole conversation into the child: every call it makes then re-reads ~70k tokens, which cost ~10M tokens in one practice match. A child started with `"none"` still gets its profile, AGENTS.md and the skills, plus your message.
+The message is a self-contained brief: item ID/type; absolute checkoutRoot, matchRoot (and worktreeRoot for a worker); the checklist path (`answers/<ID>/checklist.md` or `.mtm-notes/<ID>.md`); the files in scope or the diff command (`git -C "<checkoutRoot>" diff <base>`); the test/typecheck commands; the MVS scenario names; the evidence paths; the time box; and what to return. Write long material (brief, MVS, template, findings) to files under `.mtm-notes/` and pass the paths instead of pasting it. Never give credentials. If a subagent has not answered in its time box, continue without it. Note subagent use in the answer's collaboration field if the template has one.
 
 ## Shell (Windows PowerShell)
 - One command per call, or `;` separators. Never `&&`/`||` (PowerShell 5.1). No head/tail/sed: `Select-Object -First N`, `Get-Content -Tail N`.

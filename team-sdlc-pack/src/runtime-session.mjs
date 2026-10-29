@@ -1260,7 +1260,12 @@ export class RuntimeSession {
           if (!requiredEvidence.some(e => e.name === name)) errors.push(`allowMissingEvidence: ${name} is not an extracted evidence name.`);
         }
         const refs = evidenceArrayRefs(answer);
-        for (const { name } of requiredEvidence) {
+        for (const { name, strict } of requiredEvidence) {
+          if (strict === false) {
+            // A guess from prose must never cost a deadline: remind instead of refusing.
+            warnings.push(`CHECK_EVIDENCE: the item text mentions "${name}". If the item requires it, add answers/${id}/evidence/${name} and reference it in submit.json; otherwise ignore this warning and never create a placeholder file.`);
+            continue;
+          }
           if (waivers.includes(name)) {
             if (typeof opts.reason === 'string' && opts.reason.trim()) { warnings.push(`allowMissingEvidence: ${name}; reason: ${opts.reason.trim()}`); continue; }
             errors.push(`allowMissingEvidence: ${name} requires a nonempty reason explaining the extraction error.`);

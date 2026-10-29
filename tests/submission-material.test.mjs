@@ -4,7 +4,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { extractRequiredEvidence } from '../team-sdlc-pack/src/required-evidence.mjs';
+import { extractRequiredEvidence as extractWithStrictness } from '../team-sdlc-pack/src/required-evidence.mjs';
+// Most cases check names and before flags; strictness has its own test below.
+const extractRequiredEvidence = (...args) => extractWithStrictness(...args).map(({ name, before }) => ({ name, before }));
 import { RuntimeSession } from '../team-sdlc-pack/src/runtime-session.mjs';
 import { collectMcpMaterial } from '../team-sdlc-pack/src/mcp-material.mjs';
 
@@ -51,6 +53,23 @@ test('answer file, organizer templates/schemas, verification specs and provided 
   ].join('\n');
   assert.deepEqual(extractRequiredEvidence({ description }, { files: { 'challenge/X-9-fixture.csv': 'a,b' } }),
     [{ name: 'home_before_change.png', before: true }]);
+});
+
+test('only unambiguous names block submission; other mentions are reminders', () => {
+  const description = [
+    '## Required evidence', '| File | Content |', '|---|---|',
+    '| `home-before.png` | Home page before the change |',
+    '| `home-after.png` | Same page after the change |',
+    '| `run.log` | Written by the provided runner |',
+    'Capture a screenshot of the list as `list.png` and save the data as `evidence/x-9-data.json`.',
+  ].join('\n');
+  assert.deepEqual(extractWithStrictness({ description }), [
+    { name: 'home-before.png', before: true, strict: true },
+    { name: 'home-after.png', before: false, strict: false },
+    { name: 'run.log', before: false, strict: false },
+    { name: 'list.png', before: false, strict: true },
+    { name: 'x-9-data.json', before: false, strict: true },
+  ]);
 });
 
 test('full answers/<ID>/evidence paths count; JSON field references do not', () => {

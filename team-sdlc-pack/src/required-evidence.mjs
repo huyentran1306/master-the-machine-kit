@@ -25,7 +25,8 @@ export function extractRequiredEvidence(item = {}, material = {}) {
       .replace(/https?:\/\/[^\s<>"`]+/gi, '').replace(/\[[^\]]*\]\([^)]*\)/g, '');
     for (const line of prose.split(/\r?\n/)) {
       if (/^(?: {4}|\t)(?!\s*[-*]\s|\s*\d+[.)]\s)/.test(line)) continue;
-      if (!line.trim() || /^\s*(?:#{1,6}\s|[-*]\s|\d+[.)]\s)/.test(line)) continuation = '';
+      // Table rows are self-contained: one row's "before" must not leak into the next.
+      if (!line.trim() || /^\s*(?:#{1,6}\s|[-*]\s|\d+[.)]\s|\|)/.test(line)) continuation = '';
       if (/^\s*#{1,6}\s/.test(line) || /^\s*[\w ]+:\s*$/.test(line)) heading = `${context} ${line}`;
       // Inline code may name a file; code expressions are not deliverables.
       const clean = line.replace(/`([^`]+)`/g, (_, s) => /^[\w./\\-]+$/.test(s) ? s : '');
@@ -43,9 +44,14 @@ export function extractRequiredEvidence(item = {}, material = {}) {
         if (name.split('/').some(p => !p || p === '.' || p === '..')) continue;
         if (NOT_EVIDENCE.test(baseName(name)) || provided.has(baseName(name))) continue;
         const before = BEFORE.test(surrounding);
-        found.set(name, { name, before: before || found.get(name)?.before || false });
+        // Only unambiguous names may block submission: an explicit evidence/ path, a "before"
+        // artifact, or a screenshot/capture naming an image. Anything else is a reminder.
+        const strict = token.startsWith('evidence/') || before ||
+          (/\.(?:png|jpe?g|gif|webp)$/i.test(name) && /\b(?:screenshots?|captur\w*)\b/i.test(surrounding));
+        const prev = found.get(name);
+        found.set(name, { name, before: before || prev?.before || false, strict: strict || prev?.strict || false });
       }
-      continuation = /[.!?]\s*$/.test(clean) ? '' : `${continuation} ${clean}`;
+      continuation = /[.!?]\s*$/.test(clean) || /^\s*\|/.test(line) ? '' : `${continuation} ${clean}`;
     }
   };
   scan(item.description); scan(item.acceptanceCriteria);

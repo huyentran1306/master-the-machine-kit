@@ -53,6 +53,11 @@ test('answer file, organizer templates/schemas, verification specs and provided 
     [{ name: 'home_before_change.png', before: true }]);
 });
 
+test('full answers/<ID>/evidence paths count; JSON field references do not', () => {
+  const description = 'Obtain the official data and save it unchanged as `answers/X-9/evidence/x-9-data.json`. `data.rows` lists the values to enter; record each case.';
+  assert.deepEqual(extractRequiredEvidence({ description }), [{ name: 'x-9-data.json', before: false }]);
+});
+
 const git = (cwd, ...args) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', windowsHide: true }).trim();
 function fixture(t) {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'kit3-material-'));

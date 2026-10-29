@@ -5,6 +5,8 @@ const FILE = /(?:[\w-]+\/)*[\w-][\w.-]*\.[a-zA-Z][a-zA-Z0-9]{0,9}\b/g;
 // The answer file, organizer templates/schemas and verification specs are named next to
 // evidence rules but are never evidence themselves; requiring them would block submission.
 const NOT_EVIDENCE = /^(?:submit\.json|.*-submit(?:\.schema)?\.json|.*\.schema\.json|.*minimum-verification-scenarios\.md)$/i;
+// Evidence is a captured artifact; `data.steps`-style field references are not files.
+const EVIDENCE_EXT = /\.(?:png|jpe?g|gif|webp|svg|pdf|txt|log|md|json|csv|tsv|xml|html?|har|zip|mp4|webm|out)$/i;
 const baseName = p => String(p).replace(/\\/g, '/').split('/').pop().toLowerCase();
 
 export function extractRequiredEvidence(item = {}, material = {}) {
@@ -29,9 +31,11 @@ export function extractRequiredEvidence(item = {}, material = {}) {
       const clean = line.replace(/`([^`]+)`/g, (_, s) => /^[\w./\\-]+$/.test(s) ? s : '');
       const surrounding = `${heading} ${continuation} ${clean}`;
       for (const match of clean.matchAll(FILE)) {
-        const token = match[0];
+        // A full answers/<ID>/evidence/<name> path names the same deliverable as evidence/<name>.
+        const token = match[0].replace(/^(?:[\w.-]+\/)*?(?:answers\/[\w.-]+\/)?(?=evidence\/)/, '');
         const prefix = clean.slice(0, match.index);
         if (/[:/\\.\w-]$/.test(prefix) || /\.(?:com|org|net|invalid|example)$/i.test(token)) continue;
+        if (!EVIDENCE_EXT.test(token)) continue;
         if (!token.startsWith('evidence/') && !CUE.test(surrounding)) continue;
         // Source paths named alongside a capture instruction are inputs, not evidence.
         if (!token.startsWith('evidence/') && (token.includes('/') || /\.(?:[cm]?[jt]sx?|py|sql|toml|ya?ml|prisma|html|css)$/i.test(token))) continue;

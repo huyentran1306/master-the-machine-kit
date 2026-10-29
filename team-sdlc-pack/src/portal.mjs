@@ -209,9 +209,12 @@ function classifyStatuses(o, item) {
 
 function descriptionOf(o) {
   const parts = [];
-  for (const k of ['description', 'descriptionMarkdown', 'markdown', 'body', 'content', 'details', 'detail', 'brief', 'requirements', 'context', 'expectedOutcome', 'acceptanceCriteria', 'instructions']) {
+  // The contestant JSON view carries the full item text in descriptionMd and its verification
+  // scenarios (with required evidence names) in minimumVerificationMd.
+  const plain = new Set(['description', 'descriptionMd', 'body', 'content']);
+  for (const k of ['description', 'descriptionMd', 'descriptionMarkdown', 'markdown', 'body', 'content', 'details', 'detail', 'brief', 'requirements', 'context', 'expectedOutcome', 'acceptanceCriteria', 'instructions', 'minimumVerificationMd']) {
     const v = o[k];
-    if (typeof v === 'string' && v.trim().length > 0) parts.push(k === 'description' || k === 'body' || k === 'content' ? v : `${k}: ${v}`);
+    if (typeof v === 'string' && v.trim().length > 0) parts.push(plain.has(k) ? v : `${k}: ${v}`);
     else if (Array.isArray(v) && v.every((x) => typeof x === 'string')) parts.push(`${k}:\n- ${v.join('\n- ')}`);
   }
   return parts.length ? parts.join('\n\n') : null;

@@ -43,7 +43,11 @@ export const TOOLS = [
   {
     name: 'submit_work',
     description: 'Submit ONE time per item. Preflight: started, open, full SHA pushed to the assigned branch, <folder>/answers/<ID>/submit.json and every "evidence/<file>" present IN THAT COMMIT, no root evidence folders, CR/BUG evidence. Sends the committed submit.json as answer (gitRevision field filled if the template has one) with a fixed clientSubmissionId/Idempotency-Key; retries the same body on timeout. Logs SUBMITTED only with the official receipt. Use dryRun to check first.',
-    inputSchema: obj({ backlogItemKey: key, gitRevision: { type: 'string', description: 'Full SHA of the pushed commit (default: HEAD of the checkout).' }, dryRun: { type: 'boolean' }, allowNoEvidence: { type: 'boolean', description: 'Only if the item really has no MVS evidence requirement.' }, allowUntested: { type: 'boolean', description: 'Only if the item has no runnable test at all (pure UI tweak). Downgrades the test gate to a warning.' } }, ['backlogItemKey']),
+    inputSchema: obj({ backlogItemKey: key, gitRevision: { type: 'string', description: 'Full SHA of the pushed commit (default: HEAD of the checkout).' }, dryRun: { type: 'boolean' }, allowNoEvidence: { type: 'boolean', description: 'Only if the item really has no MVS evidence requirement.' }, allowUntested: { type: 'boolean', description: 'Only if the item has no runnable test at all (pure UI tweak). Downgrades the test gate to a warning.' },
+      allowMissingEvidence: { type: 'array', items: { type: 'string' }, description: 'Last resort: exact extracted names that are demonstrably extraction mistakes; requires reason.' },
+      allowBlocked: { type: 'boolean', description: 'Last minutes only: permit BLOCKED/all-NOT_RUN/FAIL/zero cases; requires reason. Other gates still apply.' },
+      reason: { type: 'string', description: 'Explain each extraction mistake or last-minute blocked override; retained in submission warnings/state.' },
+    }, ['backlogItemKey']),
     handler: (s, a) => s.submit_work(a),
   },
   {
@@ -73,7 +77,7 @@ export const TOOLS = [
   {
     name: 'match_mcp',
     description: "The match's own MCP server, when the organizers provide one (the customer's internal material: standards, fixtures, tickets, documentation). action 'tools' lists what it offers, 'call' runs one (name + args), 'resource' reads a uri. Use it when a backlog item refers to an internal standard/fixture/ticket instead of assuming it is unavailable. The URL comes from the match page or game-adapter.json; the helper never guesses one.",
-    inputSchema: obj({ action: { type: 'string', enum: ['tools', 'call', 'resource'] }, name: { type: 'string' }, args: { type: 'object' }, uri: { type: 'string' } }),
+    inputSchema: obj({ action: { type: 'string', enum: ['tools', 'call', 'resource'] }, name: { type: 'string' }, args: { type: 'object' }, uri: { type: 'string' }, backlogItemKey: { ...key, description: 'For a follow-up: persist the raw result in this started item’s brief/files and mcpMaterial.' } }),
     handler: (s, a) => s.match_mcp(a),
   },
   {

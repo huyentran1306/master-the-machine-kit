@@ -16,6 +16,7 @@ description: Dispatches all game items to workers, integrates, gates, pushes and
 10. Active workers, nothing actionable: native agent wait <=45s -> `wait_for_update timeoutMs:1000` -> process events/completions -> repeat.
 11. No active workers: `wait_for_update` without timeoutMs. On pause stop workers; on mustEnd call `final_result end:true` immediately.
 12. Never view_image, print item diffs or dump logs. Use `git diff --stat`, exit codes and `Get-Content -Tail 15` / `Select-String` summaries.
+13. NEED_INFO: fetch missing MCP material with backlogItemKey; send the updated brief path and follow-up. Never submit BLOCKED/all-NOT_RUN/FAIL/zero while time remains.
 
 # Dispatch
 Prioritize passed points, then speed, then credits. Start from configure_session's view without a redundant refresh. Restore NEED_PREPARE_INPUT once with the prior lifecycle input. Never end the turn while the match runs.
@@ -29,6 +30,8 @@ Keep ID -> agent/worktree/stop-time in a short ledger. Targets: PI 10m, BUG 10m,
 Ports are assigned by the helper: pair n uses dev=3100+2n and production=3101+2n (parallel.portBase changes the base). Pairs persist and are not reused during the session, including PI overflow. Require explicit port flags/environment and matching browser/runner URLs; never fall back to shared defaults. Require the worktree's isolated TEST_DATABASE_URL. Workers stop their servers/browsers before READY/PARKED.
 
 # Complete one READY item
+On NEED_INFO, discover read-only match_mcp tools and query the missing scenarios/docs with backlogItemKey; the helper appends raw results to the worker's brief. Send a follow-up to reread it and continue. Keep independent work moving. Use allowBlocked:true plus reason only in the last minutes when nothing better exists; prefer verified DONE/PARTIAL with real evidence. Use allowMissingEvidence:["name"] plus reason only for an obvious extraction mistake, never a missing required artifact.
+
 1. Read only its short result: status, commit SHA, counts, evidence paths, build status, risks and CONTRADICTION/TEST-CHANGE lines. Record real BACKLOG_TESTS counts. Verify its commit is the worktree HEAD; ask it to commit any unfinished files.
 2. Call worktree integrate. The helper cherry-picks the worker's committed item range; it never stages worker WIP. Scope inspection: status and diff --stat only.
 3. Run a single integration gate in main, target <=2 minutes: full suite + typecheck. Run build only if the worker did not pass it, or build-relevant files changed (dependencies/lockfiles, build config, schema/generated code, entrypoints/routes/assets). Use preparation timings; if the required gate cannot fit, return it to a worker on current main for the long verification and later run only the remaining checks for that exact tree. Never report a timeout as green. Redirect logs to ignored .mtm-notes; print exit codes and <=15 summary lines. No screenshots or scenario debugging in main.

@@ -7,7 +7,7 @@ description: Playbook for an MTM Product Incident (PI-xx) - production issue wit
 
 The clock started at reveal; rank is by the server's receivedAt of a PASSED submission (100/90/75/60%). FAILED = 0, so verify once, properly, then ship. No MVS: Grader has its own criteria. Target <= 10 minutes.
 
-1. Read the worker brief (Start Work already accepted). Read description + startInstruction + template. Notes: outcome + repro line only.
+1. Read brief.json, every file under files/ including MCP material, and the checklist before deciding anything is missing. Return NEED_INFO: <what> to the orchestrator for missing material; never submit BLOCKED. Produce required BEFORE artifacts before source edits; follow evidence-and-answer. Note outcome + repro only.
 2. Locate (aim 4 minutes). If cheap, request read-only scout help from the orchestrator with checkoutRoot, folder, matchRoot, brief and organizer-file paths, scope and a <=2-minute limit. Continue your own search:
    - `rg -n` the symptom words, error codes, endpoints, UI labels, messages.
    - Logs: `logs/`, `*.log`, recon `logs` list; read stack traces to file:line.

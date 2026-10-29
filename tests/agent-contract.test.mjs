@@ -135,3 +135,18 @@ test('worker owns the complete lifecycle and compact committed result', () => {
     assert.doesNotMatch(playbook, /`start_work <ID>`|`submit_work <ID>`|Report BACKLOG_TESTS|stash/);
   }
 });
+
+test('workers capture before editing and request missing material instead of giving up', () => {
+  for (const file of ['agents/team-feature-worker.toml', 'skills/backlog-bug/SKILL.md', 'skills/backlog-cr/SKILL.md', 'skills/evidence-and-answer/SKILL.md']) {
+    const text = read(file);
+    for (const term of ['requiredEvidence', 'BEFORE', 'baseSha', 'NEED_INFO: <what>', 'MCP material']) assert.ok(text.includes(term), `${file}: ${term}`);
+    assert.match(text, /commit nothing yet|save without committing/);
+  }
+  for (const kind of ['bug', 'cr', 'pi', 'task']) assert.match(read(`skills/backlog-${kind}/SKILL.md`), /every file under files\/ including MCP material, and the checklist/);
+  for (const file of ['skills/team-orchestrator/SKILL.md', 'skills/evidence-and-answer/SKILL.md']) {
+    const text = read(file);
+    for (const term of ['allowMissingEvidence', 'allowBlocked:true', 'reason', 'last minutes', 'extraction mistake']) assert.ok(text.includes(term), `${file}: ${term}`);
+  }
+  assert.match(read('skills/team-orchestrator/SKILL.md'), /backlogItemKey.*appends raw results/);
+  assert.doesNotMatch(read('skills/evidence-and-answer/SKILL.md'), /3 minutes -> skip screenshots/);
+});

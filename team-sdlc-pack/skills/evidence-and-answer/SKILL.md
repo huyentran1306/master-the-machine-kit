@@ -5,6 +5,10 @@ description: How to fill answers/<ID>/submit.json from the Start Work template a
 
 # Answer + evidence contract
 
+1. Read brief.json, every file under files/ including MCP material, and the checklist. Produce every requiredEvidence BEFORE artifact immediately: start the app on your own brief port, capture exact names, save without committing, then fix. If already edited, capture a temporary baseSha copy inside matchRoot; preserve edits and never skip the before state. Return NEED_INFO: <what> to the orchestrator if material is still missing.
+2. Commit every requiredEvidence file under answers/<ID>/evidence/ and reference each in at least one submit.json evidence array. Preflight and dryRun refuse missing or unreferenced files. Use allowMissingEvidence:["name"] plus reason only as a last resort for an obvious extraction mistake; never waive an actual requirement.
+3. Return real results. Never submit BLOCKED or all-NOT_RUN/FAIL/zero cases while time remains; request information and retry. Prefer verified DONE/PARTIAL with honest gaps. Only the orchestrator may use allowBlocked:true plus reason in the last minutes when nothing better exists; other checks still apply.
+
 Paths (relative to `<matchRoot>` = `<checkoutRoot>/<folder>`):
 - `answers/<ID>/submit.json` - created by start_work from `submitTemplate`. Edit it with apply_patch. Valid JSON, UTF-8, no BOM.
 - `answers/<ID>/evidence/<file>` - every evidence file. In JSON reference it as `"evidence/<file>"` (never `answers/<ID>/...`, never `./evidence`).
@@ -38,7 +42,7 @@ Name: `<ID>-TC-01.md`, `<ID>-TC-02.md`, ... plus `<ID>-regression.md` for the fu
 - UI items: a screenshot is strong evidence, taken with a headless browser started as a command (never Computer Use, which needs an operator approval). In order of preference:
   1. `pnpm exec playwright screenshot --viewport-size=1440,900 "http://localhost:<port>/<page>" "<matchRoot>/answers/<ID>/evidence/<ID>-after-1440.png"` when the repo has Playwright.
   2. A headless Chrome/Edge binary, whichever this machine actually has - macOS: `"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"`; Windows: `& "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"`; Linux: `google-chrome` or `chromium` - with `--headless=new --disable-gpu --window-size=1440,900 --screenshot="<absolute path>" "<url>"`.
-  Not runnable within 3 minutes -> skip screenshots, rely on component/unit tests + build, and say so in the answer.
+  If an optional screenshot cannot run within 3 minutes, use tests/build and state the gap. Never skip a required screenshot; request help through NEED_INFO.
 - PI: a repro test failing before and passing after is the evidence (`<ID>-repro.md`), plus the affected module's tests.
 - BUG: write the reproduction test first and RUN IT ON THE UNFIXED CODE. Save exact commands and actual failing before/passing after output in `<ID>-repro.md`. Find the introducing commit with `git -C "<checkoutRoot>" log --oneline -15 -- "<folder>"`, `git -C "<checkoutRoot>" show --stat <sha> -- "<folder>/"` or `git -C "<checkoutRoot>" log -S<symbol> -- "<folder>"`; confirm the scoped diff and cite the SHA in analysis. Stop after 2 minutes and record an unconfirmed search; keep the ~10-minute BUG target.
 

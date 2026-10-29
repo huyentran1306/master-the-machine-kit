@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { ensureExcluded } from './git.mjs';
+import { extractRequiredEvidence } from './required-evidence.mjs';
 
 // Start Work files are data. Reject path traversal on both Windows and POSIX, even when
 // a pack is tested on a different OS from the eventual contest machine.
@@ -43,6 +44,15 @@ export function writeItemBrief({ checkoutRoot, worktreeRoot = checkoutRoot, matc
     files[name] = writeInside(matchRoot, `${relative}/files/${name}`,
       typeof content === 'string' ? content : JSON.stringify(content, null, 2));
   }
+  const mcpMaterial = (material.mcpMaterial || []).map((entry, index) => {
+    const label = String(entry.tool || entry.purpose || 'result').replace(/[^a-zA-Z0-9_-]/g, '-');
+    let name = `mcp/${label}-${index + 1}.json`;
+    let suffix = 0;
+    while (Object.hasOwn(files, name)) name = `mcp/${label}-${index + 1}-${++suffix}.json`;
+    const file = writeInside(matchRoot, `${relative}/files/${name}`, JSON.stringify(entry.result ?? entry, null, 2) + '\n');
+    files[name] = file;
+    return { purpose: entry.purpose, tool: entry.tool, args: entry.args, ok: entry.ok, error: entry.error, file };
+  });
   const sourceMap = path.join(checkoutRoot, '.mtm-notes', 'repo-map.md');
   const repoMapPath = fs.existsSync(sourceMap)
     ? writeInside(matchRoot, `${relative}/repo-map.md`, fs.readFileSync(sourceMap, 'utf8')) : null;
@@ -54,6 +64,7 @@ export function writeItemBrief({ checkoutRoot, worktreeRoot = checkoutRoot, matc
     startInstruction: material.startInstruction ?? '',
     minimumVerificationScenarios: material.minimumVerificationScenarios ?? null,
     submitTemplate: material.submitTemplate ?? null,
+    requiredEvidence: material.requiredEvidence ?? extractRequiredEvidence(item, material), mcpMaterial,
     commands, files, repoMapPath, baselinePath, ...context,
   };
   const briefFile = writeInside(matchRoot, `${relative}/brief.json`, JSON.stringify(brief, null, 2) + '\n');

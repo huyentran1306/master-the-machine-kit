@@ -118,6 +118,9 @@ test('start_work defaults compact and writes complete briefs without leaking ite
   assert.ok(path.isAbsolute(result.playbook)); assert.ok(result.playbook.endsWith(path.join('backlog-cr', 'SKILL.md')));
   const brief = JSON.parse(fs.readFileSync(result.briefFile, 'utf8'));
   assert.equal(brief.item.description, s.items.get(args.item.id).description);
+  assert.deepEqual(brief.item.acceptanceCriteria, args.item.acceptanceCriteria);
+  assert.deepEqual(result.requiredEvidence, [{ name: 'result.json', before: false }]);
+  assert.deepEqual(brief.requiredEvidence, result.requiredEvidence);
   assert.equal(brief.startInstruction, material.startInstruction);
   assert.deepEqual(brief.minimumVerificationScenarios, material.minimumVerificationScenarios);
   assert.deepEqual(brief.submitTemplate, material.submitTemplate);
@@ -138,6 +141,60 @@ test('start_work full mode retains description, template, checklist and supplied
   assert.deepEqual(result.minimumVerificationScenarios, material.minimumVerificationScenarios);
   assert.equal(result.files['qa/data.json'], material.files['qa/data.json']);
   assert.ok(result.checklist.length); assert.ok(result.providedRunners.length);
+  assert.deepEqual(result.requiredEvidence, [{ name: 'result.json', before: false }]);
+});
+
+test('compact start and worktree brief retain raw MCP material from differently named HTTP tools; follow-ups append', async t => {
+  const { args, s } = await startFixture(t);
+  const calls = [];
+  const large = 'synthetic material '.repeat(2000);
+  const offered = [
+    { name: 'retrieve_case_inputs', description: 'Get test data for a backlog item', inputSchema: { type: 'object', properties: { backlog_item_key: { type: 'string' } }, required: ['backlog_item_key'] } },
+    { name: 'find_reference_pages', description: 'Search documentation and knowledge base', inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } },
+    { name: 'read_reference_page', description: 'Get a document by ID', inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] } },
+  ];
+  const srv = http.createServer(async (req, res) => {
+    let body = ''; for await (const chunk of req) body += chunk;
+    const msg = JSON.parse(body); calls.push(msg);
+    if (msg.method === 'notifications/initialized') { res.writeHead(202); res.end(); return; }
+    const result = msg.method === 'initialize' ? { serverInfo: { name: 'synthetic-mcp' }, capabilities: {} }
+      : msg.method === 'tools/list' ? { tools: offered }
+        : { content: [{ type: 'text', text: large }], structuredContent: { rows: [7, 9] } };
+    res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result }));
+  });
+  await new Promise(resolve => srv.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => { srv.close(resolve); srv.closeAllConnections(); }));
+  const origin = `http://127.0.0.1:${srv.address().port}`;
+  s.adapter.matchView.mcpUrl = `${origin}/mcp`; s.allowedMatchOrigins = [origin];
+  s.items.get(args.item.id).description += '\nCapture before the change as panel-original.png.';
+  const out = await s.start_work({ backlogItemKey: args.item.id });
+  assert.ok(out.requiredEvidence.some(e => e.name === 'panel-original.png' && e.before));
+  let brief = JSON.parse(fs.readFileSync(out.briefFile, 'utf8'));
+  assert.deepEqual(brief.mcpMaterial.map(e => e.purpose), ['discovery', 'data', 'search']);
+  const raw = JSON.parse(fs.readFileSync(brief.mcpMaterial[1].file, 'utf8'));
+  assert.equal(raw.raw.content[0].text, large);
+  assert.deepEqual(calls.filter(c => c.method === 'tools/call').map(c => c.params.name), ['retrieve_case_inputs', 'find_reference_pages']);
+  assert.deepEqual(calls.find(c => c.params?.name === 'retrieve_case_inputs').params.arguments, { backlog_item_key: args.item.id });
+  assert.match(calls.find(c => c.params?.name === 'find_reference_pages').params.arguments.query, /CR-07 Export/);
+  const checklist = fs.readFileSync(out.checklistFile, 'utf8');
+  assert.ok(checklist.indexOf('BEFORE source edits: answers/CR-07/evidence/panel-original.png') < checklist.indexOf('## Acceptance criteria'));
+  git(args.checkoutRoot, 'config', 'user.name', 'Synthetic'); git(args.checkoutRoot, 'config', 'user.email', 'fixture@example.invalid');
+  fs.writeFileSync(path.join(args.matchRoot, 'app.txt'), 'baseline');
+  git(args.checkoutRoot, 'add', 'assigned/app.txt'); git(args.checkoutRoot, 'commit', '-qm', 'baseline');
+  const wt = await s.worktree({ action: 'create', backlogItemKey: args.item.id });
+  brief = JSON.parse(fs.readFileSync(wt.brief.briefFile, 'utf8'));
+  assert.ok(brief.baseSha); assert.equal(brief.mcpMaterial.length, 3);
+  for (const entry of brief.mcpMaterial) {
+    assert.ok(entry.file.startsWith(wt.matchRoot + path.sep)); assert.ok(fs.existsSync(entry.file));
+    assert.ok(git(wt.worktreeRoot, 'check-ignore', entry.file));
+  }
+  await s.match_mcp({ action: 'call', name: 'read_reference_page', args: { id: 'DOC-SYNTHETIC' }, backlogItemKey: args.item.id });
+  brief = JSON.parse(fs.readFileSync(wt.brief.briefFile, 'utf8'));
+  assert.equal(brief.mcpMaterial.at(-1).purpose, 'follow-up');
+  assert.equal(JSON.parse(fs.readFileSync(brief.mcpMaterial.at(-1).file, 'utf8')).content[0].text, large);
+  const replay = await s.start_work({ backlogItemKey: args.item.id });
+  assert.equal(JSON.parse(fs.readFileSync(replay.briefFile, 'utf8')).mcpMaterial.length, 4);
+  assert.equal(calls.filter(c => c.method === 'tools/list').length, 1);
 });
 
 function worktreeSession(t, adapter) {

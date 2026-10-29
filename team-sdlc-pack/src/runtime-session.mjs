@@ -19,6 +19,8 @@ import { validate, validateFinalResult } from './schema.mjs';
 import { McpHttpClient, resultText } from './mcp-http.mjs';
 import { buildChecklist, looksLikeTestOutput } from './checklist.mjs';
 import { writeItemBrief } from './item-brief.mjs';
+import { extractRequiredEvidence, evidenceArrayRefs, unscorableAnswer } from './required-evidence.mjs';
+import { collectMcpMaterial } from './mcp-material.mjs';
 import { until, SUBMIT_LIMITS } from './deadline.mjs';
 import {
   oneLine, safeId, uuid, sleep, readJson, writeJson, loggableOrigin, loggablePath, originOf, redact, truncate, minutes, SHA_RE, ITEM_KEY_RE, sha256, isInside, nowIso, repoKey,
@@ -592,8 +594,9 @@ export class RuntimeSession {
     };
   }
 
-  async match_mcp({ action = 'tools', name, args = {}, uri } = {}) {
+  async match_mcp({ action = 'tools', name, args = {}, uri, raw = false, backlogItemKey } = {}) {
     if (this.phase === 'IDLE') return { ok: false, error: 'NOT_CONFIGURED', next: this.nextHint() };
+    if (backlogItemKey && (!this.items.has(backlogItemKey) || !this.readMaterial(backlogItemKey))) return { ok: false, error: 'NOT_STARTED' };
     const url = this.matchMcpUrl();
     if (!url) {
       return {
@@ -612,12 +615,12 @@ export class RuntimeSession {
       if (action === 'tools') {
         const tools = await this.mcp.tools();
         let resources = [];
-        try {
-          resources = await this.mcp.resources();
-        } catch { /* resources are optional */ }
+        if (!raw) {
+          try { resources = await this.mcp.resources(); } catch { /* resources are optional */ }
+        }
         return this.clean({
           ok: true, url, server: this.mcp.serverInfo, instructions: this.mcp.instructions ? truncate(this.mcp.instructions, 2000) : null,
-          tools: tools.map((t) => ({ name: t.name, description: truncate(t.description || '', 300), input: Object.keys(t.inputSchema?.properties || {}), required: t.inputSchema?.required || [] })),
+          tools: raw ? tools : tools.map((t) => ({ name: t.name, description: truncate(t.description || '', 300), input: Object.keys(t.inputSchema?.properties || {}), required: t.inputSchema?.required || [] })),
           resources: resources.slice(0, 50).map((r) => ({ uri: r.uri, name: r.name, description: truncate(r.description || '', 160) })),
           next: 'Call one with action "call" (name + args), or read a resource with action "resource" (uri). Quote what you used in the answer.',
         });
@@ -625,16 +628,20 @@ export class RuntimeSession {
       if (action === 'call') {
         if (!name) return { ok: false, error: 'NAME_REQUIRED', next: 'action "tools" lists the names.' };
         const r = await this.mcp.call(name, args);
+        if (backlogItemKey) this.appendMcpMaterial(backlogItemKey, { purpose: 'follow-up', tool: name, args, ok: !r?.isError, result: this.clean(r) });
+        if (raw) return this.clean({ ok: !r?.isError, raw: r });
         return this.clean({ ok: !r?.isError, url, tool: name, isError: !!r?.isError, text: resultText(r), structured: r?.structuredContent ?? null });
       }
       if (action === 'resource') {
         if (!uri) return { ok: false, error: 'URI_REQUIRED' };
         const r = await this.mcp.readResource(uri);
+        if (backlogItemKey) this.appendMcpMaterial(backlogItemKey, { purpose: 'follow-up', tool: 'resource', args: { uri }, ok: true, result: this.clean(r) });
         return this.clean({ ok: true, url, uri, text: resultText(r) });
       }
       return { ok: false, error: 'BAD_ACTION', message: 'action is tools | call | resource' };
     } catch (e) {
       this.mcp.ready = false;
+      if (backlogItemKey) this.appendMcpMaterial(backlogItemKey, { purpose: 'follow-up', tool: name || action, args, ok: false, error: e.message });
       return this.clean({
         ok: false, error: e.code || 'MATCH_MCP_FAILED', message: e.message, url,
         next: 'The match MCP server is not answering. Do not retry in a loop: work from the repository and the brief, write the assumption you used into the answer, and ship.',
@@ -967,6 +974,23 @@ export class RuntimeSession {
     return readJson(path.join(this.stateDir, 'items', id, 'start.json'), this.materialCache?.[id] || null);
   }
 
+  saveMaterial(id, material) {
+    this.materialCache = { ...(this.materialCache || {}), [id]: material };
+    if (this.stateDir) writeJson(path.join(this.stateDir, 'items', id, 'start.json'), material);
+  }
+
+  appendMcpMaterial(id, entry) {
+    const material = this.readMaterial(id);
+    const item = this.items.get(id);
+    if (!material || !item) throw new Error(`Start ${id} before appending MCP material.`);
+    material.mcpMaterial = [...(material.mcpMaterial || []), this.clean(entry)];
+    this.saveMaterial(id, material);
+    const matchRoot = this.itemMatchRoot(id);
+    const worktreeRoot = item.local?.worktree?.worktreeRoot || this.checkoutRoot;
+    return writeItemBrief({ checkoutRoot: this.checkoutRoot, worktreeRoot, matchRoot, item, material,
+      commands: this.commands, context: this.briefContext(item, worktreeRoot, matchRoot) });
+  }
+
   briefContext(it, worktreeRoot = this.checkoutRoot, matchRoot = this.matchRoot) {
     const { left } = effectiveLeft(it, this.now(), this.match.endsAt);
     const stopAt = left == null ? null : this.now() + (left - 5) * 60000;
@@ -979,6 +1003,7 @@ export class RuntimeSession {
       answer: answerPaths(matchRoot, it.id), checklistFile: path.join(matchRoot, 'answers', it.id, 'checklist.md'),
       deadlineAt: it.deadlineAt ?? null, workerStopAt: stopAt, deadlineMarginMinutes: 5,
       ports: it.local?.worktree?.ports ?? null,
+      baseSha: it.local?.worktree?.baseSha ?? this.environmentRevision ?? this.state.envReady?.revision ?? null,
     };
   }
 
@@ -1017,7 +1042,11 @@ export class RuntimeSession {
     if (it.local.notOpenRefused) delete it.local.notOpenRefused;
     delete it.local.parked;
     await this.withLock(() => this.fetchItemDetail(id));
+    it.description = data.description ?? (it.description || textBlockFor(this.lastPageText || '', id) || '');
+    it.acceptanceCriteria = data.acceptanceCriteria ?? it.acceptanceCriteria ?? null;
     const material = { backlogId: data.backlogId || id, backlogType: data.backlogType || it.type, startInstruction: data.startInstruction ?? '', submitTemplate: data.submitTemplate ?? null, minimumVerificationScenarios: data.minimumVerificationScenarios ?? null, files: data.files || {}, receivedAt: nowIso(), replay: !!data.replay };
+    material.requiredEvidence = extractRequiredEvidence(it, material);
+    material.mcpMaterial = this.readMaterial(id)?.mcpMaterial ?? await collectMcpMaterial({ ...it, startInstruction: material.startInstruction }, request => this.match_mcp(request));
     this.materialCache = { ...(this.materialCache || {}), [id]: material };
     if (this.stateDir) {
       writeJson(path.join(this.stateDir, 'items', id, 'start.json'), material);
@@ -1043,6 +1072,7 @@ export class RuntimeSession {
     const checklist = buildChecklist({
       id, type: it.type, startInstruction: material.startInstruction, description: it.description || '',
       minimumVerificationScenarios: material.minimumVerificationScenarios, requiredScenarios: required,
+      requiredEvidence: material.requiredEvidence,
       commands: this.commands || {}, appPath: this.appPath || null,
     });
     let checklistFile = null;
@@ -1050,6 +1080,11 @@ export class RuntimeSession {
       try {
         const target = path.join(path.dirname(answer.submitJson), 'checklist.md');
         if (!fs.existsSync(target)) fs.writeFileSync(target, checklist.text);
+        else {
+          const old = fs.readFileSync(target, 'utf8');
+          const named = checklist.text.split('## Acceptance criteria')[0];
+          fs.writeFileSync(target, named + old.slice(old.indexOf('## Acceptance criteria') >= 0 ? old.indexOf('## Acceptance criteria') : 0));
+        }
         checklistFile = target;
       } catch { /* the checklist is also in this result; a write failure must not block the item */ }
     }
@@ -1070,6 +1105,7 @@ export class RuntimeSession {
       points: it.maxPoints ?? null, deadlineAt: it.deadlineAt ?? null, workerStopAt: context?.workerStopAt ?? null,
       briefFile: brief?.briefFile ?? null, filesDir: brief?.filesDir ?? null,
       answer: context?.answer ?? null, checklistFile, playbook: context?.playbook ?? null,
+      requiredEvidence: material.requiredEvidence,
       summary: ['Start accepted; full material is in briefFile.', 'Create the worktree; hand its returned paths to a worker.'],
     });
     const filesOut = {};
@@ -1101,6 +1137,7 @@ export class RuntimeSession {
       submitTemplate: material.submitTemplate,
       minimumVerificationScenarios: material.minimumVerificationScenarios,
       requiredScenarios: required,
+      requiredEvidence: material.requiredEvidence,
       files: filesOut,
       providedFiles,
       providedRunners,
@@ -1211,6 +1248,28 @@ export class RuntimeSession {
           for (const ref of check.evidenceRefs) {
             if (!(await G.existsAt(cwd, sha, `${folder}/answers/${id}/${ref}`))) errors.push(`evidence file ${ref} is not in commit ${sha.slice(0, 12)} (expected ${folder}/answers/${id}/${ref})`);
           }
+          const unscorable = unscorableAnswer(answer);
+          if (unscorable) {
+            if (opts.allowBlocked === true && typeof opts.reason === 'string' && opts.reason.trim()) warnings.push(`allowBlocked: ${opts.reason.trim()} (${unscorable})`);
+            else errors.push(`UNSCORABLE_ANSWER: ${unscorable}; read brief.json and all files/, request NEED_INFO, then commit real results. Only in the last minutes use allowBlocked:true with a nonempty reason.`);
+          }
+        }
+        const requiredEvidence = this.readMaterial(id)?.requiredEvidence ?? extractRequiredEvidence(it, this.readMaterial(id) || {});
+        const waivers = Array.isArray(opts.allowMissingEvidence) ? opts.allowMissingEvidence : [];
+        for (const name of waivers) {
+          if (!requiredEvidence.some(e => e.name === name)) errors.push(`allowMissingEvidence: ${name} is not an extracted evidence name.`);
+        }
+        const refs = evidenceArrayRefs(answer);
+        for (const { name } of requiredEvidence) {
+          if (waivers.includes(name)) {
+            if (typeof opts.reason === 'string' && opts.reason.trim()) { warnings.push(`allowMissingEvidence: ${name}; reason: ${opts.reason.trim()}`); continue; }
+            errors.push(`allowMissingEvidence: ${name} requires a nonempty reason explaining the extraction error.`);
+          }
+          const ref = `evidence/${name}`;
+          const file = `${folder}/answers/${id}/${ref}`;
+          const object = await G.git(cwd, ['ls-tree', sha, '--', file]);
+          if (!/^100(?:644|755) blob /m.test(object.stdout)) errors.push(`REQUIRED_EVIDENCE_MISSING: ${file} is not a regular file in commit ${sha.slice(0, 12)}; add answers/${id}/${ref} and commit it.`);
+          if (!refs.has(ref)) errors.push(`REQUIRED_EVIDENCE_UNREFERENCED: add "${ref}" to at least one evidence array in answers/${id}/submit.json and commit it.`);
         }
         // Compare against the revision the match started from, not the moving branch head.
         const baseline = this.environmentRevision || this.state.envReady?.revision;
@@ -1308,7 +1367,7 @@ export class RuntimeSession {
   // At most 20s preflight + 60s submit (including retry refreshes) + 5s final refresh.
   // Only read-only waits may be abandoned. The POST itself finishes or aborts before
   // this method returns and releases the per-item lock.
-  async submitItem({ backlogItemKey, gitRevision, dryRun = false, allowNoEvidence = false, allowUntested = false } = {}) {
+  async submitItem({ backlogItemKey, gitRevision, dryRun = false, allowNoEvidence = false, allowUntested = false, allowMissingEvidence = [], allowBlocked = false, reason } = {}) {
     const id = String(backlogItemKey || '').trim();
     if (!this.bearer) return { ok: false, error: 'NO_BEARER' };
     if (!this.match.uuid) return { ok: false, error: 'MATCH_UUID_UNKNOWN' };
@@ -1333,7 +1392,7 @@ export class RuntimeSession {
     } else {
       let pf;
       try {
-        pf = await until(this.preflight(id, gitRevision, { allowNoEvidence, allowUntested }), Date.now() + SUBMIT_LIMITS.preflightMs);
+        pf = await until(this.preflight(id, gitRevision, { allowNoEvidence, allowUntested, allowMissingEvidence, allowBlocked, reason }), Date.now() + SUBMIT_LIMITS.preflightMs);
       } catch (e) {
         if (e.code !== 'DEADLINE_EXCEEDED') throw e;
         return { ok: false, error: 'PREFLIGHT_TIMEOUT', next: 'Nothing was sent. Retry submit_work with the same commit after checking local Git access.' };
@@ -1634,10 +1693,14 @@ export class RuntimeSession {
       const baseSha = it.local.worktree?.baseSha || await G.revParse(wtRoot, 'HEAD');
       it.local.worktree = { ...it.local.worktree, worktreeRoot: wtRoot, matchRoot: wtMatchRoot, branch: `mtm-wt/${id}`, baseSha, ports };
       const context = this.briefContext(it, wtRoot, wtMatchRoot);
+      const material = this.readMaterial(id);
+      material.requiredEvidence ??= extractRequiredEvidence(it, material);
+      material.mcpMaterial ??= await collectMcpMaterial({ ...it, startInstruction: material.startInstruction }, request => this.match_mcp(request));
+      this.saveMaterial(id, material);
       const brief = writeItemBrief({
         checkoutRoot: this.checkoutRoot, worktreeRoot: wtRoot, matchRoot: wtMatchRoot,
         item: { ...it, description: it.description || textBlockFor(this.lastPageText || '', id) || '' },
-        material: this.readMaterial(id), commands: this.commands, context,
+        material, commands: this.commands, context,
       });
       const linked = linkDependencies(this.matchRoot, wtMatchRoot, { envSuffix: `_wt_${id.toLowerCase().replace(/[^a-z0-9]+/g, '_')}` });
       it.local.worktree.envIsolated = linked.some((l) => l.includes('TEST_DATABASE_URL'));
@@ -1647,6 +1710,9 @@ export class RuntimeSession {
       // integrate (MAIN_DIRTY) or collide with the cherry-pick. The worktree owns the answer from now on.
       const movedDraftAnswer = await this.moveDraftAnswer(id, wtMatchRoot);
       if (it.local.startedAt) materializeAnswer(wtMatchRoot, id, this.readMaterial(id)?.submitTemplate ?? null);
+      if (!fs.existsSync(context.checklistFile)) fs.writeFileSync(context.checklistFile, buildChecklist({
+        id, type: it.type, description: it.description, ...material, commands: this.commands, appPath: context.appPath,
+      }).text);
       if (movedDraftAnswer && this.appPath && fs.existsSync(context.checklistFile)) {
         const checklist = fs.readFileSync(context.checklistFile, 'utf8');
         fs.writeFileSync(context.checklistFile, checklist.split(this.appPath).join(context.appPath));

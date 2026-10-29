@@ -71,7 +71,7 @@ export function scenarioNames(mvs) {
 const BY_TYPE = {
   BUG: ['Write the reproduction test first; RUN IT ON THE UNFIXED CODE. Save exact commands and failing before/passing after output in evidence/<ID>-repro.md. Cite the introducing commit from folder-scoped history in analysis; stop searching after 2 minutes and record it as unconfirmed.',
     'Fix the cause, not the symptom; keep the change inside the smallest file set that fixes it.'],
-  CR: ['Find the authoritative spec for this change (the match MCP server often holds it: call match_mcp before assuming it is unavailable).',
+  CR: ['Read the authoritative spec in brief.json and files/, including MCP material; return NEED_INFO to the orchestrator if still missing.',
     'Follow the spec exactly — field names, order, formats. A CR is graded against the spec, not against what looks reasonable.'],
   PI: ['PI is scored by finishing order: take the shortest correct path and submit as soon as it passes.',
     'Do not polish. Correct and early beats complete and late.'],
@@ -83,7 +83,7 @@ const BY_TYPE = {
  * Returns { criteria, scenarios, steps, text } — `steps` is what the agent works through, `text` is
  * the markdown copy written next to the answer so it survives a context reset or an agent restart.
  */
-export function buildChecklist({ id, type, startInstruction = '', description = '', minimumVerificationScenarios = null, requiredScenarios = 0, commands = {}, appPath = null } = {}) {
+export function buildChecklist({ id, type, startInstruction = '', description = '', minimumVerificationScenarios = null, requiredScenarios = 0, requiredEvidence = [], commands = {}, appPath = null } = {}) {
   const criteria = criteriaFrom(startInstruction).length ? criteriaFrom(startInstruction) : criteriaFrom(description);
   const scenarios = scenarioNames(minimumVerificationScenarios);
   const kind = BY_TYPE[type] ? type : 'TASK';
@@ -92,6 +92,7 @@ export function buildChecklist({ id, type, startInstruction = '', description = 
   const typecheck = commands.typecheck || null;
 
   const steps = [
+    'Read brief.json, every file under files/ (including MCP material), and this checklist. Produce every required BEFORE artifact immediately on your own port before source edits; save it without committing yet. If already edited, capture the baseSha state in a temporary copy, never skip it. Return NEED_INFO: <what> to the orchestrator if material is still missing.',
     `Turn the acceptance criteria below into the definition of done for ${id}; nothing else counts.`,
     ...BY_TYPE[kind],
     `Implement, then run ${test}${where}. Save the full output as evidence/test.log — submit_work refuses an item with no test evidence.`,
@@ -103,7 +104,9 @@ export function buildChecklist({ id, type, startInstruction = '', description = 
     'Self-review every criterion inline; commit code, tests, evidence and answer, then return READY/PARKED with SHA and counts. The orchestrator integrates, pushes and submits.',
   ];
 
-  const lines = [`# ${id} — checklist`, '', '## Acceptance criteria'];
+  const lines = [`# ${id} — checklist`, '', '## Required named evidence',
+    ...requiredEvidence.map(e => `- [ ] ${e.before ? 'BEFORE source edits: ' : ''}answers/${id}/evidence/${e.name}; reference "evidence/${e.name}" in a submit.json evidence array.`),
+    '', '## Acceptance criteria'];
   if (criteria.length) criteria.forEach((c, i) => lines.push(`- [ ] ${i + 1}. ${c}`));
   else lines.push('- [ ] (no criteria parsed — read startInstruction in full and write them here yourself)');
   if (scenarios.length) {

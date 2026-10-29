@@ -1,6 +1,6 @@
-# Master the Machine Kit3 — 2.7.1
+# Master the Machine Kit3 — 2.7.2
 
-Team pack **Codex**, protocol 4, cho MTM Player. Bản 2.7.1 trên nhánh `codex/kit3_bou_v7`, cập nhật từ nền 2.7.0.
+Team pack **Codex**, protocol 4, cho MTM Player. Bản 2.7.2 trên nhánh `codex/kit3_bou_v3`, cập nhật từ nền 2.7.1.
 
 ## Thay đổi chính
 
@@ -24,7 +24,7 @@ node .\team-sdlc-pack\scripts\install.mjs --team-workspace "D:\mtm\BAK-Kit3"
 node .\team-sdlc-pack\scripts\check-distribution.mjs --team-workspace "D:\mtm\BAK-Kit3"
 ```
 
-Chỉ tiếp tục khi checker báo **READY**. Trên MTM Player chọn provider **Codex** và load đúng workspace vừa cài. Team identity trong pack là `[FHM] Bá Khí`; metadata package/info/runtime cùng phiên bản `2.7.1`.
+Chỉ tiếp tục khi checker báo **READY**. Trên MTM Player chọn provider **Codex** và load đúng workspace vừa cài. Team identity trong pack là `[FHM] Bá Khí`; metadata package/info/runtime cùng phiên bản `2.7.2`.
 
 Initialize trên Player chỉ tạo round local. Để tập lại cần mã trận mới hoặc Re-match phía BTC.
 
@@ -48,6 +48,14 @@ Repo chỉ chứa runtime Codex, tài liệu và fixture giả. Không đưa cre
 ## Windows contest machine
 
 Use MTM Player **0.9.35**. Install into a fresh workspace using the Node command above (or `team-sdlc-pack/install.ps1`), then run the checker and require **READY**. In Player Init, select Codex, set the Codex CLI path to the installed **codex.exe** (absolute path), and choose the match-authorized model in Init. Keep previous match workspaces separate.
+
+## Changelog — 2.7.2
+
+Found in a live 2.7.1 practice match (Player 0.9.41), fixed by Claude:
+- **Evidence names that may block a submission must be unambiguous.** A JSON field named in prose was extracted as a required file; `submit_work` refused the item and the orchestrator created a placeholder to get past it, minutes before the item's deadline. Only an explicit `evidence/` path, a "before" artifact, or a screenshot/capture naming an image now blocks; every other mention is a `CHECK_EVIDENCE` warning that forbids placeholder files.
+- **Full `answers/<ID>/evidence/<name>` paths count as evidence** (they were dropped as source paths); only artifact extensions are considered.
+- **Markdown table rows are read one at a time**, so a "before" in one row no longer marks the next row's file as a before artifact.
+- Validation: `node --test tests/*.test.mjs` 76/76; fresh install + checker READY; MTM Player 0.9.41 `verifyTeamRuntime` VERIFIED.
 
 ## Changelog — 2.7.1
 

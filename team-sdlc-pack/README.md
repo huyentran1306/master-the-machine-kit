@@ -1,8 +1,8 @@
-# team-sdlc-pack 2.7.1 — Digital Project Team (Codex, MTM technical guide 0.5.1)
+# team-sdlc-pack 2.7.2 — Digital Project Team (Codex, MTM technical guide 0.5.1)
 
 Team pack chính thức để thi Master the Machine: mtm-player load pack này, chạy Codex CLI với `team_orchestrator` làm root agent, MCP Helper (`mtm_minimal`) giữ credential trong bộ nhớ, gọi Game API và ghi `progress.ndjson`.
 
-2.7.1: enforce required named evidence and references at submission; capture before artifacts before edits. Fetch per-item MCP data/docs into worker briefs automatically; request missing information with NEED_INFO and refuse BLOCKED/all-unrun answers without a reasoned last-minute override. Retain dispatcher-only operation, three workers plus one PI, isolated ports and bounded integration. Configure `parallel.maxWorkers` and `parallel.portBase` in `config/game-adapter.json`. See the orchestrator Quick card and [runtime details](docs/README.md).
+2.7.2: only unambiguous evidence names (explicit evidence/ paths, before artifacts, requested screenshots) block submission; other mentions are CHECK_EVIDENCE warnings, never placeholders. 2.7.1: enforce required named evidence and references at submission; capture before artifacts before edits. Fetch per-item MCP data/docs into worker briefs automatically; request missing information with NEED_INFO and refuse BLOCKED/all-unrun answers without a reasoned last-minute override. Retain dispatcher-only operation, three workers plus one PI, isolated ports and bounded integration. Configure `parallel.maxWorkers` and `parallel.portBase` in `config/game-adapter.json`. See the orchestrator Quick card and [runtime details](docs/README.md).
 
 Inherited safeguards: record contradictions and authorized baseline test changes in existing answer fields; refuse changes to baseline migrations; read the ignored preparation repo map before searching; preserve BUG reproduction output before/after and cite the introducing commit; prefer structured backlog titles over page samples. `recon_repo` returns `repoMapPath`; submit preflight/dryRun returns `touchedBaseline` and exact repair instructions.
 

@@ -16,6 +16,8 @@ import { recon } from './recon.mjs';
 import { validate, validateFinalResult } from './schema.mjs';
 import { McpHttpClient, resultText } from './mcp-http.mjs';
 import { buildChecklist, looksLikeTestOutput } from './checklist.mjs';
+import { writeItemBrief } from './item-brief.mjs';
+import { until, SUBMIT_LIMITS } from './deadline.mjs';
 import {
   oneLine, safeId, uuid, sleep, readJson, writeJson, loggableOrigin, loggablePath, originOf, redact, truncate, minutes, SHA_RE, ITEM_KEY_RE, sha256, isInside, nowIso, repoKey,
 } from './util.mjs';
@@ -31,7 +33,7 @@ export const DEFAULT_ADAPTER = {
   // so a longer ceiling costs no reaction time and removes agent turns. Each idle turn re-reads
   // the whole conversation, which is where this match's tokens actually go.
   polling: { successMs: 5000, errorMs: 10000, backgroundMs: 20000, maxWaitMs: 170000 },
-  submit: { acceptedStatuses: ['ACCEPTED', 'RECEIVED'], retryBudgetMs: 90000 },
+  submit: { acceptedStatuses: ['ACCEPTED', 'RECEIVED'], retryBudgetMs: SUBMIT_LIMITS.retryMs },
   planner: {},
   parallel: { maxWorkers: 2 },
 };
@@ -64,6 +66,7 @@ export class RuntimeSession {
     this.logProblems = [];
     this.state = { submissions: {}, items: {}, loginPreferred: null, envReady: null, current: null };
     this.lock = Promise.resolve();
+    this.submissionsInFlight = new Set();
     this.poller = null;
     this.lastPollError = null;
   }
@@ -1253,7 +1256,23 @@ export class RuntimeSession {
     return { errors, warnings, sha, answer, evidenceRefs: check.evidenceRefs, testStatus: tests?.status || 'NOT_REPORTED' };
   }
 
-  async submit_work({ backlogItemKey, gitRevision, dryRun = false, allowNoEvidence = false, allowUntested = false } = {}) {
+  async submit_work(args = {}) {
+    const id = String(args.backlogItemKey || '').trim();
+    if (this.submissionsInFlight.has(id)) {
+      return { ok: false, error: 'SUBMIT_IN_PROGRESS', next: `Wait for the running submit_work for ${id}, then replay without changing the commit.` };
+    }
+    this.submissionsInFlight.add(id);
+    try {
+      return await this.submitItem({ ...args, backlogItemKey: id });
+    } finally {
+      this.submissionsInFlight.delete(id);
+    }
+  }
+
+  // At most 20s preflight + 60s submit (including retry refreshes) + 5s final refresh.
+  // Only read-only waits may be abandoned. The POST itself finishes or aborts before
+  // this method returns and releases the per-item lock.
+  async submitItem({ backlogItemKey, gitRevision, dryRun = false, allowNoEvidence = false, allowUntested = false } = {}) {
     const id = String(backlogItemKey || '').trim();
     if (!this.bearer) return { ok: false, error: 'NO_BEARER' };
     if (!this.match.uuid) return { ok: false, error: 'MATCH_UUID_UNKNOWN' };
@@ -1276,7 +1295,13 @@ export class RuntimeSession {
       body = rec.body;
       note = `replaying the unresolved submission ${rec.body.clientSubmissionId} with the identical body (sha ${rec.body.gitRevision.slice(0, 12)})`;
     } else {
-      const pf = await this.preflight(id, gitRevision, { allowNoEvidence, allowUntested });
+      let pf;
+      try {
+        pf = await until(this.preflight(id, gitRevision, { allowNoEvidence, allowUntested }), Date.now() + SUBMIT_LIMITS.preflightMs);
+      } catch (e) {
+        if (e.code !== 'DEADLINE_EXCEEDED') throw e;
+        return { ok: false, error: 'PREFLIGHT_TIMEOUT', next: 'Nothing was sent. Retry submit_work with the same commit after checking local Git access.' };
+      }
       if (pf.errors.length || dryRun) {
         return this.clean({ ok: !pf.errors.length, dryRun, refused: pf.errors.length > 0, errors: pf.errors, warnings: pf.warnings, gitRevision: pf.sha, evidenceRefs: pf.evidenceRefs, next: pf.errors.length ? 'Fix every error, commit, push, then call submit_work again. Nothing was sent.' : 'Preflight passed: call submit_work without dryRun.' });
       }
@@ -1302,7 +1327,7 @@ export class RuntimeSession {
       this.backlogStatus(id, 'SUBMITTED', 'Official acceptance receipt received; scoring pending.', { revision: body.gitRevision, receiptId: r.receipt.receiptId });
       if (this.state.current === id) this.state.current = null;
       this.saveState();
-      const refreshed = await this.withLock(() => this.doRefresh()).catch(() => null);
+      const refreshed = await until(this.withLock(() => this.doRefresh()), Date.now() + SUBMIT_LIMITS.refreshMs).catch(() => null);
       return this.clean({ ok: true, outcome: 'SUBMITTED', receipt: r.receipt, replay: r.replay, gitRevision: body.gitRevision, note, refreshed: !!refreshed?.ok, view: this.view({ includeEvents: true }), next: 'Do not wait for grading. Take NEXT.' });
     }
     if (r.outcome === 'UNCERTAIN') {
@@ -1323,7 +1348,8 @@ export class RuntimeSession {
       if (this.state.current === id) this.state.current = null;
     }
     if (code === 'BACKLOG_ITEM_CLOSED' && it) it.availability = 'CLOSED';
-    const matchStatus = code === 'MATCH_NOT_ACCEPTING_SUBMISSIONS' ? await this.recheckMatchStatus() : undefined;
+    const matchStatus = code === 'MATCH_NOT_ACCEPTING_SUBMISSIONS'
+      ? await until(this.recheckMatchStatus(), Date.now() + SUBMIT_LIMITS.refreshMs).catch(() => 'UNCONFIRMED') : undefined;
     this.saveState();
     const hint = {
       BACKLOG_NOT_STARTED: 'Call start_work for this item, then submit_work again.',
@@ -1545,6 +1571,7 @@ export class RuntimeSession {
     const it = this.items.get(id);
     if (!it) return { ok: false, error: 'UNKNOWN_ITEM' };
     if (action === 'create') {
+      if (!it.local?.startedAt || !this.readMaterial(id)) return { ok: false, error: 'NOT_STARTED', next: 'Call start_work before worktree create.' };
       const active = [...this.items.values()].filter((i) => i.local?.worktree && !isSubmitted(i)).length;
       if (active >= (this.adapter.parallel.maxWorkers || 2)) return { ok: false, error: 'TOO_MANY_WORKERS', message: `at most ${this.adapter.parallel.maxWorkers} parallel worktrees` };
       G.ensureExcluded(this.checkoutRoot, '/.mtm-wt/');
@@ -1554,6 +1581,11 @@ export class RuntimeSession {
         if (r.code !== 0) return { ok: false, error: 'WORKTREE_FAILED', message: (r.stderr || r.stdout).trim().slice(0, 400) };
       }
       const wtMatchRoot = path.join(wtRoot, this.repository.folder);
+      const brief = writeItemBrief({
+        checkoutRoot: this.checkoutRoot, worktreeRoot: wtRoot, matchRoot: wtMatchRoot,
+        item: { ...it, description: it.description || textBlockFor(this.lastPageText || '', id) || '' },
+        material: this.readMaterial(id), commands: this.commands,
+      });
       const linked = linkDependencies(this.matchRoot, wtMatchRoot, { envSuffix: `_wt_${id.toLowerCase().replace(/[^a-z0-9]+/g, '_')}` });
       it.local.worktree = { worktreeRoot: wtRoot, matchRoot: wtMatchRoot, branch: `mtm-wt/${id}`, envIsolated: linked.some((l) => l.includes('TEST_DATABASE_URL')) };
       it.local.owner = 'team_feature_worker';
@@ -1564,10 +1596,10 @@ export class RuntimeSession {
       if (it.local.startedAt) materializeAnswer(wtMatchRoot, id, this.readMaterial(id)?.submitTemplate ?? null);
       this.saveState();
       return {
-        ok: true, worktreeRoot: wtRoot, matchRoot: wtMatchRoot, linked, movedDraftAnswer,
+        ok: true, worktreeRoot: wtRoot, checkoutRoot: wtRoot, folder: this.repository.folder, matchRoot: wtMatchRoot, linked, movedDraftAnswer, brief,
         answer: it.local.startedAt ? answerPaths(wtMatchRoot, id) : undefined,
         note: linked.some((l) => l.includes('TEST_DATABASE_URL')) ? 'This copy got its own TEST_DATABASE_URL (tests truncate between cases, so copies must not share one).' : undefined,
-        next: `Spawn team_feature_worker with: item ${id}, worktreeRoot ${wtRoot}, matchRoot ${wtMatchRoot}, the app folder inside it, the brief/MVS/template from start_work. It edits only inside that matchRoot and never commits, pushes or calls Game APIs.`,
+        next: `Spawn team_feature_worker with fork_turns:"none". Pass paths, not pasted material: item ${id}, checkoutRoot/worktreeRoot ${wtRoot}, folder ${this.repository.folder}, matchRoot ${wtMatchRoot}, briefFile ${brief.briefFile}, filesDir ${brief.filesDir}, and the returned answer paths. Add scope, test commands and a time box. The worker stays inside matchRoot and never delegates, commits, pushes or calls Game APIs.`,
       };
     }
     if (action === 'integrate') {

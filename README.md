@@ -1,6 +1,6 @@
-# Master the Machine Kit3 — 2.7.0
+# Master the Machine Kit3 — 2.7.1
 
-Team pack **Codex**, protocol 4, cho MTM Player. Bản 2.7.0 trên nhánh `codex/kit3_bou_v6`, cập nhật từ nền 2.6.0.
+Team pack **Codex**, protocol 4, cho MTM Player. Bản 2.7.1 trên nhánh `codex/kit3_bou_v7`, cập nhật từ nền 2.7.0.
 
 ## Thay đổi chính
 
@@ -24,7 +24,7 @@ node .\team-sdlc-pack\scripts\install.mjs --team-workspace "D:\mtm\BAK-Kit3"
 node .\team-sdlc-pack\scripts\check-distribution.mjs --team-workspace "D:\mtm\BAK-Kit3"
 ```
 
-Chỉ tiếp tục khi checker báo **READY**. Trên MTM Player chọn provider **Codex** và load đúng workspace vừa cài. Team identity trong pack là `[FHM] Bá Khí`; metadata package/info/runtime cùng phiên bản `2.7.0`.
+Chỉ tiếp tục khi checker báo **READY**. Trên MTM Player chọn provider **Codex** và load đúng workspace vừa cài. Team identity trong pack là `[FHM] Bá Khí`; metadata package/info/runtime cùng phiên bản `2.7.1`.
 
 Initialize trên Player chỉ tạo round local. Để tập lại cần mã trận mới hoặc Re-match phía BTC.
 
@@ -48,6 +48,17 @@ Repo chỉ chứa runtime Codex, tài liệu và fixture giả. Không đưa cre
 ## Windows contest machine
 
 Use MTM Player **0.9.35**. Install into a fresh workspace using the Node command above (or `team-sdlc-pack/install.ps1`), then run the checker and require **READY**. In Player Init, select Codex, set the Codex CLI path to the installed **codex.exe** (absolute path), and choose the match-authorized model in Init. Keep previous match workspaces separate.
+
+## Changelog — 2.7.1
+
+Written by Codex. Preserve the dispatcher-only 40-minute Windows workflow; prioritize points, then speed, then credits.
+
+- **Required evidence:** extract exact filenames and before flags into compact/full Start Work results, worker briefs and the top of each checklist. Preflight and dryRun require the files in the submitted commit and references in submit.json evidence arrays. Previously, only already-referenced files were checked. Capture before artifacts immediately on the worker's port; recover the base commit state if edits already happened. Permit exact-name extraction mistakes only through allowMissingEvidence plus a recorded reason.
+- **Complete worker material:** compact mode already retained full item text, acceptance criteria, instruction, template, MVS and organizer files, but orchestrator MCP results were not transferred. Automatically discover per-item data and doc/KB search tools by purpose, preserve raw results and failures in ignored brief files, and copy them into the worktree. Bound retrieval time and preserve follow-ups through match_mcp backlogItemKey. Workers read every brief file before NEED_INFO; the orchestrator fetches missing material and resumes the worker. The old profile allowed read-only MCP calls, but did not guarantee retrieval or transfer.
+- **Submission status:** refuse BLOCKED and all-NOT_RUN/FAIL/zero-case answers unless allowBlocked and a recorded reason are supplied. Reserve that override for the last minutes when nothing better exists; prefer verified DONE/PARTIAL with real evidence. Keep existing schema, baseline, verification, integration and replay safeguards.
+- **Synthetic regression coverage:** test filename extraction and exclusions, committed-file/reference gates, overrides, compact/full briefs, differently named HTTP MCP tools, raw-result retention, failures, follow-ups and worker ordering. No organizer content, credentials or match records were added.
+
+Validation on Windows: `node --test tests/*.test.mjs` — **73/73 passed**. Fresh installation under `os.tmpdir()` and the separate distribution checker both returned **READY**, including the 2.7.1 MCP handshake. No live-match performance claim.
 
 ## Changelog — 2.7.0
 

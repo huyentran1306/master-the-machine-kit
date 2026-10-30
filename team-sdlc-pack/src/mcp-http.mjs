@@ -3,6 +3,7 @@
 // Same guardrails as every other call: allow-listed origin, bearer from the helper, bounded time and
 // size, no redirects to another origin. The helper never guesses a URL; it uses one the match page
 // shows or the adapter declares.
+import { purpose } from './mcp-material.mjs';
 import { request, httpError } from './http.mjs';
 
 const PROTOCOL = '2025-06-18';
@@ -25,7 +26,7 @@ function parseBody(res) {
 }
 
 export class McpHttpClient {
-  constructor({ url, bearer, allowedOrigins, log = async () => {}, timeoutMs = 20000, maxBytes = 2_000_000 }) {
+  constructor({ url, bearer, allowedOrigins, log = async () => {}, timeoutMs = 45000, maxBytes = 2_000_000 }) {
     this.url = url;
     this.bearer = bearer;
     this.allowedOrigins = allowedOrigins;
@@ -49,7 +50,17 @@ export class McpHttpClient {
     };
   }
 
-  async send(method, params, { notification = false } = {}) {
+  async send(method, params, options = {}) {
+    const read = ['tools/list', 'resources/list', 'resources/read'].includes(method) || options.readOnly;
+    for (let attempt = 0; ; attempt++) {
+      try { return await this.sendOnce(method, params, options); }
+      catch (e) {
+        if (!read || attempt !== 0 || !/^(?:TIMEOUT|NETWORK|MCP_HTTP_(?:408|429|500|502|503|504))$/.test(e.code || '')) throw e;
+      }
+    }
+  }
+
+  async sendOnce(method, params, { notification = false } = {}) {
     const payload = notification ? { jsonrpc: '2.0', method, params } : { jsonrpc: '2.0', id: this.nextId++, method, params };
     const req = { method: 'POST', url: this.url, operation: method };
     await this.log('REQUESTED', req);
@@ -88,6 +99,12 @@ export class McpHttpClient {
 
   async init() {
     if (this.ready) return this.serverInfo;
+    if (this.initializing) return this.initializing;
+    this.initializing = this.initialize().finally(() => { this.initializing = null; });
+    return this.initializing;
+  }
+
+  async initialize() {
     const r = await this.send('initialize', {
       protocolVersion: PROTOCOL,
       capabilities: {},
@@ -112,12 +129,13 @@ export class McpHttpClient {
       cursor = r?.nextCursor;
       if (!cursor) break;
     }
+    this.toolCatalog = out;
     return out;
   }
 
   async call(name, args = {}) {
     await this.init();
-    return this.send('tools/call', { name, arguments: args });
+    return this.send('tools/call', { name, arguments: args }, { readOnly: !!purpose(this.toolCatalog?.find(t => t.name === name) || { name: '' }) });
   }
 
   async resources() {

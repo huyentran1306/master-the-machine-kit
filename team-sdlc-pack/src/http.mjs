@@ -108,8 +108,21 @@ export function drainNetwork() {
 }
 
 export async function request(url, opts = {}) {
+  const read = ['GET', 'HEAD'].includes(opts.method || 'GET');
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const result = await requestOnce(url, opts);
+      if (read && attempt === 0 && [408, 429, 500, 502, 503, 504].includes(result.status)) continue;
+      return result;
+    } catch (e) {
+      if (!read || attempt !== 0 || !['TIMEOUT', 'NETWORK'].includes(e.code)) throw e;
+    }
+  }
+}
+
+async function requestOnce(url, opts = {}) {
   const {
-    method = 'GET', headers = {}, body, jar, allowedOrigins, timeoutMs = 20000, maxBytes = 3_000_000, maxRedirects = 5, deadlineAt = Infinity,
+    method = 'GET', headers = {}, body, jar, allowedOrigins, timeoutMs = (opts.method && !['GET', 'HEAD'].includes(opts.method) ? 20000 : 45000), maxBytes = 3_000_000, maxRedirects = 5, deadlineAt = Infinity,
   } = opts;
   let current = url;
   let m = method;

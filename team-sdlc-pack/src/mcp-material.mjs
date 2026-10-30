@@ -1,13 +1,15 @@
+import { mapBounded } from './dispatch.mjs';
 import { until } from './deadline.mjs';
 
 const words = text => String(text || '').replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_-]/g, ' ').toLowerCase();
-function purpose(tool) {
+export function purpose(tool) {
   const text = words(`${tool.name} ${tool.description}`);
-  if (tool.annotations?.readOnlyHint === false || /\b(create|delete|update|submit|mutate|write)\b/.test(words(tool.name))) return null;
-  if (/\b(test data|fixtures?|scenario data|test cases)\b/.test(text) && /\b(get|fetch|read|load|retrieve|return|provide)\w*\b/.test(text)) return 'data';
-  if (/\b(search|find|lookup|query)\w*\b/.test(text) && /\b(docs?|documents?|documentation|knowledge|kb)\b/.test(text)) return 'search';
+  const name = words(tool.name);
+  const annotated = tool.annotations?.readOnlyHint === true && tool.annotations?.destructiveHint !== true;
   const action = /\b(restart|send|deploy|reset|notify|trigger|run|execute|apply|approve|cancel|create|update|delete|write|submit|mutate|post|pay|void|issue|email|toggle|enable|disable|set)\b/;
-  if (action.test(text) || (tool.annotations?.readOnlyHint !== true && !/\b(get|list|search|read|fetch|query|lookup|find|describe|show)\b/.test(text))) return null;
+  if (tool.annotations?.destructiveHint === true || !annotated && (tool.annotations?.readOnlyHint === false || action.test(name) || !/\b(get|list|search|read|fetch|query|lookup|find|describe|show|load|retrieve)\b/.test(name))) return null;
+  if (/\b(test data|fixtures?|scenario data|test cases)\b/.test(text)) return 'data';
+  if (/\b(search|find|lookup|query)\w*\b/.test(text) && /\b(docs?|documents?|documentation|knowledge|kb)\b/.test(text)) return 'search';
   // Incident items are answered from production logs; workers cannot query them, so fetch them up front.
   if (/\b(logs?|observability|traces?|events?|incidents?|audit|telemetry|metrics|requests?)\b/.test(text)) return 'logs';
   // Any other read-only company tool is still tried; an unfillable schema is recorded, not fatal.
@@ -31,13 +33,13 @@ function argumentsFor(tool, item, kind) {
 }
 
 /** Bounded, read-only discovery. Retain raw responses, including errors, for the worker. */
-export async function collectMcpMaterial(item, call, budgetMs = 30000) {
+export async function collectMcpMaterial(item, call, budgetMs = 90000) {
   const entries = [];
-  const deadline = Date.now() + Math.min(budgetMs, 30000);
+  const deadline = Date.now() + Math.min(budgetMs, 90000);
   const invoke = async (request, purpose, cutoff = deadline) => {
     const entry = { purpose, tool: request.name || 'tools-list', args: request.args || {} };
     try {
-      entry.result = await until(call({ ...request, raw: true }), Math.min(cutoff, Date.now() + 10000));
+      entry.result = await until(call({ ...request, raw: true }), cutoff);
       entry.ok = entry.result?.ok === true;
     } catch (e) { entry.ok = false; entry.error = e.message; }
     entries.push(entry);
@@ -58,11 +60,9 @@ export async function collectMcpMaterial(item, call, budgetMs = 30000) {
     } catch (e) { entries.push({ purpose: kind, tool: tool.name, ok: false, error: e.message }); }
   };
   const needed = ['data', 'search', 'logs'].map(kind => selected.find(x => x.kind === kind)).filter(Boolean);
-  // Divide remaining time so slow data/search cannot starve the first log attempt.
-  for (let i = 0; i < needed.length; i++) {
-    await attempt(needed[i], Date.now() + Math.max(0, deadline - Date.now()) / (needed.length - i));
-  }
-  for (const candidate of selected.filter(x => x.kind !== 'other' && !needed.includes(x))) await attempt(candidate);
+  // First data/docs/log reads overlap; each keeps the whole remaining read budget.
+  await mapBounded(needed, 3, candidate => attempt(candidate));
+  await mapBounded(selected.filter(x => x.kind !== 'other' && !needed.includes(x)), 3, candidate => attempt(candidate));
   for (const candidate of selected.filter(x => x.kind === 'search' || x.kind === 'logs')) {
     if (item.title) await attempt(candidate, deadline, true);
   }

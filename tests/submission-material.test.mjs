@@ -226,7 +226,7 @@ test('preflight migrates old cached evidence and enforces freshly extracted requ
 test('logs and optional discovery require read-only names or annotations and reject action verbs', async () => {
   const verbs = 'restart send deploy reset notify trigger run execute apply approve cancel create update delete write submit mutate post pay void issue email toggle enable disable set'.split(' ');
   const advertised = [
-    ...verbs.map(v => ({ name: `${v}_service`, description: 'Read logs', annotations: { readOnlyHint: true } })),
+    ...verbs.map(v => ({ name: `${v}_service`, description: 'Read logs' })),
     { name: 'mystery_logs' }, { name: 'mystery' }, { name: 'get_logs', annotations: { readOnlyHint: false } },
     { name: 'fetch_logs' }, { name: 'show_inventory' }, { name: 'inventory', annotations: { readOnlyHint: true } },
   ];
@@ -268,4 +268,60 @@ test('slow first attempts leave time for logs; optional tools share a smaller bu
   });
   assert.deepEqual(optionalCalls, ['get_inventory']);
   assert.ok(Date.now() - optionalStart < 4000);
+});
+
+test('read-only annotations override action names and log descriptions mentioning deploy', async () => {
+  const tools = [
+    { name: 'search_logs', description: 'Search logs for services billing and deploy', annotations: { readOnlyHint: true } },
+    { name: 'deploy_history', annotations: { readOnlyHint: true } },
+    { name: 'get_audit', description: 'Read deploy service events' },
+    { name: 'restart_service', description: 'Restart service and read logs' },
+    { name: 'get_destructive', annotations: { readOnlyHint: true, destructiveHint: true } },
+  ];
+  const calls = [];
+  await collectMcpMaterial({ id: 'PI-91' }, async req => {
+    if (req.action === 'tools') return { ok: true, tools };
+    calls.push(req.name); return { ok: true };
+  });
+  assert.deepEqual(calls.sort(), ['deploy_history', 'get_audit', 'search_logs']);
+});
+
+test('general required evidence headings and tables are strict; unchanged data is exist-only', () => {
+  for (const heading of ['## General evidence (required once)', 'General evidence (required once)', '**General evidence (required once)**', '| General evidence (required once) |']) {
+    const description = `${heading}\n| File | Requirement |\n|---|---|\n| final-panel.png | Screenshot |\n| test.log | Output |\n| typecheck.log | Output |\n| sample-data.json | Save unchanged |`;
+    const entries = extractWithStrictness({ description }, { files: { 'qa/sample-data.json': '{"synthetic":true}' } });
+    assert.equal(entries.length, 4, heading);
+    assert.ok(entries.every(e => e.strict));
+    assert.ok(entries.slice(0, 3).every(e => e.reference));
+    assert.equal(entries[3].reference, false);
+  }
+});
+
+test('cached evidence missing reference is re-extracted even when strict already exists', () => {
+  const s = new RuntimeSession();
+  s.items.set('TASK-91', { id: 'TASK-91', description: 'Save unchanged as evidence/sample-data.json.' });
+  s.materialCache = { 'TASK-91': { requiredEvidence: [{ name: 'sample-data.json', strict: true, before: false }] } };
+  assert.deepEqual(s.readMaterial('TASK-91').requiredEvidence, [{ name: 'sample-data.json', before: false, strict: true, reference: false }]);
+});
+
+test('repo configuration filenames never become evidence warnings', () => {
+  const description = 'Record evidence after reading tsconfig.json, tsconfig.app.json, package.json, package-lock.json, vitest.config.ts, next.config.mjs, eslint.config.js and playwright.config.ts. Save test.log.';
+  assert.deepEqual(extractWithStrictness({ description }).map(e => e.name), ['test.log']);
+});
+
+test('answer-only submission validates shipped schema without a suite or test log', async t => {
+  const f = fixture(t);
+  const item = f.s.items.get('TASK-91');
+  item.description = 'Question: compute the answer value. No code changes required.';
+  item.local.answerOnly = true;
+  f.s.lastTests = {};
+  f.s.materialCache['TASK-91'] = { requiredEvidence: [], files: { 'challenge/TASK-91-submit.schema.json': { type: 'object', required: ['value'], properties: { value: { type: 'number' } }, additionalProperties: false } } };
+  f.write('answers/TASK-91/submit.json', { value: 7 }); f.commit();
+  const valid = await f.submit();
+  assert.equal(valid.ok, true, JSON.stringify(valid));
+  f.write('answers/TASK-91/submit.json', { value: 'wrong' }); f.commit();
+  const invalid = await f.submit();
+  assert.equal(invalid.refused, true);
+  assert.ok(invalid.errors.some(e => e.includes('submit.schema.json')));
+  assert.ok(invalid.errors.every(e => !e.includes('test run')));
 });

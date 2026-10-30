@@ -4,10 +4,11 @@ const BEFORE = /\bbaseline\b|\bbefore\b[^.!?\n]{0,60}\b(?:fix\w*|chang\w*|edit\w
 const FILE = /(?:[\w-]+\/)*[\w-][\w.-]*\.[a-zA-Z][a-zA-Z0-9]{0,9}\b/g;
 // The answer file, organizer templates/schemas and verification specs are named next to
 // evidence rules but are never evidence themselves; requiring them would block submission.
-const NOT_EVIDENCE = /^(?:submit\.json|.*-submit(?:\.schema)?\.json|.*\.schema\.json|.*minimum-verification-scenarios\.md)$/i;
+const NOT_EVIDENCE = /^(?:submit\.json|.*-submit(?:\.schema)?\.json|.*\.schema\.json|.*minimum-verification-scenarios\.md|(?:package|package-lock|tsconfig(?:\.[\w-]+)?|jsconfig|components)\.json|(?:pnpm-lock|yarn)\.(?:yaml|lock)|(?:vitest|vite|next|eslint|prettier|postcss|tailwind|playwright)\.config\.[\w.]+)$/i;
 // Evidence is a captured artifact; `data.steps`-style field references are not files.
 const EVIDENCE_EXT = /\.(?:png|jpe?g|gif|webp|svg|pdf|txt|log|md|json|csv|tsv|xml|html?|har|zip|mp4|webm|out)$/i;
-const REQUIRED = /\brequired\s+(?:evidence|artifacts?)\b/i;
+const REQUIRED = /^(?=[\s\S]*\brequired\b)(?=[\s\S]*\b(?:evidence|artifacts?)\b)/i;
+const UNCHANGED = /\b(?:save|store|copy|keep|preserve)\w*\b[^!?\n]*\b(?:unchanged|as[ -]is|unmodified)\b|\bunchanged\b[^!?\n]*\b(?:save|store|copy|keep)\w*\b/i;
 const baseName = p => String(p).replace(/\\/g, '/').split('/').pop().toLowerCase();
 
 export function extractRequiredEvidence(item = {}, material = {}) {
@@ -29,7 +30,8 @@ export function extractRequiredEvidence(item = {}, material = {}) {
       // Table rows are self-contained: one row's "before" must not leak into the next.
       if (!line.trim() || /^\s*(?:#{1,6}\s|[-*]\s|\d+[.)]\s|\|)/.test(line)) continuation = '';
       if (/^\s*#{1,6}\s/.test(line) || /^\s*[\w ]+:\s*$/.test(line)) heading = `${context} ${line}`;
-      if (/^\s*(?:\*\*|__)?required\s+(?:evidence|artifacts?)(?:\*\*|__)?\s*:?\s*$/i.test(line) || /^\s*\|\s*required\s+(?:evidence|artifacts?)\s*\|/i.test(line)) heading = `${context} ${line}`;
+      if (REQUIRED.test(line) && (/^\s*(?:\*\*|__|\|)/.test(line) || !FILE.test(line))) heading = `${context} ${line}`;
+      FILE.lastIndex = 0;
       // Inline code may name a file; code expressions are not deliverables.
       const clean = line.replace(/`([^`]+)`/g, (_, s) => /^[\w./\\-]+$/.test(s) ? s : '');
       const surrounding = `${heading} ${continuation} ${clean}`;
@@ -44,7 +46,7 @@ export function extractRequiredEvidence(item = {}, material = {}) {
         if (!token.startsWith('evidence/') && (token.includes('/') || /\.(?:[cm]?[jt]sx?|py|sql|toml|ya?ml|prisma|html|css)$/i.test(token))) continue;
         const name = token.replace(/^evidence\//, '');
         if (name.split('/').some(p => !p || p === '.' || p === '..')) continue;
-        if (NOT_EVIDENCE.test(baseName(name)) || provided.has(baseName(name))) continue;
+        if (NOT_EVIDENCE.test(baseName(name)) || provided.has(baseName(name)) && !UNCHANGED.test(clean)) continue;
         const before = BEFORE.test(surrounding);
         // Only unambiguous names may block submission: an explicit evidence/ path, a "before"
         // artifact, or a screenshot/capture naming an image. Anything else is a reminder.
@@ -55,7 +57,7 @@ export function extractRequiredEvidence(item = {}, material = {}) {
         // only asks to save (e.g. QA data "save it unchanged as evidence/x.json") must merely exist.
         const prev = found.get(name);
         found.set(name, { name, before: before || prev?.before || false, strict: strict || prev?.strict || false,
-          reference: requiredLine || before || prev?.reference || false });
+          reference: (UNCHANGED.test(clean) ? false : requiredLine || before) || prev?.reference || false });
       }
       continuation = /[.!?]\s*$/.test(clean) || /^\s*\|/.test(line) ? '' : `${continuation} ${clean}`;
     }

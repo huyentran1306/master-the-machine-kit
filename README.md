@@ -1,6 +1,6 @@
-# Master the Machine Kit3 — 2.7.5
+# Master the Machine Kit3 — 2.7.6
 
-Team pack **Codex**, protocol 4, cho MTM Player. Bản 2.7.5 trên nhánh `codex/kit3_bou_v9`, cập nhật từ nền 2.7.4.
+Team pack **Codex**, protocol 4, cho MTM Player. Bản 2.7.6 trên nhánh `codex/kit3_bou_v9`, cập nhật từ nền 2.7.5.
 
 ## Thay đổi chính
 
@@ -24,7 +24,7 @@ node .\team-sdlc-pack\scripts\install.mjs --team-workspace "D:\mtm\BAK-Kit3"
 node .\team-sdlc-pack\scripts\check-distribution.mjs --team-workspace "D:\mtm\BAK-Kit3"
 ```
 
-Chỉ tiếp tục khi checker báo **READY**. Trên MTM Player chọn provider **Codex** và load đúng workspace vừa cài. Team identity trong pack là `[FHM] Bá Khí`; metadata package/info/runtime cùng phiên bản `2.7.5`.
+Chỉ tiếp tục khi checker báo **READY**. Trên MTM Player chọn provider **Codex** và load đúng workspace vừa cài. Team identity trong pack là `[FHM] Bá Khí`; metadata package/info/runtime cùng phiên bản `2.7.6`.
 
 Initialize trên Player chỉ tạo round local. Để tập lại cần mã trận mới hoặc Re-match phía BTC.
 

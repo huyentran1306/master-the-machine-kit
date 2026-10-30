@@ -7,7 +7,7 @@ import path from 'node:path';
 import { ProgressLog, scrubSummary, playerRuleErrors } from './progress.mjs';
 import { parseLifecycleText, validateDescriptor, publicDescriptor } from './lifecycle.mjs';
 import { CookieJar, request } from './http.mjs';
-import { login, parseMatchPage, looksLikeLogin, textBlockFor, loadMatchData } from './portal.mjs';
+import { login, parseMatchPage, looksLikeLogin, textBlockFor, loadMatchData, usableDescription } from './portal.mjs';
 import { startWork, submit, operationUrl } from './game-api.mjs';
 import * as G from './git.mjs';
 import { materializeAnswer, answerPaths, countScenarios, checkAnswer } from './answers.mjs';
@@ -1045,6 +1045,15 @@ export class RuntimeSession {
     delete it.local.parked;
     await this.withLock(() => this.fetchItemDetail(id));
     it.description = data.description ?? (it.description || textBlockFor(this.lastPageText || '', id) || '');
+    // The item text is the only place some requirements live (BUG-01: "save as dashboard_before_fixing.png").
+    // Without it the brief, the evidence extraction and the submit gate all work blind.
+    if (!usableDescription(it.description)) {
+      await this.withLock(() => this.doRefresh({ reason: 'description' })).catch(() => {});
+      const fresh = this.items.get(id)?.description;
+      const block = textBlockFor(this.lastPageText || '', id);
+      it.description = usableDescription(fresh) ? fresh : usableDescription(block) ? block : (it.description || '');
+    }
+    it.local.descriptionOk = usableDescription(it.description);
     it.acceptanceCriteria = data.acceptanceCriteria ?? it.acceptanceCriteria ?? null;
     const material = { backlogId: data.backlogId || id, backlogType: data.backlogType || it.type, startInstruction: data.startInstruction ?? '', submitTemplate: data.submitTemplate ?? null, minimumVerificationScenarios: data.minimumVerificationScenarios ?? null, files: data.files || {}, receivedAt: nowIso(), replay: !!data.replay };
     material.requiredEvidence = extractRequiredEvidence(it, material);
@@ -1108,6 +1117,7 @@ export class RuntimeSession {
       briefFile: brief?.briefFile ?? null, filesDir: brief?.filesDir ?? null,
       answer: context?.answer ?? null, checklistFile, playbook: context?.playbook ?? null,
       requiredEvidence: material.requiredEvidence,
+      ...(it.local.descriptionOk ? {} : { warning: `NEED_DESCRIPTION: the item text of ${id} could not be read (empty or a "$<id>" page reference). Call get_backlog_item ${id} (or refresh_match includePageText:true) and read the ${id} section yourself before dispatching; every file name it asks for is required evidence.` }),
       summary: ['Start accepted; full material is in briefFile.', 'Create the worktree; hand its returned paths to a worker.'],
     });
     const filesOut = {};
@@ -1250,6 +1260,9 @@ export class RuntimeSession {
           for (const ref of check.evidenceRefs) {
             if (!(await G.existsAt(cwd, sha, `${folder}/answers/${id}/${ref}`))) errors.push(`evidence file ${ref} is not in commit ${sha.slice(0, 12)} (expected ${folder}/answers/${id}/${ref})`);
           }
+          if (it && it.local?.descriptionOk === false && !usableDescription(it.description) && opts.allowNoDescription !== true) {
+            errors.push(`NO_ITEM_TEXT: ${id} was worked without its item text, so required file names may be missing. Read it (get_backlog_item ${id}), check every file name it asks for, then submit; only if the page truly has no text use allowNoDescription:true.`);
+          }
           const unscorable = unscorableAnswer(answer);
           if (unscorable) {
             if (opts.allowBlocked === true && typeof opts.reason === 'string' && opts.reason.trim()) warnings.push(`allowBlocked: ${opts.reason.trim()} (${unscorable})`);
@@ -1374,7 +1387,7 @@ export class RuntimeSession {
   // At most 20s preflight + 60s submit (including retry refreshes) + 5s final refresh.
   // Only read-only waits may be abandoned. The POST itself finishes or aborts before
   // this method returns and releases the per-item lock.
-  async submitItem({ backlogItemKey, gitRevision, dryRun = false, allowNoEvidence = false, allowUntested = false, allowMissingEvidence = [], allowBlocked = false, reason } = {}) {
+  async submitItem({ backlogItemKey, gitRevision, dryRun = false, allowNoEvidence = false, allowUntested = false, allowMissingEvidence = [], allowBlocked = false, allowNoDescription = false, reason } = {}) {
     const id = String(backlogItemKey || '').trim();
     if (!this.bearer) return { ok: false, error: 'NO_BEARER' };
     if (!this.match.uuid) return { ok: false, error: 'MATCH_UUID_UNKNOWN' };
@@ -1399,7 +1412,7 @@ export class RuntimeSession {
     } else {
       let pf;
       try {
-        pf = await until(this.preflight(id, gitRevision, { allowNoEvidence, allowUntested, allowMissingEvidence, allowBlocked, reason }), Date.now() + SUBMIT_LIMITS.preflightMs);
+        pf = await until(this.preflight(id, gitRevision, { allowNoEvidence, allowUntested, allowMissingEvidence, allowBlocked, allowNoDescription, reason }), Date.now() + SUBMIT_LIMITS.preflightMs);
       } catch (e) {
         if (e.code !== 'DEADLINE_EXCEEDED') throw e;
         return { ok: false, error: 'PREFLIGHT_TIMEOUT', next: 'Nothing was sent. Retry submit_work with the same commit after checking local Git access.' };

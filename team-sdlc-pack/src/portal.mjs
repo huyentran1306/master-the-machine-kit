@@ -37,6 +37,35 @@ export function htmlToText(html) {
   return s.split('\n').map((l) => l.replace(/[ \t ]+/g, ' ').trim()).filter(Boolean).join('\n');
 }
 
+/** A React Server Components reference such as "$15", "$L1a" or "$@3": a pointer to another chunk, never text. */
+export const isRscRef = (v) => typeof v === 'string' && /^\$[A-Za-z@#]?[0-9a-fA-F]{1,8}$/.test(v.trim());
+
+/** Text chunks of the flight stream: "<hex id>:T<hex byte length>,<text>". The live portal (M02UT89F, 26/10)
+ * sends each backlog row with descriptionMd:"$15" and the item text as chunk 15. */
+export function rscTextChunks(stream) {
+  const chunks = new Map();
+  const buf = Buffer.from(stream, 'utf8');
+  const head = /(?:^|\n)([0-9a-f]{1,8}):T([0-9a-f]{1,8}),/g;
+  let m;
+  while ((m = head.exec(stream))) {
+    const start = Buffer.byteLength(stream.slice(0, m.index + m[0].length), 'utf8');
+    const len = parseInt(m[2], 16);
+    if (!Number.isFinite(len) || start + len > buf.length) continue;
+    chunks.set(m[1].toLowerCase(), buf.subarray(start, start + len).toString('utf8'));
+  }
+  return chunks;
+}
+
+/** Replace "$<id>" string values that point at a text chunk with that text, so the JSON carries the item text. */
+export function resolveRscTextRefs(stream) {
+  const chunks = rscTextChunks(stream);
+  if (!chunks.size) return stream;
+  return stream.replace(/"\$([0-9a-fA-F]{1,8})"/g, (all, id) => (chunks.has(id.toLowerCase()) ? JSON.stringify(chunks.get(id.toLowerCase())) : all));
+}
+
+/** A description worth working from: real text, not a reference, not a one-line board row. */
+export const usableDescription = (s) => typeof s === 'string' && s.trim().length >= 120 && !isRscRef(s);
+
 /** Segments of the page that may hold JSON: flight data, __NEXT_DATA__, JSON scripts, data-* attributes. */
 export function dataSegments(html) {
   const segs = [];
@@ -50,7 +79,7 @@ export function dataSegments(html) {
       /* ignore */
     }
   }
-  if (flight.length) segs.push(flight.join(''));
+  if (flight.length) segs.push(resolveRscTextRefs(flight.join('')));
   const scriptRe = /<script\b([^>]*)>([\s\S]*?)<\/script>/gi;
   while ((m = scriptRe.exec(html))) {
     const attrs = m[1];
@@ -214,6 +243,7 @@ function descriptionOf(o) {
   const plain = new Set(['description', 'descriptionMd', 'body', 'content']);
   for (const k of ['description', 'descriptionMd', 'descriptionMarkdown', 'markdown', 'body', 'content', 'details', 'detail', 'brief', 'requirements', 'context', 'expectedOutcome', 'acceptanceCriteria', 'instructions', 'minimumVerificationMd']) {
     const v = o[k];
+    if (isRscRef(v)) continue; // "$15" is a pointer to a text chunk, not the description
     if (typeof v === 'string' && v.trim().length > 0) parts.push(plain.has(k) ? v : `${k}: ${v}`);
     else if (Array.isArray(v) && v.every((x) => typeof x === 'string')) parts.push(`${k}:\n- ${v.join('\n- ')}`);
   }
@@ -462,12 +492,19 @@ export async function loadMatchData(html, { url, matchId, matchUuid, extraJsonPa
   let authenticatedJson = false;
   const readable = () => !!(parsed.matchIdShown && parsed.status && (parsed.matchUuid || (!requireUuid && authenticatedJson)));
   const errors = [];
-  if (readable()) return { html, parsed, readable: true, authRejected: false, errors };
+  // A readable page can still lack the item text (descriptionMd sent as a "$15" reference): then the
+  // JSON view the portal itself renders from is read too, for the descriptions only.
+  const missingText = () => parsed.items.length > 0 && parsed.items.some((i) => !usableDescription(i.description));
+  if (readable() && !missingText()) return { html, parsed, readable: true, authRejected: false, errors };
+  const wasReadable = readable();
   for (const template of extraJsonPaths) {
     const target = new URL(template.replace('{matchId}', encodeURIComponent(matchId)).replace('{matchUuid}', matchUuid || ''), url).toString();
     try {
       const res = await call(target, { method: 'GET', headers: { accept: 'application/json', referer: url } });
-      if (res.status === 401 || res.status === 403) return { html, parsed, readable: false, authRejected: true, errors: [`match data HTTP ${res.status}`] };
+      if (res.status === 401 || res.status === 403) {
+        if (wasReadable) { errors.push(`match data HTTP ${res.status} (descriptions only)`); continue; }
+        return { html, parsed, readable: false, authRejected: true, errors: [`match data HTTP ${res.status}`] };
+      }
       if (res.status >= 400 || !res.json || typeof res.json !== 'object') {
         errors.push(`match data HTTP ${res.status} without a usable JSON document`);
         continue;
@@ -480,12 +517,12 @@ export async function loadMatchData(html, { url, matchId, matchUuid, extraJsonPa
       html += `\n<script type="application/json">${JSON.stringify(res.json).replace(/</g, '\\u003c')}</script>`;
       parsed = parseMatchPage(html, { matchId, serverNow });
       authenticatedJson = !!(res.json.match && code === matchId);
-      if (readable()) return { html, parsed, readable: true, authRejected: false, errors };
+      if (readable() && !missingText()) return { html, parsed, readable: true, authRejected: false, errors };
     } catch (e) {
       errors.push(e.code || 'MATCH_DATA_REQUEST_FAILED');
     }
   }
-  return { html, parsed, readable: false, authRejected: false, errors };
+  return { html, parsed, readable: readable(), authRejected: false, errors };
 }
 
 /** True when the response looks like a login page rather than the match page. */

@@ -48,11 +48,14 @@ export function extractRequiredEvidence(item = {}, material = {}) {
         const before = BEFORE.test(surrounding);
         // Only unambiguous names may block submission: an explicit evidence/ path, a "before"
         // artifact, or a screenshot/capture naming an image. Anything else is a reminder.
-        const strict = token.startsWith('evidence/') || before || REQUIRED.test(heading) ||
-          /\brequired\s+(?:evidence|artifacts?)\s*:/i.test(clean) ||
+        const requiredLine = REQUIRED.test(heading) || /\brequired\s+(?:evidence|artifacts?)\s*:/i.test(clean);
+        const strict = token.startsWith('evidence/') || before || requiredLine ||
           (/\.(?:png|jpe?g|gif|webp)$/i.test(name) && /\b(?:screenshots?|captur\w*)\b/i.test(surrounding));
+        // Test-case evidence ("Required evidence: …") and "before" artifacts must be cited in submit.json; a file the item
+        // only asks to save (e.g. QA data "save it unchanged as evidence/x.json") must merely exist.
         const prev = found.get(name);
-        found.set(name, { name, before: before || prev?.before || false, strict: strict || prev?.strict || false });
+        found.set(name, { name, before: before || prev?.before || false, strict: strict || prev?.strict || false,
+          reference: requiredLine || before || prev?.reference || false });
       }
       continuation = /[.!?]\s*$/.test(clean) || /^\s*\|/.test(line) ? '' : `${continuation} ${clean}`;
     }

@@ -64,11 +64,22 @@ test('only unambiguous names block submission; other mentions are reminders', ()
     'Capture a screenshot of the list as `list.png` and save the data as `evidence/x-9-data.json`.',
   ].join('\n');
   assert.deepEqual(extractWithStrictness({ description }), [
-    { name: 'home-before.png', before: true, strict: true },
-    { name: 'home-after.png', before: false, strict: true },
-    { name: 'run.log', before: false, strict: true },
-    { name: 'list.png', before: false, strict: true },
-    { name: 'x-9-data.json', before: false, strict: true },
+    { name: 'home-before.png', before: true, strict: true, reference: true },
+    { name: 'home-after.png', before: false, strict: true, reference: true },
+    { name: 'run.log', before: false, strict: true, reference: true },
+    { name: 'list.png', before: false, strict: true, reference: true },
+    { name: 'x-9-data.json', before: false, strict: true, reference: true },
+  ]);
+});
+
+test('a saved data file must exist but need not be cited; test-case evidence must be cited', () => {
+  const description = [
+    '1. Obtain the official data and save it unchanged as `answers/X-9/evidence/x-9-data.json`.',
+    '## X-9-TC-01', 'Required evidence: `tc-01-list.png`.',
+  ].join('\n');
+  assert.deepEqual(extractWithStrictness({ description }), [
+    { name: 'x-9-data.json', before: false, strict: true, reference: false },
+    { name: 'tc-01-list.png', before: false, strict: true, reference: true },
   ]);
 });
 
@@ -209,7 +220,7 @@ test('preflight migrates old cached evidence and enforces freshly extracted requ
   const r = await f.submit();
   assert.ok(r.errors.some(e => e.includes('panel.png')));
   assert.ok(r.errors.every(e => !e.includes('data.steps')));
-  assert.deepEqual(f.s.readMaterial('TASK-91').requiredEvidence, [{ name: 'panel.png', before: false, strict: true }]);
+  assert.deepEqual(f.s.readMaterial('TASK-91').requiredEvidence, [{ name: 'panel.png', before: false, strict: true, reference: true }]);
 });
 
 test('logs and optional discovery require read-only names or annotations and reject action verbs', async () => {

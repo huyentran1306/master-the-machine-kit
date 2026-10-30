@@ -1,6 +1,6 @@
-# Master the Machine Kit3 — 2.7.6
+# Master the Machine Kit3 — 2.7.7
 
-Team pack **Codex**, protocol 4, cho MTM Player. Bản 2.7.6 trên nhánh `codex/kit3_bou_v9`, cập nhật từ nền 2.7.5.
+Team pack **Codex**, protocol 4, cho MTM Player. Bản 2.7.7 trên nhánh `codex/kit3_bou_v9`, cập nhật từ nền 2.7.6.
 
 ## Thay đổi chính
 
@@ -24,7 +24,7 @@ node .\team-sdlc-pack\scripts\install.mjs --team-workspace "D:\mtm\BAK-Kit3"
 node .\team-sdlc-pack\scripts\check-distribution.mjs --team-workspace "D:\mtm\BAK-Kit3"
 ```
 
-Chỉ tiếp tục khi checker báo **READY**. Trên MTM Player chọn provider **Codex** và load đúng workspace vừa cài. Team identity trong pack là `[FHM] Bá Khí`; metadata package/info/runtime cùng phiên bản `2.7.6`.
+Chỉ tiếp tục khi checker báo **READY**. Trên MTM Player chọn provider **Codex** và load đúng workspace vừa cài. Team identity trong pack là `[FHM] Bá Khí`; metadata package/info/runtime cùng phiên bản `2.7.7`.
 
 Initialize trên Player chỉ tạo round local. Để tập lại cần mã trận mới hoặc Re-match phía BTC.
 
@@ -48,6 +48,12 @@ Repo chỉ chứa runtime Codex, tài liệu và fixture giả. Không đưa cre
 ## Windows contest machine
 
 Use MTM Player **0.9.35**. Install into a fresh workspace using the Node command above (or `team-sdlc-pack/install.ps1`), then run the checker and require **READY**. In Player Init, select Codex, set the Codex CLI path to the installed **codex.exe** (absolute path), and choose the match-authorized model in Init. Keep previous match workspaces separate.
+
+## Changelog — 2.7.7
+
+Found in a live 2.7.6 practice match (30/10), fixed by Claude:
+- **A data file the item only asks to save is not forced into submit.json.** `submit_work` refused a finished item because the official QA data file ("save it unchanged as `answers/<ID>/evidence/<name>.json`") was not cited in any `evidence` array, costing about two minutes against an 18-minute deadline. Extracted names now carry `reference`: test-case evidence ("Required evidence: …") and "before" artifacts must be cited (error `REQUIRED_EVIDENCE_UNREFERENCED`); other strict files must exist and only warn `EVIDENCE_NOT_CITED`.
+- Validation: `node --test tests/*.test.mjs` 91/91.
 
 ## Changelog — 2.7.6
 

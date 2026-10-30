@@ -1280,7 +1280,7 @@ export class RuntimeSession {
           if (!requiredEvidence.some(e => e.name === name)) errors.push(`allowMissingEvidence: ${name} is not an extracted evidence name.`);
         }
         const refs = evidenceArrayRefs(answer);
-        for (const { name, strict } of requiredEvidence) {
+        for (const { name, strict, reference } of requiredEvidence) {
           if (strict === false) {
             // A guess from prose must never cost a deadline: remind instead of refusing.
             warnings.push(`CHECK_EVIDENCE: the item text mentions "${name}". If the item requires it, add answers/${id}/evidence/${name} and reference it in submit.json; otherwise ignore this warning and never create a placeholder file.`);
@@ -1294,7 +1294,12 @@ export class RuntimeSession {
           const file = `${folder}/answers/${id}/${ref}`;
           const object = await G.git(cwd, ['ls-tree', sha, '--', file]);
           if (!/^100(?:644|755) blob /m.test(object.stdout)) errors.push(`REQUIRED_EVIDENCE_MISSING: ${file} is not a regular file in commit ${sha.slice(0, 12)}; add answers/${id}/${ref} and commit it.`);
-          if (!refs.has(ref)) errors.push(`REQUIRED_EVIDENCE_UNREFERENCED: add "${ref}" to at least one evidence array in answers/${id}/submit.json and commit it.`);
+          if (!refs.has(ref)) {
+            const message = `REQUIRED_EVIDENCE_UNREFERENCED: add "${ref}" to at least one evidence array in answers/${id}/submit.json and commit it.`;
+            // Only test-case evidence must be cited; a saved data file just has to exist.
+            if (reference === false) warnings.push(message.replace('REQUIRED_EVIDENCE_UNREFERENCED', 'EVIDENCE_NOT_CITED'));
+            else errors.push(message);
+          }
         }
         // Compare against the revision the match started from, not the moving branch head.
         const baseline = this.environmentRevision || this.state.envReady?.revision;

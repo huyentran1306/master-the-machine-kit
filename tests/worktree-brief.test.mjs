@@ -81,8 +81,8 @@ test('worktree create returns ignored, readable child paths and moves only the d
   assert.ok(out.next.includes(out.brief.briefFile));
   assert.ok(out.next.includes(out.brief.filesDir));
   assert.deepEqual(JSON.parse(fs.readFileSync(out.brief.briefFile, 'utf8')).submitTemplate, material.submitTemplate);
-  assert.deepEqual(JSON.parse(fs.readFileSync(out.brief.briefFile, 'utf8')).requiredEvidence, [{ name: 'result.json', before: false, strict: false }]);
-  assert.deepEqual(s.readMaterial('CR-07').requiredEvidence, [{ name: 'result.json', before: false, strict: false }]);
+  assert.deepEqual(JSON.parse(fs.readFileSync(out.brief.briefFile, 'utf8')).requiredEvidence, [{ name: 'result.json', before: false, strict: false, reference: false }]);
+  assert.deepEqual(s.readMaterial('CR-07').requiredEvidence, [{ name: 'result.json', before: false, strict: false, reference: false }]);
 });
 
 async function startFixture(t) {
@@ -122,7 +122,7 @@ test('start_work defaults compact and writes complete briefs without leaking ite
   const brief = JSON.parse(fs.readFileSync(result.briefFile, 'utf8'));
   assert.equal(brief.item.description, s.items.get(args.item.id).description);
   assert.deepEqual(brief.item.acceptanceCriteria, args.item.acceptanceCriteria);
-  assert.deepEqual(result.requiredEvidence, [{ name: 'result.json', before: false, strict: false }]);
+  assert.deepEqual(result.requiredEvidence, [{ name: 'result.json', before: false, strict: false, reference: false }]);
   assert.deepEqual(brief.requiredEvidence, result.requiredEvidence);
   assert.equal(brief.startInstruction, material.startInstruction);
   assert.deepEqual(brief.minimumVerificationScenarios, material.minimumVerificationScenarios);
@@ -144,7 +144,7 @@ test('start_work full mode retains description, template, checklist and supplied
   assert.deepEqual(result.minimumVerificationScenarios, material.minimumVerificationScenarios);
   assert.equal(result.files['qa/data.json'], material.files['qa/data.json']);
   assert.ok(result.checklist.length); assert.ok(result.providedRunners.length);
-  assert.deepEqual(result.requiredEvidence, [{ name: 'result.json', before: false, strict: false }]);
+  assert.deepEqual(result.requiredEvidence, [{ name: 'result.json', before: false, strict: false, reference: false }]);
 });
 
 test('compact start and worktree brief retain raw MCP material from differently named HTTP tools; follow-ups append', async t => {

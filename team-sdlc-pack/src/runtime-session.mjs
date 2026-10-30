@@ -3,6 +3,9 @@
 // only speaks JSON-RPC.
 import fs from 'node:fs';
 import crypto from 'node:crypto';
+import os from 'node:os';
+import { answerOnly, dispatchPolicy, integrationGate, mapBounded, BuildQueue } from './dispatch.mjs';
+import { stopWorktreeProcesses } from './process-cleanup.mjs';
 import path from 'node:path';
 import { ProgressLog, scrubSummary, playerRuleErrors } from './progress.mjs';
 import { parseLifecycleText, validateDescriptor, publicDescriptor } from './lifecycle.mjs';
@@ -39,7 +42,7 @@ export const DEFAULT_ADAPTER = {
   polling: { successMs: 5000, errorMs: 10000, backgroundMs: 20000, maxWaitMs: 55000 },
   submit: { acceptedStatuses: ['ACCEPTED', 'RECEIVED'], retryBudgetMs: SUBMIT_LIMITS.retryMs },
   planner: {},
-  parallel: { maxWorkers: 3, portBase: 3100 },
+  parallel: { maxCodeWorkers: 5, maxBuilds: 2, materialConcurrency: 4, portBase: 3100 },
 };
 
 function deepMerge(a, b) {
@@ -56,6 +59,8 @@ export class RuntimeSession {
     this.teamWorkspace = teamWorkspace || null;
     this.packRoot = packRoot;
     this.adapter = deepMerge(DEFAULT_ADAPTER, adapter || {});
+    this.freeMemory = () => os.freemem();
+    this.buildQueue = new BuildQueue(this.adapter.parallel.maxBuilds);
     this.identity = identity || null; // team-pack-info.json
     this.phase = 'IDLE';
     this.jar = new CookieJar();
@@ -124,7 +129,7 @@ export class RuntimeSession {
     const f = this.stateFile;
     if (!f) return;
     const items = {};
-    for (const [id, it] of this.items) items[id] = { local: it.local, firstSeenAt: it.firstSeenAt ?? null, title: it.title ?? null, type: it.type };
+    for (const [id, it] of this.items) items[id] = { local: it.local, firstSeenAt: it.firstSeenAt ?? null, title: it.title ?? null, type: it.type, deadlineAt: it.deadlineAt ?? null, maxPoints: it.maxPoints ?? null };
     this.state.items = items;
     this.state.matchId = this.matchId;
     this.state.roundKey = this.roundKey;
@@ -157,7 +162,7 @@ export class RuntimeSession {
     }
     if (st.matchUuid) this.match.uuid = st.matchUuid;
     for (const [id, v] of Object.entries(st.items || {})) {
-      const it = this.items.get(id) || { id, type: v.type || id.split('-')[0], title: v.title, local: {} };
+      const it = this.items.get(id) || { id, type: v.type || id.split('-')[0], title: v.title, deadlineAt: v.deadlineAt, maxPoints: v.maxPoints, local: {} };
       it.local = { ...(v.local || {}), ...(it.local || {}) };
       it.firstSeenAt = v.firstSeenAt;
       this.items.set(id, it);
@@ -477,7 +482,7 @@ export class RuntimeSession {
   nextHint() {
     switch (this.phase) {
       case 'PREPARATION': return 'Preparation: GIT_AUTH -> REPOSITORY -> ENVIRONMENT -> BUILD (report_progress each start/end), login_match, report_ready, then reply with its final JSON and end the turn.';
-      case 'GAME': return 'Game: dispatch every item (start_work compact:true -> worktree create -> team_feature_worker). Integrate READY, bounded gate, push, submit_work, remove. Never implement in main; use the bounded worker/event wait loop.';
+      case 'GAME': return `${this.view().next}. Game: dispatch every item (start_work compact:true -> worktree create -> team_feature_worker). Integrate READY, bounded gate, push, submit_work, remove. Never implement in main; use the bounded worker/event wait loop.`;
       case 'PAUSED': return 'Paused: stop work and end the turn with final_result status BLOCKED.';
       case 'ENDED': return 'Ended: reply with the final JSON and stop.';
       default: return 'Call configure_session with the lifecycle input (raw text including its marker line).';
@@ -712,7 +717,8 @@ export class RuntimeSession {
     const now = this.now();
     for (const p of parsed.items) {
       const prev = this.items.get(p.id);
-      const it = { ...(prev || {}), ...Object.fromEntries(Object.entries(p).filter(([, v]) => v != null)), local: prev?.local || {} };
+      // Keep object identity while concurrent start_work calls hold this item.
+      const it = Object.assign(prev || {}, Object.fromEntries(Object.entries(p).filter(([, v]) => v != null)), { local: prev?.local || {} });
       if (!it.firstSeenAt) it.firstSeenAt = now;
       if (!it.revealedAt) it.revealedAt = it.firstSeenAt;
       if (!it.deadlineAt && it.deadlineMinutes != null) it.deadlineAt = it.revealedAt + it.deadlineMinutes * 60000;
@@ -846,7 +852,12 @@ export class RuntimeSession {
   view({ includeEvents = false, pageText = false } = {}) {
     const now = this.now();
     const items = [...this.items.values()];
-    const { ranked, skipped } = rank(items, now, this.match.endsAt, this.adapter.planner);
+    const plan = rank(items, now, this.match.endsAt, this.adapter.planner);
+    const freeBytes = this.freeMemory();
+    const eligible = r => r.action === 'submit' || dispatchPolicy(this.items.get(r.id), items.filter(i => !isSubmitted(i)), this.adapter.parallel, freeBytes).allowed;
+    const ranked = plan.ranked.filter(eligible);
+    const queued = plan.ranked.filter(r => !eligible(r));
+    const skipped = plan.skipped;
     const current = this.state.current;
     const al = [
       ...plannerAlerts(items, now, this.match.endsAt, { current, paused: this.phase === 'PAUSED', status: this.match.status }, this.adapter.planner),
@@ -857,7 +868,8 @@ export class RuntimeSession {
       const { left } = effectiveLeft(it, now, this.match.endsAt);
       return {
         id: it.id, type: it.type, pts: it.maxPoints ?? null, title: it.title ? truncate(it.title, 90) : null, avail: it.availability || null,
-        ours: isSubmitted(it) ? 'SUBMITTED' : it.local?.startedAt ? (it.local.owner && it.local.owner !== 'orchestrator' ? `WORKING(${it.local.owner})` : 'WORKING') : isClosed(it, now) ? 'CLOSED' : 'NOT_STARTED',
+        ours: isSubmitted(it) ? 'SUBMITTED' : it.local?.parked ? 'PARKED' : it.local?.ready ? 'READY' : it.local?.startedAt ? (it.local.owner && it.local.owner !== 'orchestrator' ? `WORKING(${it.local.owner})` : 'WORKING') : isClosed(it, now) ? 'CLOSED' : 'NOT_STARTED',
+        action: it.local?.parked ? 'resume' : it.local?.ready ? 'submit' : null, parked: it.local?.parked || null,
         left: left == null ? null : Math.round(left * 10) / 10, result: it.result || null,
       };
     });
@@ -866,7 +878,10 @@ export class RuntimeSession {
       match: { id: this.matchId, status: this.match.status, remainingMin: this.match.endsAt ? minutes(this.match.endsAt - now) : null, uuidKnown: !!this.match.uuid, lastRefreshSecAgo: this.match.lastRefreshAt ? Math.round((now - this.match.lastRefreshAt) / 1000) : null },
       items: table,
       next: ranked[0] ? `${ranked[0].id} (${ranked[0].why})` : (this.match.status === 'FINISHED' ? 'MATCH FINISHED: final_result end=true' : 'nothing actionable: call wait_for_update'),
-      queue: ranked.slice(1, 5).map((r) => `${r.id}: ${r.why}`),
+      queue: [...ranked.slice(1), ...queued].map((r) => `${r.id}: ${r.action} — ${r.why}${queued.includes(r) ? ' (waiting for code slot/RAM)' : ''}`),
+      parked: items.filter(i => i.local?.parked && !isSubmitted(i)).map(i => ({ id: i.id, action: 'resume', ...i.local.parked })),
+      builds: { active: [...this.buildQueue.active], queue: [...this.buildQueue.waiting] },
+      dispatch: { maxCodeWorkers: this.adapter.parallel.maxCodeWorkers, maxBuilds: this.adapter.parallel.maxBuilds, freeRamGB: freeBytes / 1024 ** 3 },
       skipped: skipped.slice(0, 5),
       current,
       alerts: al,
@@ -876,7 +891,7 @@ export class RuntimeSession {
     if (this.lastPollError) out.pollError = this.lastPollError;
     if (this.lastParse && !this.lastParse.structured) out.parse = `page structure unknown (${this.lastParse.warnings.join('; ')}): read pageText; pass matchUuid to start_work if needed`;
     if (pageText && this.lastPageText) out.pageText = truncate(this.lastPageText, 12000);
-    out.maxWorkers = this.adapter.parallel.maxWorkers;
+    out.maxCodeWorkers = this.adapter.parallel.maxCodeWorkers;
     if (this.phase === 'GAME' && this.match.status !== 'FINISHED') out.keepAlive = 'Match running: dispatch NEXT or submit READY immediately. With workers: native agent wait <=45s, then wait_for_update timeoutMs:1000. Without workers: wait_for_update with no timeoutMs.';
     return out;
   }
@@ -886,14 +901,14 @@ export class RuntimeSession {
     const max = Math.min(Number(timeoutMs) || ceiling, ceiling);
     const until = Date.now() + max;
     let lastErr = null;
-    if (this.pendingEvents.length) return this.clean({ ok: true, changed: true, view: this.view({ includeEvents: true }) });
+    if (this.pendingEvents.length || this.hasDispatchAction()) return this.clean({ ok: true, changed: true, view: this.view({ includeEvents: true }) });
     const startStatus = this.match.status;
     while (Date.now() < until) {
       const r = await this.withLock(() => this.doRefresh());
       lastErr = r.ok ? null : r.error;
       const changed = r.ok && !!r.events?.some((e) => e.kind !== 'RESULT'); // grading results do not wake the agent
       const newlyPaused = this.match.status === 'PAUSED' && startStatus !== 'PAUSED'; // a pause that persists is waited out, not spun on
-      if (changed || this.match.status === 'FINISHED' || newlyPaused || this.phase !== 'GAME' && this.phase !== 'PREPARATION') {
+      if (changed || this.hasDispatchAction() || this.match.status === 'FINISHED' || newlyPaused || this.phase !== 'GAME' && this.phase !== 'PREPARATION') {
         return this.clean({ ok: true, changed, view: this.view({ includeEvents: true, pageText: !!r.events?.some((e) => e.kind === 'NEW' || e.kind === 'EDITED') && !this.lastParse?.structured }) });
       }
       const wait = r.ok ? this.adapter.polling.successMs : this.adapter.polling.errorMs;
@@ -947,7 +962,7 @@ export class RuntimeSession {
     const id = backlogItemKey;
     const it = this.items.get(id);
     if (!it) return { ok: false, error: 'UNKNOWN_ITEM', message: `${id} is not on the match page (yet). refresh_match first.` };
-    await this.withLock(() => this.fetchItemDetail(id));
+    await this.fetchItemDetail(id);
     const mat = this.readMaterial(id);
     const desc = it.description || textBlockFor(this.lastPageText || '', id) || null;
     const now = this.now();
@@ -972,7 +987,7 @@ export class RuntimeSession {
   readMaterial(id) {
     const cached = this.materialCache?.[id] || null;
     const material = this.stateDir ? readJson(path.join(this.stateDir, 'items', id, 'start.json'), cached) : cached;
-    if (material && (!material.requiredEvidence || material.requiredEvidence.some(e => e.strict === undefined))) {
+    if (material && (!material.requiredEvidence || material.requiredEvidence.some(e => e.strict === undefined || e.reference === undefined))) {
       material.requiredEvidence = extractRequiredEvidence(this.items.get(id) || {}, material);
       this.saveMaterial(id, material);
     }
@@ -1009,12 +1024,18 @@ export class RuntimeSession {
       evidenceSkill: path.resolve(this.teamWorkspace || this.checkoutRoot, '.agents', 'skills', 'evidence-and-answer', 'SKILL.md'),
       answer: answerPaths(matchRoot, it.id), checklistFile: path.join(matchRoot, 'answers', it.id, 'checklist.md'),
       deadlineAt: it.deadlineAt ?? null, workerStopAt: stopAt, deadlineMarginMinutes: left == null ? 5 : Math.round(Math.min(5, Math.max(1.5, left * 0.25)) * 10) / 10,
+      answerOnly: it.local?.answerOnly ?? answerOnly(it, this.readMaterial(it.id) || {}),
+      integrationGate: integrationGate(it), remainingStep: it.local?.resume?.remainingStep ?? null,
       ports: it.local?.worktree?.ports ?? null,
       baseSha: it.local?.worktree?.baseSha ?? this.environmentRevision ?? this.state.envReady?.revision ?? null,
     };
   }
 
-  async start_work({ backlogItemKey, matchUuid, compact = true } = {}) {
+  async start_work({ backlogItemKey, backlogItemKeys, matchUuid, compact = true } = {}) {
+    if (Array.isArray(backlogItemKeys)) {
+      const results = await mapBounded([...new Set(backlogItemKeys)], this.adapter.parallel.materialConcurrency, id => this.start_work({ backlogItemKey: id, matchUuid, compact }));
+      return this.clean({ ok: results.every(r => r.ok), results, next: this.nextHint() });
+    }
     const id = String(backlogItemKey || '').trim();
     if (!ITEM_KEY_RE.test(id) && !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,31}$/.test(id)) return { ok: false, error: 'BAD_KEY' };
     if (this.phase !== 'GAME') return { ok: false, error: 'NOT_IN_GAME', message: `phase is ${this.phase}`, next: this.nextHint() };
@@ -1045,10 +1066,9 @@ export class RuntimeSession {
     const data = r.data || {};
     if (data.backlogType && /^(TASK|CR|BUG|PI)$/.test(data.backlogType)) it.type = data.backlogType;
     const firstStart = !it.local.startedAt;
-    if (firstStart) it.local.startedAt = this.now();
+    if (firstStart) { it.local.startedAt = this.now(); it.local.queued = true; }
     if (it.local.notOpenRefused) delete it.local.notOpenRefused;
-    delete it.local.parked;
-    await this.withLock(() => this.fetchItemDetail(id));
+    await this.fetchItemDetail(id);
     it.description = data.description ?? (it.description || textBlockFor(this.lastPageText || '', id) || '');
     // The item text is the only place some requirements live (BUG-01: "save as dashboard_before_fixing.png").
     // Without it the brief, the evidence extraction and the submit gate all work blind.
@@ -1061,6 +1081,7 @@ export class RuntimeSession {
     it.local.descriptionOk = usableDescription(it.description);
     it.acceptanceCriteria = data.acceptanceCriteria ?? it.acceptanceCriteria ?? null;
     const material = { backlogId: data.backlogId || id, backlogType: data.backlogType || it.type, startInstruction: data.startInstruction ?? '', submitTemplate: data.submitTemplate ?? null, minimumVerificationScenarios: data.minimumVerificationScenarios ?? null, files: data.files || {}, receivedAt: nowIso(), replay: !!data.replay };
+    it.local.answerOnly = answerOnly(it, material);
     material.requiredEvidence = extractRequiredEvidence(it, material);
     material.mcpMaterial = this.readMaterial(id)?.mcpMaterial ?? await collectMcpMaterial({ ...it, startInstruction: material.startInstruction }, request => this.match_mcp(request));
     this.materialCache = { ...(this.materialCache || {}), [id]: material };
@@ -1086,7 +1107,7 @@ export class RuntimeSession {
     // The checklist goes out with the material and is also written beside the answer, so it survives
     // an agent restart or a context reset mid-item (see src/checklist.mjs for why this exists).
     const checklist = buildChecklist({
-      id, type: it.type, startInstruction: material.startInstruction, description: it.description || '',
+      id, type: it.type, answerOnly: it.local.answerOnly, startInstruction: material.startInstruction, description: it.description || '',
       minimumVerificationScenarios: material.minimumVerificationScenarios, requiredScenarios: required,
       requiredEvidence: material.requiredEvidence,
       commands: this.commands || {}, appPath: this.appPath || null,
@@ -1118,6 +1139,7 @@ export class RuntimeSession {
     }) : null;
     if (compact) return this.clean({
       ok: !!brief, ...(brief ? {} : { error: 'MATCH_ROOT_MISSING' }), id, type: it.type,
+      answerOnly: it.local.answerOnly, dispatch: dispatchPolicy(it, [...this.items.values()], this.adapter.parallel, this.freeMemory()),
       points: it.maxPoints ?? null, deadlineAt: it.deadlineAt ?? null, workerStopAt: context?.workerStopAt ?? null,
       briefFile: brief?.briefFile ?? null, filesDir: brief?.filesDir ?? null,
       answer: context?.answer ?? null, checklistFile, playbook: context?.playbook ?? null,
@@ -1329,7 +1351,7 @@ export class RuntimeSession {
     // warning and the reason is recorded in the log.
     const tests = this.lastTests?.[id];
     const testErrors = [];
-    if (it && SHA_RE.test(sha)) {
+    if (it && !it.local?.answerOnly && !answerOnly(it, this.readMaterial(id) || {}) && SHA_RE.test(sha)) {
       if (!tests || tests.status === 'NOT_RUN') testErrors.push(`no test run reported for ${id}: run the suite and report BACKLOG_TESTS before submitting`);
       else if (tests.status === 'RUNNING') testErrors.push(`the last BACKLOG_TESTS for ${id} is still RUNNING: report the final counts first`);
       else if (tests.status === 'FAILED') testErrors.push(`the last BACKLOG_TESTS for ${id} is FAILED (${tests.failed} failing): fix it or submit a different item`);
@@ -1489,10 +1511,13 @@ export class RuntimeSession {
   }
 
   // ---------- progress, readiness, results ----------
-  report_progress({ event } = {}) {
+  async report_progress({ event, remainingStep, remainingMinutes } = {}) {
     if (!event || typeof event !== 'object') return { ok: false, error: 'event object required (without schemaVersion/playerSessionId)' };
     if (!this.log) return { ok: false, error: 'NOT_CONFIGURED', next: this.nextHint() };
     const ev = { ...event };
+    const workerStatus = ev.type === 'BACKLOG_STATUS' ? ev.status : null;
+    if (workerStatus === 'READY') ev.status = 'COMPLETED';
+    if (workerStatus === 'PARKED') ev.status = 'BLOCKED';
     delete ev.schemaVersion;
     delete ev.playerSessionId;
     if (HELPER_ONLY_TYPES.has(ev.type)) return { ok: false, error: 'HELPER_OWNED', message: `${ev.type} is written by the helper (configure_session / report_ready / final_result / API calls).` };
@@ -1520,11 +1545,27 @@ export class RuntimeSession {
         this.lastTests = { ...(this.lastTests || {}), [ev.backlogId]: ev };
         this.noteTestAttempt(ev);
       }
-      if (ev.type === 'BACKLOG_STATUS' && this.items.get(ev.backlogId)) this.items.get(ev.backlogId).local.reported = ev.status;
+      if (ev.type === 'BACKLOG_STATUS' && this.items.get(ev.backlogId)) {
+        const it = this.items.get(ev.backlogId);
+        it.local ||= {};
+        it.local.reported = ev.status;
+        if (['COMPLETED', 'BLOCKED'].includes(ev.status)) {
+          const wt = it.local.worktree;
+          const commit = ev.revision || (wt ? await G.revParse(wt.worktreeRoot, 'HEAD') : null);
+          it.local.ready = ev.status === 'COMPLETED';
+          if (ev.status === 'BLOCKED') it.local.parked = { commit, remainingStep: remainingStep || ev.summary, remainingMinutes: Number(remainingMinutes) || null, worktreeRoot: wt?.worktreeRoot || null };
+          else delete it.local.parked;
+          this.saveState(); // Preserve resume data even if process inspection fails.
+          if (wt) await stopWorktreeProcesses(wt.worktreeRoot);
+          this.buildQueue.update('release', ev.backlogId);
+          this.pendingEvents.push({ kind: ev.status, id: it.id, text: `${it.id}: ${it.local.ready ? 'submit' : 'resume'}` });
+        }
+        this.saveState();
+      }
       if (ev.type === 'BLOCKER_OPENED') this.blockers.set(ev.blockerId, { backlogId: ev.backlogId, summary: ev.summary });
       if (ev.type === 'BLOCKER_RESOLVED') this.blockers.delete(ev.blockerId);
       const stuck = ev.type === 'BACKLOG_TESTS' ? this.stuckAdvice(ev.backlogId) : null;
-      return this.clean({ ok: true, queued: r.queued, stuck, next: stuck || undefined, alerts: this.view().alerts });
+      return this.clean({ ok: true, queued: r.queued, stuck, next: this.view().next, stuckAdvice: stuck || undefined, alerts: this.view().alerts });
     } catch (e) {
       return { ok: false, error: 'SCHEMA', message: e.message };
     }
@@ -1672,6 +1713,19 @@ export class RuntimeSession {
     });
   }
 
+  hasDispatchAction() {
+    if (this.phase !== 'GAME' || ['PAUSED', 'FINISHED'].includes(this.match.status)) return false;
+    return rank([...this.items.values()], this.now(), this.match.endsAt, this.adapter.planner).ranked.some(r =>
+      r.action === 'submit' || dispatchPolicy(this.items.get(r.id), [...this.items.values()].filter(i => !isSubmitted(i)), this.adapter.parallel, this.freeMemory()).allowed);
+  }
+
+  build_slot({ action, backlogItemKey } = {}) {
+    if (!['acquire', 'release', 'status'].includes(action) || !this.items.has(backlogItemKey)) return { ok: false, error: 'BAD_BUILD_SLOT' };
+    const result = this.buildQueue.update(action, backlogItemKey);
+    if (action === 'release') this.pendingEvents.push({ kind: 'BUILD_SLOT', text: 'Build capacity released; notify granted workers.' });
+    return result;
+  }
+
   // ---------- worker worktrees ----------
   /** Moves an untracked draft answers/<ID>/ from the main checkout into the worktree. Returns true if moved. */
   async moveDraftAnswer(id, wtMatchRoot) {
@@ -1702,9 +1756,15 @@ export class RuntimeSession {
     if (!it) return { ok: false, error: 'UNKNOWN_ITEM' };
     if (action === 'create') {
       if (!it.local?.startedAt || !this.readMaterial(id)) return { ok: false, error: 'NOT_STARTED', next: 'Call start_work before worktree create.' };
-      const active = [...this.items.values()].filter((i) => i.id !== id && i.local?.worktree && !isSubmitted(i)).length;
-      const cap = Math.max(1, Math.floor(Number(this.adapter.parallel.maxWorkers) || 3));
-      if (!it.local.worktree && active >= cap + (it.type === 'PI' ? 1 : 0)) return { ok: false, error: 'TOO_MANY_WORKERS', message: `at most ${cap} workers; PI may use one extra slot` };
+      it.local.answerOnly = answerOnly(it, this.readMaterial(id));
+      const policy = dispatchPolicy(it, [...this.items.values()].filter(i => !isSubmitted(i)), this.adapter.parallel, this.freeMemory());
+      if ((!it.local.worktree || it.local.parked) && !policy.allowed) {
+        it.local.queued = true; this.saveState();
+        return { ok: false, error: policy.reason, queued: true, dispatch: policy, next: this.view().next };
+      }
+      delete it.local.queued;
+      const resume = it.local.parked;
+      if (resume) it.local.resume = resume;
       let ports = it.local.worktree?.ports;
       if (!ports) {
         const slot = this.state.nextPortSlot || 0;
@@ -1716,7 +1776,7 @@ export class RuntimeSession {
       G.ensureExcluded(this.checkoutRoot, '/.mtm-wt/');
       const wtRoot = path.join(base, id);
       if (!fs.existsSync(wtRoot)) {
-        const r = await G.worktreeAdd(this.checkoutRoot, wtRoot, `mtm-wt/${id}`, 'HEAD');
+        const r = await G.worktreeAdd(this.checkoutRoot, wtRoot, `mtm-wt/${id}`, resume?.commit || 'HEAD');
         if (r.code !== 0) return { ok: false, error: 'WORKTREE_FAILED', message: (r.stderr || r.stdout).trim().slice(0, 400) };
       }
       const wtMatchRoot = path.join(wtRoot, this.repository.folder);
@@ -1741,21 +1801,24 @@ export class RuntimeSession {
       const movedDraftAnswer = await this.moveDraftAnswer(id, wtMatchRoot);
       if (it.local.startedAt) materializeAnswer(wtMatchRoot, id, this.readMaterial(id)?.submitTemplate ?? null);
       if (!fs.existsSync(context.checklistFile)) fs.writeFileSync(context.checklistFile, buildChecklist({
-        id, type: it.type, description: it.description, ...material, commands: this.commands, appPath: context.appPath,
+        id, type: it.type, answerOnly: it.local.answerOnly, description: it.description, ...material, commands: this.commands, appPath: context.appPath,
       }).text);
       if (movedDraftAnswer && this.appPath && fs.existsSync(context.checklistFile)) {
         const checklist = fs.readFileSync(context.checklistFile, 'utf8');
         fs.writeFileSync(context.checklistFile, checklist.split(this.appPath).join(context.appPath));
       }
+      if (resume) { delete it.local.parked; it.local.ready = false; }
       this.saveState();
       return {
-        ok: true, worktreeRoot: wtRoot, checkoutRoot: wtRoot, folder: this.repository.folder, matchRoot: wtMatchRoot, linked, movedDraftAnswer, brief, ports, workerStopAt: context.workerStopAt,
+        ok: true, resume: resume || null, answerOnly: it.local.answerOnly, worktreeRoot: wtRoot, checkoutRoot: wtRoot, folder: this.repository.folder, matchRoot: wtMatchRoot, linked, movedDraftAnswer, brief, ports, workerStopAt: context.workerStopAt,
         answer: it.local.startedAt ? answerPaths(wtMatchRoot, id) : undefined,
         note: linked.some((l) => l.includes('TEST_DATABASE_URL')) ? 'This copy got its own TEST_DATABASE_URL (tests truncate between cases, so copies must not share one).' : undefined,
-        next: `Spawn team_feature_worker with fork_turns:"none". Pass paths, not pasted material: item ${id}, checkoutRoot/worktreeRoot ${wtRoot}, folder ${this.repository.folder}, matchRoot ${wtMatchRoot}, briefFile ${brief.briefFile}, filesDir ${brief.filesDir}, and the returned answer paths. Add scope and a time box ending by workerStopAt. Use brief ports dev=${ports.dev}, production=${ports.production}; override fixed runner ports. The worker commits its complete item, returns READY/PARKED, and never delegates, pushes or calls Game APIs.`,
+        next: `Spawn team_feature_worker with fork_turns:"none". Pass paths, not pasted material: item ${id}, checkoutRoot/worktreeRoot ${wtRoot}, folder ${this.repository.folder}, matchRoot ${wtMatchRoot}, briefFile ${brief.briefFile}, filesDir ${brief.filesDir}, and the returned answer paths. Add scope and a time box ending by workerStopAt. ${resume ? `RESUME preserved commit ${resume.commit}; do only: ${resume.remainingStep}.` : ""} Use brief ports dev=${ports.dev}, production=${ports.production}; override fixed runner ports. The worker commits its complete item, returns READY/PARKED, and never delegates, pushes or calls Game APIs.`,
       };
     }
     if (action === 'integrate') {
+      const urgent = rank([...this.items.values()], this.now(), this.match.endsAt, this.adapter.planner).ranked.find(r => r.tier === -3);
+      if (urgent && urgent.id !== id) return { ok: false, error: 'DEADLINE_READY_FIRST', next: `Integrate and submit ${urgent.id} first.` };
       const wt = it.local.worktree;
       if (!wt) return { ok: false, error: 'NO_WORKTREE' };
       const workerDirty = await G.statusPorcelain(wt.worktreeRoot);
@@ -1774,12 +1837,17 @@ export class RuntimeSession {
       if (mainDirty.length) return { ok: false, error: 'MAIN_DIRTY', message: `Preserve unexpected main changes and delegate their recovery: ${mainDirty.slice(0, 5).join(', ')}`, worktreeCommit: sha };
       const mainBefore = await G.revParse(this.checkoutRoot, 'HEAD');
       const p = await G.cherryPick(this.checkoutRoot, `${baseSha}..${sha}`);
-      if (!p.ok) return { ok: false, error: 'CONFLICT', conflicts: p.conflicts, message: p.error, worktreeCommit: sha, next: 'Cherry-pick aborted; main is unchanged. Send the worker a fix-up: rebase its item onto current main, resolve, verify and commit; never redo the item in main.' };
+      if (!p.ok) {
+        it.local.ready = false;
+        it.local.owner = 'team_feature_worker';
+        this.saveState();
+        return { ok: false, error: 'CONFLICT', conflicts: p.conflicts, message: p.error, worktreeCommit: sha, next: 'Cherry-pick aborted; main is unchanged. Send the worker a fix-up: rebase its item onto current main, resolve, verify and commit; never redo the item in main.' };
+      }
       Object.assign(wt, { integratedWorkerSha: sha, integratedSha: p.sha, mainBefore, integrationBase: baseSha });
       delete wt.retryBaseSha;
       it.local.owner = 'orchestrator';
       this.saveState();
-      return { ok: true, integratedSha: p.sha, next: `Run the <=2-minute integration gate (full suite + typecheck; build if needed), report BACKLOG_TESTS, push, submit_work ${id}, remove. Red gate: worktree rollback, delegate fix-up; never debug in main.` };
+      return { ok: true, integratedSha: p.sha, next: `Run the <=2-minute integration gate (${integrationGate(it)}), report BACKLOG_TESTS, push, submit_work ${id}, remove. Red gate: worktree rollback, delegate fix-up; never debug in main.` };
     }
     if (action === 'rollback') {
       const wt = it.local.worktree;
@@ -1794,17 +1862,21 @@ export class RuntimeSession {
       wt.retryBaseSha = wt.integrationBase;
       delete wt.integratedSha; delete wt.integratedWorkerSha; delete wt.mainBefore;
       it.local.owner = 'team_feature_worker';
+      it.local.ready = false;
       this.saveState();
       return { ok: true, retryBaseSha: wt.retryBaseSha, next: 'Main restored by revert commits. Send the worker a fix-up; rebase --onto current-main retryBaseSha to replay the complete failed range, verify and commit before READY. Process other READY items now.' };
     }
     if (action === 'remove') {
       const wt = it.local.worktree;
       if (!wt) return { ok: true, removed: false };
+      if (it.local.parked && !isSubmitted(it)) return { ok: false, error: 'PRESERVE_PARKED', next: 'Resume the preserved worktree; do not discard partial work.' };
+      const stoppedProcesses = await stopWorktreeProcesses(wt.worktreeRoot);
+      this.buildQueue.update('release', id);
       unlinkDependencies(wt.matchRoot);
       const r = await G.worktreeRemove(this.checkoutRoot, wt.worktreeRoot);
       if (r.code === 0) delete it.local.worktree;
       this.saveState();
-      return { ok: r.code === 0, removed: r.code === 0, message: r.stderr.trim().slice(0, 300) || undefined };
+      return { ok: r.code === 0, removed: r.code === 0, stoppedProcesses, message: r.stderr.trim().slice(0, 300) || undefined };
     }
     return { ok: false, error: 'BAD_ACTION', message: 'action is create | integrate | rollback | remove | list' };
   }

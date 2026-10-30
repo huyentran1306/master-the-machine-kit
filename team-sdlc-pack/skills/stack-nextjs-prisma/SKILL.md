@@ -8,6 +8,9 @@ description: Stack notes for an MTM match whose customer system is a Next.js (Ap
 App root is `<matchRoot>/<app.path>` (usually `src/`). Run every command from there. Use appPath and commands from the worker brief (recon_repo during preparation); the usual ones with pnpm:
 `pnpm install --frozen-lockfile` · `pnpm test` (vitest) · `pnpm typecheck` · `pnpm build` · `pnpm exec prisma migrate deploy` · `pnpm db:seed`
 
+## Resource limits
+For brief.answerOnly, compute the answer and validate the shipped schema; skip servers, builds and suites. Before next build or production start, request build_slot acquire through the orchestrator's shared helper (parallel.maxBuilds defaults to 2). Wait for granted; hold the lease through production shutdown. Release on success/failure. Run one build or production server per lease. Start servers with absolute worktree entrypoint paths; stop dev/production servers before READY/PARKED.
+
 ## Where things live (typical layout)
 - `src/app/**` — routes and pages (App Router). `src/app/(app)/...` authed pages, `src/app/api/**` route handlers.
 - `src/server/api/routers/*.ts` — tRPC routers (the real API). `src/server/services/*` — business logic. `src/server/db.ts` — Prisma client, `src/server/auth.ts` — NextAuth.

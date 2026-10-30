@@ -83,7 +83,7 @@ const BY_TYPE = {
  * Returns { criteria, scenarios, steps, text } — `steps` is what the agent works through, `text` is
  * the markdown copy written next to the answer so it survives a context reset or an agent restart.
  */
-export function buildChecklist({ id, type, startInstruction = '', description = '', minimumVerificationScenarios = null, requiredScenarios = 0, requiredEvidence = [], commands = {}, appPath = null } = {}) {
+export function buildChecklist({ id, type, answerOnly = false, startInstruction = '', description = '', minimumVerificationScenarios = null, requiredScenarios = 0, requiredEvidence = [], commands = {}, appPath = null } = {}) {
   const criteria = criteriaFrom(startInstruction).length ? criteriaFrom(startInstruction) : criteriaFrom(description);
   const scenarios = scenarioNames(minimumVerificationScenarios);
   const kind = BY_TYPE[type] ? type : 'TASK';
@@ -91,7 +91,11 @@ export function buildChecklist({ id, type, startInstruction = '', description = 
   const test = commands.test || 'the repo test command';
   const typecheck = commands.typecheck || null;
 
-  const steps = [
+  const steps = answerOnly ? [
+    'Read brief.json and all files/ including MCP material. Compute the requested answer/values; change no application code.',
+    'Validate submit.json against the shipped schema. Do not start a dev/production server, build or full suite.',
+    'Commit the answer and requested evidence; return READY with the SHA and schema validation result.',
+  ] : [
     'Read brief.json, every file under files/ (including MCP material), and this checklist. Produce every required BEFORE artifact immediately on your own port before source edits; save it without committing yet. If already edited, capture the baseSha state in a temporary copy, never skip it. Return NEED_INFO: <what> to the orchestrator if material is still missing.',
     `Turn the acceptance criteria below into the definition of done for ${id}; nothing else counts.`,
     ...BY_TYPE[kind],
@@ -105,7 +109,7 @@ export function buildChecklist({ id, type, startInstruction = '', description = 
   ];
 
   const lines = [`# ${id} — checklist`, '', '## Required named evidence',
-    ...requiredEvidence.map(e => `- [ ] ${e.before ? 'BEFORE source edits: ' : ''}answers/${id}/evidence/${e.name}; reference "evidence/${e.name}" in a submit.json evidence array.`),
+    ...requiredEvidence.map(e => `- [ ] ${e.before ? 'BEFORE source edits: ' : ''}answers/${id}/evidence/${e.name}; ${e.reference === false ? 'save unchanged; existence only.' : `reference "evidence/${e.name}" in a submit.json evidence array.`}`),
     '', '## Acceptance criteria'];
   if (criteria.length) criteria.forEach((c, i) => lines.push(`- [ ] ${i + 1}. ${c}`));
   else lines.push('- [ ] (no criteria parsed — read startInstruction in full and write them here yourself)');

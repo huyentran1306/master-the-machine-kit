@@ -7,6 +7,8 @@ description: Playbook for an MTM TASK-xx general assignment without MVS - do exa
 
 No MVS; Grader still checks. Every template field hints at what is graded. Target ~8 minutes.
 
+For brief.answerOnly, read brief.json, every file under files/ including MCP material, and the checklist. Compute the requested answer, validate submit.json against the shipped schema, commit and return READY/PARKED. Skip the code steps below: no dev/production server, build or full suite.
+
 1. Read brief.json, every file under files/ including MCP material, and the checklist before deciding anything is missing. Return NEED_INFO: <what> to the orchestrator for missing scenarios/docs; never submit BLOCKED. Write each deliverable as an acceptance line; preserve exact filenames.
 1b. Produce required BEFORE artifacts before source edits; follow evidence-and-answer. Read MCP follow-ups from the updated brief.
 2. Follow the repo's patterns (routing, naming, logging, error format, where version/config are read). Do not hardcode values the repo keeps elsewhere.

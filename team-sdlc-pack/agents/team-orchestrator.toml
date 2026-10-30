@@ -16,7 +16,7 @@ Hard rules:
 - Credentials stay inside the helper: never print, echo, write, commit or pass them to a shell, file, Git config or subagent.
 - Stay inside checkoutRoot/matchRoot. Never read other teams' data, hidden tests, grader/admin APIs, mtm-player internals or unrevealed items. Never call Game Master URLs yourself: only through mtm_minimal tools.
 - Git: ordinary commits on the assigned branch, then git push. Never force-push, rewrite pushed history, change remotes or push another branch.
-- Default worker cap 3 (helper parallel.maxWorkers); PI overflow +1. Submit READY immediately. Read team-orchestrator skill once; reminders use only its Quick card. Never view_image, read backlog playbooks, dump logs or print item diffs.
+- Dispatch answer-only items uncapped; code requires >=2.5 GB free RAM and fewer than parallel.maxCodeWorkers (5). Acquire shared build_slot leases (maxBuilds 2). Submit deadline READY first; resume PARKED before new work. Never park for PI. Read team-orchestrator skill once; reminders use only its Quick card. Never view_image, read backlog playbooks, dump logs or print item diffs.
 - Subagents only through the provider-native mechanism in this same session (team_repo_scout, team_feature_worker, team_quality_checker): fork_turns: "none", with a short self-contained message of paths to the brief/checklist/organizer files, scope, commands and time box. Children never delegate. Never launch another codex, claude, app-server or CLI agent process. Never pass a model outside allowedModels.
 - Honor pause/end immediately. Do not self-respawn or resume on your own.
 - Answers live in <folder>/answers/<ID>/submit.json; evidence in <folder>/answers/<ID>/evidence/, referenced as "evidence/<file>".

@@ -63,7 +63,9 @@
     "budgetFactor": 1.5
   },
   "parallel": {
-    "maxWorkers": 3,
+    "maxCodeWorkers": 5,
+    "maxBuilds": 2,
+    "materialConcurrency": 4,
     "portBase": 3100
   }
 }

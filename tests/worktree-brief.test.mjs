@@ -4,7 +4,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { ProgressLog } from '../team-sdlc-pack/src/progress.mjs';
 import { writeItemBrief } from '../team-sdlc-pack/src/item-brief.mjs';
 import { RuntimeSession } from '../team-sdlc-pack/src/runtime-session.mjs';
 import { rank, alerts } from '../team-sdlc-pack/src/planner.mjs';
@@ -99,6 +101,7 @@ async function startFixture(t) {
   const origin = `http://127.0.0.1:${srv.address().port}`;
   const s = new RuntimeSession({ teamWorkspace: args.checkoutRoot });
   s.checkoutRoot = args.checkoutRoot; s.matchRoot = args.matchRoot; s.repository = { folder: 'assigned' };
+  s.freeMemory = () => 8 * 1024 ** 3;
   s.phase = 'GAME'; s.bearer = 'synthetic-token'; s.match.uuid = '11111111-2222-4333-8444-555555555555';
   s.match.status = 'IN_PROGRESS'; s.apiBase = origin; s.allowedApiOrigins = [origin];
   s.now = () => 1_000_000; s.match.endsAt = s.now() + 40 * 60000;
@@ -211,6 +214,7 @@ function worktreeSession(t, adapter) {
   git(args.checkoutRoot, 'add', 'assigned'); git(args.checkoutRoot, 'commit', '-qm', 'baseline');
   const s = new RuntimeSession({ teamWorkspace: args.checkoutRoot, adapter });
   s.checkoutRoot = args.checkoutRoot; s.matchRoot = args.matchRoot; s.repository = { folder: 'assigned' };
+  s.freeMemory = () => 8 * 1024 ** 3;
   s.materialCache = {};
   const create = async (id, type = 'TASK') => {
     if (!s.items.has(id)) s.items.set(id, { id, type, local: { startedAt: Date.now() } });
@@ -220,16 +224,17 @@ function worktreeSession(t, adapter) {
   return { s, args, create };
 }
 
-test('three workers and one PI get distinct persistent ports, private test DBs and remapped paths', async t => {
+test('five code workers and uncapped PI get distinct persistent ports, private test DBs and remapped paths', async t => {
   const { s, args, create } = worktreeSession(t);
-  const outputs = await Promise.all(['TASK-91', 'BUG-92', 'CR-93'].map(id => create(id)));
+  const outputs = await Promise.all(['TASK-91', 'BUG-92', 'CR-93', 'BUG-97', 'CR-98'].map(id => create(id)));
   assert.ok(outputs.every(o => o.ok));
-  assert.equal((await create('TASK-94')).error, 'TOO_MANY_WORKERS');
+  assert.equal((await create('TASK-94')).error, 'CODE_WORKER_LIMIT');
   outputs.push(await create('PI-95', 'PI'));
   assert.equal(outputs[3].ok, true);
-  assert.equal((await create('PI-96', 'PI')).error, 'TOO_MANY_WORKERS');
-  const ports = outputs.flatMap(o => Object.values(o.ports)); assert.equal(new Set(ports).size, 8);
-  assert.deepEqual(ports, [3100, 3101, 3102, 3103, 3104, 3105, 3106, 3107]);
+  outputs.push(await create('PI-96', 'PI'));
+  assert.equal(outputs[6].ok, true);
+  const ports = outputs.flatMap(o => Object.values(o.ports)); assert.equal(new Set(ports).size, 14);
+  assert.deepEqual(ports, [3100, 3101, 3102, 3103, 3104, 3105, 3106, 3107, 3108, 3109, 3110, 3111, 3112, 3113]);
   for (const out of outputs) {
     const brief = JSON.parse(fs.readFileSync(out.brief.briefFile, 'utf8'));
     assert.deepEqual(brief.ports, out.ports); assert.equal(brief.checkoutRoot, out.worktreeRoot);
@@ -241,15 +246,15 @@ test('three workers and one PI get distinct persistent ports, private test DBs a
   assert.equal(fs.readFileSync(path.join(args.matchRoot, '.env'), 'utf8'), 'TEST_DATABASE_URL="postgresql://localhost/synthetic_test"\n');
   await s.worktree({ action: 'remove', backlogItemKey: 'TASK-91' });
   await s.worktree({ action: 'remove', backlogItemKey: 'PI-95' });
-  const replacement = await create('TASK-94'); assert.deepEqual(replacement.ports, { dev: 3108, production: 3109 });
+  const replacement = await create('TASK-94'); assert.deepEqual(replacement.ports, { dev: 3114, production: 3115 });
 });
 
 test('helper worker cap and port base are configurable', async t => {
-  const { s, create } = worktreeSession(t, { parallel: { maxWorkers: 1, portBase: 4200 } });
+  const { s, create } = worktreeSession(t, { parallel: { maxCodeWorkers: 1, portBase: 4200 } });
   assert.deepEqual((await create('TASK-91')).ports, { dev: 4200, production: 4201 });
-  assert.equal((await create('TASK-92')).error, 'TOO_MANY_WORKERS');
+  assert.equal((await create('TASK-92')).error, 'CODE_WORKER_LIMIT');
   assert.deepEqual((await create('PI-93', 'PI')).ports, { dev: 4202, production: 4203 });
-  assert.equal(s.view().maxWorkers, 1);
+  assert.equal(s.view().maxCodeWorkers, 1);
 });
 
 test('integration requires worker commits, preserves multiple commits, replays and supports fix-ups', async t => {
@@ -280,7 +285,9 @@ test('conflict aborts without changing main and delegates repair', async t => {
   fs.writeFileSync(path.join(args.matchRoot, 'app.txt'), 'main\n');
   git(args.checkoutRoot, 'add', 'assigned'); git(args.checkoutRoot, 'commit', '-qm', 'main');
   const before = git(args.checkoutRoot, 'rev-parse', 'HEAD');
+  s.items.get('TASK-91').local.ready = true;
   const result = await s.worktree({ action: 'integrate', backlogItemKey: 'TASK-91' });
+  assert.equal(s.items.get('TASK-91').local.ready, false, 'fix-up must not block other READY integrations');
   assert.equal(result.error, 'CONFLICT'); assert.match(result.next, /Send the worker a fix-up/);
   assert.equal(git(args.checkoutRoot, 'rev-parse', 'HEAD'), before);
   assert.equal(git(args.checkoutRoot, 'status', '--short'), '');
@@ -322,4 +329,106 @@ test('late worker cutoff is in the past and unknown cutoff stays null', t => {
     assert.equal(context.workerStopAt, s.now() + (left - Math.min(5, Math.max(1.5, left / 4))) * 60000);
   }
   assert.equal(s.briefContext(args.item).workerStopAt, null);
+});
+
+test('RAM queues code worktrees but ten answer workers dispatch with unique ports', async t => {
+  const { s, create } = worktreeSession(t);
+  s.freeMemory = () => 1024 ** 3;
+  assert.equal((await create('BUG-91', 'BUG')).error, 'LOW_RAM');
+  const outputs = [];
+  for (let n = 0; n < 10; n++) outputs.push(await create(`PI-${90 + n}`, 'PI'));
+  assert.ok(outputs.every(r => r.ok));
+  assert.equal(new Set(outputs.flatMap(r => Object.values(r.ports))).size, 20);
+  assert.ok(outputs.every(r => JSON.parse(fs.readFileSync(r.brief.briefFile)).answerOnly));
+  s.freeMemory = () => 3 * 1024 ** 3;
+  assert.equal((await create('BUG-91', 'BUG')).ok, true);
+});
+
+test('parked commit survives recovery and resumes before new work after PI submits', async t => {
+  const { s, args, create } = worktreeSession(t, { parallel: { maxCodeWorkers: 1 } });
+  s.phase = 'GAME'; s.matchId = 'synthetic'; s.playerSessionId = 'synthetic-session';
+  s.log = new ProgressLog({ file: path.join(args.checkoutRoot, '.git', 'progress.ndjson'), playerSessionId: s.playerSessionId });
+  const wt = await create('BUG-91', 'BUG');
+  git(wt.worktreeRoot, 'add', 'assigned'); git(wt.worktreeRoot, 'commit', '-qm', 'synthetic fix');
+  const commit = git(wt.worktreeRoot, 'rev-parse', 'HEAD');
+  await create('PI-92', 'PI');
+  s.build_slot({ action: 'acquire', backlogItemKey: 'BUG-91' });
+  const parked = await s.report_progress({ event: { type: 'BACKLOG_STATUS', backlogId: 'BUG-91', status: 'PARKED', revision: commit, summary: 'Development verification remains.' }, remainingStep: 'Verify development rendering only', remainingMinutes: 1 });
+  assert.equal(parked.ok, true, JSON.stringify(parked));
+  assert.equal(s.buildQueue.active.has('BUG-91'), false);
+  assert.equal((await s.worktree({ action: 'remove', backlogItemKey: 'BUG-91' })).error, 'PRESERVE_PARKED');
+  s.items.get('PI-92').local.submittedAt = Date.now();
+  s.items.set('TASK-93', { id: 'TASK-93', type: 'TASK', title: 'New Question', maxPoints: 900 });
+  s.items.set('PI-94', { id: 'PI-94', type: 'PI' });
+  s.saveState();
+  const recovered = new RuntimeSession({ adapter: s.adapter });
+  recovered.checkoutRoot = args.checkoutRoot; recovered.matchRoot = args.matchRoot;
+  recovered.matchId = s.matchId; recovered.repository = s.repository;
+  recovered.phase = 'GAME'; recovered.freeMemory = s.freeMemory;
+  assert.equal(recovered.loadState({ fresh: false }), true);
+  const view = (await recovered.wait_for_update()).view;
+  assert.match(view.next, /^BUG-91 .*resume/);
+  assert.equal(view.parked[0].commit, commit);
+  assert.equal(view.parked[0].remainingStep, 'Verify development rendering only');
+  const resume = await recovered.worktree({ action: 'create', backlogItemKey: 'BUG-91' });
+  assert.equal(resume.ok, true, JSON.stringify(resume));
+  assert.equal(resume.worktreeRoot, wt.worktreeRoot);
+  assert.equal(git(resume.worktreeRoot, 'rev-parse', 'HEAD'), commit);
+  assert.equal(JSON.parse(fs.readFileSync(resume.brief.briefFile)).remainingStep, 'Verify development rendering only');
+  assert.equal(recovered.items.get('BUG-91').local.parked, undefined);
+});
+
+test('deadline READY preempts parked and newly revealed items and gates other integrations', async t => {
+  const { s, args, create } = worktreeSession(t);
+  s.playerSessionId = 'synthetic-session';
+  s.log = new ProgressLog({ file: path.join(args.checkoutRoot, '.git', 'progress.ndjson'), playerSessionId: s.playerSessionId });
+  const wt = await create('BUG-91', 'BUG');
+  git(wt.worktreeRoot, 'add', 'assigned'); git(wt.worktreeRoot, 'commit', '-qm', 'synthetic fix');
+  s.items.get('BUG-91').deadlineAt = Date.now() + 600000;
+  s.items.set('TASK-92', { id: 'TASK-92', type: 'TASK', local: { parked: { commit: 'a'.repeat(40), remainingStep: 'verify' } } });
+  const ready = await s.report_progress({ event: { type: 'BACKLOG_STATUS', backlogId: 'BUG-91', status: 'READY', summary: 'Verified and committed.' } });
+  assert.equal(ready.ok, true, JSON.stringify(ready));
+  assert.match(ready.next, /^BUG-91 .*submit READY/);
+  assert.match(s.nextHint.call({ phase: 'GAME', view: () => s.view() }), /BUG-91/);
+  assert.equal((await s.worktree({ action: 'integrate', backlogItemKey: 'TASK-92' })).error, 'DEADLINE_READY_FIRST');
+  const integrated = await s.worktree({ action: 'integrate', backlogItemKey: 'BUG-91' });
+  assert.equal(integrated.ok, true, JSON.stringify(integrated));
+  assert.match(integrated.next, /item's own tests \+ typecheck/);
+  assert.doesNotMatch(integrated.next, /full suite/);
+});
+
+test('worktree remove stops a synthetic process for that path and leaves a similar unrelated path alive', async t => {
+  const { s, create } = worktreeSession(t);
+  const wt = await create('TASK-91');
+  const target = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', wt.worktreeRoot], { windowsHide: true, stdio: 'ignore' });
+  const other = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', `${wt.worktreeRoot}-unrelated`], { windowsHide: true, stdio: 'ignore' });
+  const targetExit = once(target, 'exit');
+  const otherExit = once(other, 'exit');
+  t.after(async () => { target.kill(); other.kill(); await Promise.all([targetExit, otherExit]); });
+  await Promise.all([once(target, 'spawn'), once(other, 'spawn')]);
+  const result = await s.worktree({ action: 'remove', backlogItemKey: 'TASK-91' });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  await targetExit;
+  assert.ok(result.stoppedProcesses.includes(target.pid));
+  assert.equal(other.exitCode, null);
+  assert.equal(process.kill(other.pid, 0), true);
+});
+
+test('batch start_work overlaps MCP collection across newly revealed items with bounded fan-out', async t => {
+  const { s } = await startFixture(t);
+  s.adapter.parallel.materialConcurrency = 2;
+  let running = 0, peak = 0;
+  s.match_mcp = async request => {
+    if (request.action === 'tools') return { ok: true, tools: [{ name: 'search_logs', annotations: { readOnlyHint: true } }] };
+    peak = Math.max(peak, ++running);
+    await new Promise(resolve => setTimeout(resolve, 30));
+    running--; return { ok: true, raw: 'synthetic log' };
+  };
+  const ids = ['CR-91', 'CR-92', 'CR-93', 'CR-94'];
+  for (const id of ids) s.items.set(id, { id, type: 'CR', description: 'Synthetic item description.', local: {} });
+  const result = await s.start_work({ backlogItemKeys: ids });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.results.length, 4);
+  assert.equal(peak, 2);
+  for (const id of ids) assert.ok(s.readMaterial(id).mcpMaterial.some(e => e.tool === 'search_logs' && e.ok));
 });

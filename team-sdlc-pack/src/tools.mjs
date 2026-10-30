@@ -36,8 +36,8 @@ export const TOOLS = [
   },
   {
     name: 'start_work',
-    description: 'POST Start Work for one OPEN item. Default compact:true writes full worker brief/files and draft answer, returning only dispatch metadata and paths. compact:false retains full material in the result. Idempotent; logs IN_PROGRESS and BACKLOG_TESTS NOT_RUN.',
-    inputSchema: obj({ backlogItemKey: key, compact: { type: 'boolean', default: true }, matchUuid: { type: 'string', description: 'Only if the view says the match UUID is unknown and you read it from pageText.' } }, ['backlogItemKey']),
+    description: 'POST Start Work for OPEN items. Pass backlogItemKeys to overlap material reads (bounded concurrency). Default compact:true writes full worker brief/files and draft answer, returning only dispatch metadata and paths. compact:false retains full material in the result. Idempotent; logs IN_PROGRESS and BACKLOG_TESTS NOT_RUN.',
+    inputSchema: obj({ backlogItemKey: key, backlogItemKeys: { type: 'array', items: key }, compact: { type: 'boolean', default: true }, matchUuid: { type: 'string', description: 'Only if the view says the match UUID is unknown and you read it from pageText.' } }),
     handler: (s, a) => s.start_work(a),
   },
   {
@@ -53,8 +53,8 @@ export const TOOLS = [
   },
   {
     name: 'report_progress',
-    description: 'Append one progress event (schema-validated; envelope added). Use for PREPARATION_STATUS (GIT_AUTH/REPOSITORY/ENVIRONMENT/BUILD), BACKLOG_TESTS (real counts), BACKLOG_STATUS COMPLETED/BLOCKED/FAILED, BLOCKER_OPENED/RESOLVED, TOOL_ACTIVITY. Helper-owned events are refused.',
-    inputSchema: obj({ event: { type: 'object', description: 'e.g. {"type":"BACKLOG_TESTS","backlogId":"BUG-01","status":"PASSED","required":3,"executed":5,"passed":5,"failed":0,"skipped":0,"summary":"3 MVS + 2 edge tests passed."}' } }, ['event']),
+    description: 'Append one progress event (schema-validated; envelope added). Use for PREPARATION_STATUS (GIT_AUTH/REPOSITORY/ENVIRONMENT/BUILD), BACKLOG_TESTS (real counts), BACKLOG_STATUS READY/COMPLETED or PARKED/BLOCKED (preserves commit + remainingStep), FAILED, BLOCKER_OPENED/RESOLVED, TOOL_ACTIVITY. Helper-owned events are refused.',
+    inputSchema: obj({ remainingStep: { type: 'string', description: 'PARKED/BLOCKED: remaining work only; commit goes in event.revision.' }, remainingMinutes: { type: 'number' }, event: { type: 'object', description: 'e.g. {"type":"BACKLOG_TESTS","backlogId":"BUG-01","status":"PASSED","required":3,"executed":5,"passed":5,"failed":0,"skipped":0,"summary":"3 MVS + 2 edge tests passed."}' } }, ['event']),
     handler: (s, a) => s.report_progress(a),
   },
   {
@@ -70,8 +70,14 @@ export const TOOLS = [
     handler: (s) => s.recon_repo(),
   },
   {
+    name: 'build_slot',
+    description: 'Orchestrator-owned FIFO build/production leases shared across workers and integration. Acquire before next build or production start; launch only when granted. Release after build exits or production server stops. Relay grants to workers; never create a separate worker helper session.',
+    inputSchema: obj({ action: { type: 'string', enum: ['acquire', 'release', 'status'] }, backlogItemKey: key }, ['action', 'backlogItemKey']),
+    handler: (s, a) => s.build_slot(a),
+  },
+  {
     name: 'worktree',
-    description: 'Worker lifecycle: create isolated worktree/brief with unique dev/production ports (3 workers, PI overflow +1); integrate clean worker commits; rollback a failed unsubmitted integration using revert commits; remove; list. Never commits unfinished worker files.',
+    description: 'Worker lifecycle: create isolated worktree/brief with unique dev/production ports (uncapped answer-only; code limited by RAM and maxCodeWorkers); integrate clean worker commits; rollback a failed unsubmitted integration using revert commits; remove; list. Never commits unfinished worker files.',
     inputSchema: obj({ action: { type: 'string', enum: ['create', 'integrate', 'rollback', 'remove', 'list'] }, backlogItemKey: key, message: { type: 'string', description: 'Legacy argument; worker supplies its own commit message.' } }, ['action']),
     handler: (s, a) => s.worktree(a),
   },

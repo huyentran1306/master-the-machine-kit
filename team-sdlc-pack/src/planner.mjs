@@ -51,21 +51,26 @@ export function rank(items, now, endsAt, opts = {}) {
   const skipped = [];
   for (const it of items) {
     const l = it.local || {};
-    if (isSubmitted(it) || isClosed(it, now) || l.worktree) continue;
-    if (l.parked || l.notOpenRefused || ['LOCKED', 'HIDDEN', 'UPCOMING'].includes(it.availability)) {
-      skipped.push({ id: it.id, why: l.parked ? 'parked: resume only when feasible' : 'not open yet' });
+    if (isSubmitted(it) || isClosed(it, now)) continue;
+    if (l.notOpenRefused || ['LOCKED', 'HIDDEN', 'UPCOMING'].includes(it.availability)) {
+      skipped.push({ id: it.id, why: 'not open yet' });
       continue;
     }
     const { left } = effectiveLeft(it, now, endsAt);
-    const tier = it.type === 'PI' ? 0 : it.deadlineAt != null ? 1 : 2;
-    const why = tier === 0 ? 'PI race: dispatch now, cap +1 allowed'
+    if (l.worktree && !l.parked && !l.ready) continue;
+    if (l.parked?.remainingMinutes && left != null && l.parked.remainingMinutes > left) {
+      skipped.push({ id: it.id, action: 'resume', why: 'parked remaining step cannot fit' }); continue;
+    }
+    const action = l.ready ? 'submit' : l.parked || l.startedAt && !l.worktree && !l.queued ? 'resume' : 'dispatch';
+    const tier = l.ready && it.deadlineAt != null ? -3 : action === 'resume' ? -2 : l.ready ? -1 : it.type === 'PI' ? 0 : it.deadlineAt != null ? 1 : 2;
+    const why = action === 'submit' ? 'submit READY immediately' : action === 'resume' ? 'resume preserved work; remaining step only' : tier === 0 ? 'PI race: dispatch a new worker now'
       : tier === 1 ? 'nearest deadline; reserve 5 minutes to integrate and submit'
       : String(it.maxPoints ?? '?') + ' pts / ~' + est(it) + 'm';
-    ranked.push({ id: it.id, type: it.type, tier, why, left: left == null ? null : Math.round(left * 10) / 10,
+    ranked.push({ id: it.id, type: it.type, tier, action, why, left: left == null ? null : Math.round(left * 10) / 10,
       deadline: it.deadlineAt ?? Infinity, value: (Number(it.maxPoints) || 0) / est(it), started: !!l.startedAt, maxPoints: it.maxPoints ?? null });
   }
   ranked.sort((a, b) => a.tier - b.tier
-    || (a.tier === 1 ? a.deadline - b.deadline : 0)
+    || ([1, -3].includes(a.tier) ? a.deadline - b.deadline : 0)
     || b.value - a.value || a.id.localeCompare(b.id, 'en', { numeric: true }));
   return { ranked: ranked.map(({ value, deadline, ...r }) => r), skipped };
 }
@@ -88,7 +93,7 @@ export function alerts(items, now, endsAt, { current, paused, status } = {}, opt
     }
     if (it.type === 'PI' && !l.startedAt) {
       const ago = it.revealedAt ? ` ${((now - it.revealedAt) / 60000).toFixed(1)}m ago` : '';
-      out.push(`!! PI ${it.id} revealed${ago} and not started: it is a race. Dispatch a worker now; PI may exceed the worker cap by one.`);
+      out.push(`!! PI ${it.id} revealed${ago} and not started: it is a race. Dispatch a worker now; PI always gets a new worker; never park another item for PI.`);
     }
     if (!l.startedAt || paused) continue;
     // Attempt-based, alongside the time boxes below: three failing runs on one item means the

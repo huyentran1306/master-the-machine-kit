@@ -49,6 +49,11 @@ Repo chỉ chứa runtime Codex, tài liệu và fixture giả. Không đưa cre
 
 Use MTM Player **0.9.35**. Install into a fresh workspace using the Node command above (or `team-sdlc-pack/install.ps1`), then run the checker and require **READY**. In Player Init, select Codex, set the Codex CLI path to the installed **codex.exe** (absolute path), and choose the match-authorized model in Init. Keep previous match workspaces separate.
 
+## Changelog — 2.7.6
+
+- **Item text behind portal references** (Huyền, cherry-picked from `codex/kit3_tran_v1` c72d338): the live portal sends `descriptionMd:"$15"` with the text in a separate flight chunk; the helper now resolves it, reads the JSON view when items lack text, warns `NEED_DESCRIPTION` at start_work and refuses `NO_ITEM_TEXT` at submit. In a 30/10 rehearsal this was why BUG-01 scored 0.
+- Validation: `node --test tests/*.test.mjs` 90/90 (85 from 2.7.5 + 5 new); fresh install + checker READY; MTM Player 0.9.41 `verifyTeamRuntime` VERIFIED.
+
 ## Changelog - 2.7.5
 
 Written by Codex:

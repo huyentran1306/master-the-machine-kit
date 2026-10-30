@@ -1,6 +1,6 @@
-# Master the Machine Kit3 — 2.7.7
+# Master the Machine Kit3 — 2.8.0
 
-Team pack **Codex**, protocol 4, cho MTM Player. Bản 2.7.7 trên nhánh `codex/kit3_bou_v9`, cập nhật từ nền 2.7.6.
+Team pack **Codex**, protocol 4, cho MTM Player. Bản 2.8.0 trên nhánh `codex/kit3_bou_v11`, cập nhật từ nền 2.7.7.
 
 ## Thay đổi chính
 
@@ -24,7 +24,7 @@ node .\team-sdlc-pack\scripts\install.mjs --team-workspace "D:\mtm\BAK-Kit3"
 node .\team-sdlc-pack\scripts\check-distribution.mjs --team-workspace "D:\mtm\BAK-Kit3"
 ```
 
-Chỉ tiếp tục khi checker báo **READY**. Trên MTM Player chọn provider **Codex** và load đúng workspace vừa cài. Team identity trong pack là `[FHM] Bá Khí`; metadata package/info/runtime cùng phiên bản `2.7.7`.
+Chỉ tiếp tục khi checker báo **READY**. Trên MTM Player chọn provider **Codex** và load đúng workspace vừa cài. Team identity trong pack là `[FHM] Bá Khí`; metadata package/info/runtime cùng phiên bản `2.8.0`.
 
 Initialize trên Player chỉ tạo round local. Để tập lại cần mã trận mới hoặc Re-match phía BTC.
 
@@ -48,6 +48,17 @@ Repo chỉ chứa runtime Codex, tài liệu và fixture giả. Không đưa cre
 ## Windows contest machine
 
 Use MTM Player **0.9.35**. Install into a fresh workspace using the Node command above (or `team-sdlc-pack/install.ps1`), then run the checker and require **READY**. In Player Init, select Codex, set the Codex CLI path to the installed **codex.exe** (absolute path), and choose the match-authorized model in Init. Keep previous match workspaces separate.
+
+## Changelog — 2.8.0
+
+Written by Codex:
+- Dispatch PI and answer-only TASK items immediately without a cap; compute, validate the shipped schema, commit and return READY. Code workers need at least 2.5 GiB free RAM and fewer than `parallel.maxCodeWorkers` (default 5). Preserve isolated ports and test databases.
+- Submit deadline READY items before other orchestrator work. Gate answer-only items with the schema; gate deadline code with its own tests and typecheck. Share a FIFO `build_slot` queue for builds and production servers (`parallel.maxBuilds`, default 2).
+- Never park for PI. Persist parked commit/worktree, remaining step and estimate; recommend resume before new work, including after submission and in `wait_for_update`. Stop worker servers on READY/PARKED and remove only processes whose command line contains that exact worktree path.
+- Batch `start_work` with bounded concurrent MCP material reads. Raise read timeouts to 45 seconds and retry idempotent reads once; keep mutation retry behavior unchanged.
+- Honor read-only MCP annotations, filter action verbs only in tool names, and prefetch logs even when descriptions mention a deploy service.
+- Enforce headings such as “General evidence (required once)”; keep unchanged data exist-only, migrate cached entries missing `reference`, and exclude repository config files from evidence warnings.
+- Validation: `node --test tests/*.test.mjs` **109/109** on Windows; fresh `os.tmpdir()` installation and distribution checker **READY**; local MTM Player 0.9.41 `verifyTeamRuntime` **VERIFIED / READY**, version 2.8.0. No live match was run.
 
 ## Changelog — 2.7.7
 

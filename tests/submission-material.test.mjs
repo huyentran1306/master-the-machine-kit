@@ -65,8 +65,8 @@ test('only unambiguous names block submission; other mentions are reminders', ()
   ].join('\n');
   assert.deepEqual(extractWithStrictness({ description }), [
     { name: 'home-before.png', before: true, strict: true },
-    { name: 'home-after.png', before: false, strict: false },
-    { name: 'run.log', before: false, strict: false },
+    { name: 'home-after.png', before: false, strict: true },
+    { name: 'run.log', before: false, strict: true },
     { name: 'list.png', before: false, strict: true },
     { name: 'x-9-data.json', before: false, strict: true },
   ]);
@@ -179,4 +179,82 @@ test('MCP discovery matches purpose and schemas, records failures, skips mutatio
 test('MCP timeouts are nonfatal and leave an explicit brief failure record', async () => {
   const result = await collectMcpMaterial({ id: 'TASK-91' }, () => new Promise(() => {}), 10);
   assert.equal(result[0].ok, false); assert.ok(result[0].error);
+});
+
+test('required lines, sections and tables are strict; incidental evidence stays a warning', async t => {
+  for (const description of ['Required evidence: panel.png.', 'Required artifacts: panel.png.', '## Required evidence\n| File |\n|---|\n| panel.png |', 'Required artifacts:\n- panel.png', '| Required evidence |\n|---|\n| panel.png |']) {
+    assert.equal(extractWithStrictness({ description })[0].strict, true, description);
+  }
+  const f = fixture(t);
+  f.s.items.get('TASK-91').description = 'Evidence example: optional.png.';
+  const r = await f.submit();
+  assert.equal(r.ok, true);
+  assert.ok(r.warnings.some(w => w.includes('CHECK_EVIDENCE')));
+});
+
+test('only anchored evidence paths normalize; source asset paths never become outputs', () => {
+  assert.deepEqual(extractWithStrictness({ description: 'Capture a screenshot after editing assets/evidence/logo.png. Save answers/X-9/evidence/result.png and evidence/local.png.' }).map(e => e.name), ['result.png', 'local.png']);
+});
+
+test('explicit evidence paths bypass the prose extension heuristic', () => {
+  const result = extractWithStrictness({ description: 'Required evidence: evidence/session.yaml, answers/X-9/evidence/stream.jsonl, evidence/events.ndjson, evidence/custom.xyz. Record data.steps.' });
+  assert.deepEqual(result.map(e => e.name), ['session.yaml', 'stream.jsonl', 'events.ndjson', 'custom.xyz']);
+  assert.ok(result.every(e => e.strict));
+});
+
+test('preflight migrates old cached evidence and enforces freshly extracted requirements', async t => {
+  const f = fixture(t);
+  f.s.items.get('TASK-91').description = 'Record data.steps. Required evidence: panel.png.';
+  f.s.materialCache['TASK-91'].requiredEvidence = [{ name: 'data.steps', before: false }];
+  const r = await f.submit();
+  assert.ok(r.errors.some(e => e.includes('panel.png')));
+  assert.ok(r.errors.every(e => !e.includes('data.steps')));
+  assert.deepEqual(f.s.readMaterial('TASK-91').requiredEvidence, [{ name: 'panel.png', before: false, strict: true }]);
+});
+
+test('logs and optional discovery require read-only names or annotations and reject action verbs', async () => {
+  const verbs = 'restart send deploy reset notify trigger run execute apply approve cancel create update delete write submit mutate post pay void issue email toggle enable disable set'.split(' ');
+  const advertised = [
+    ...verbs.map(v => ({ name: `${v}_service`, description: 'Read logs', annotations: { readOnlyHint: true } })),
+    { name: 'mystery_logs' }, { name: 'mystery' }, { name: 'get_logs', annotations: { readOnlyHint: false } },
+    { name: 'fetch_logs' }, { name: 'show_inventory' }, { name: 'inventory', annotations: { readOnlyHint: true } },
+  ];
+  const calls = [];
+  await collectMcpMaterial({ id: 'X-9' }, async req => {
+    if (req.action === 'tools') return { ok: true, tools: advertised };
+    calls.push(req.name); return { ok: true };
+  });
+  assert.deepEqual(calls, ['fetch_logs', 'show_inventory', 'inventory']);
+});
+
+test('MCP first attempts precede title retries and optional discovery', async () => {
+  const calls = [];
+  const tools = ['fetch_test_data', 'search_docs', 'get_logs', 'get_inventory'].map(name => ({ name, inputSchema: { properties: { query: { type: 'string' } } } }));
+  await collectMcpMaterial({ id: 'X-9', title: 'Synthetic', description: 'Details' }, async req => {
+    if (req.action === 'tools') return { ok: true, tools };
+    calls.push(req); if (req.name === 'search_docs') throw new Error('synthetic failure');
+    return { ok: true };
+  });
+  assert.deepEqual(calls.map(c => c.name), ['fetch_test_data', 'search_docs', 'get_logs', 'search_docs', 'get_logs', 'get_inventory']);
+  assert.equal(calls[3].args.query, 'X-9 Synthetic');
+});
+
+test('slow first attempts leave time for logs; optional tools share a smaller budget', async () => {
+  const calls = [];
+  const tools = ['fetch_test_data', 'search_docs', 'get_logs'].map(name => ({ name }));
+  const start = Date.now();
+  await collectMcpMaterial({ id: 'X-9' }, req => {
+    if (req.action === 'tools') return Promise.resolve({ ok: true, tools });
+    calls.push(req.name); return new Promise(() => {});
+  }, 180);
+  assert.deepEqual(calls, tools.map(t => t.name));
+  assert.ok(Date.now() - start < 1500);
+  const optionalStart = Date.now();
+  const optionalCalls = [];
+  await collectMcpMaterial({ id: 'X-9' }, req => {
+    if (req.action === 'tools') return Promise.resolve({ ok: true, tools: [{ name: 'get_inventory' }, { name: 'get_catalog' }] });
+    optionalCalls.push(req.name); return new Promise(() => {});
+  });
+  assert.deepEqual(optionalCalls, ['get_inventory']);
+  assert.ok(Date.now() - optionalStart < 4000);
 });

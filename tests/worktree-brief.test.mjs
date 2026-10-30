@@ -63,7 +63,7 @@ test('worktree create returns ignored, readable child paths and moves only the d
   git(args.checkoutRoot, 'commit', '-qm', 'baseline');
   const s = new RuntimeSession({ teamWorkspace: args.checkoutRoot });
   s.checkoutRoot = args.checkoutRoot; s.matchRoot = args.matchRoot;
-  s.repository = { folder: 'assigned' }; s.materialCache = { 'CR-07': material };
+  s.repository = { folder: 'assigned' }; s.materialCache = { 'CR-07': { ...material, requiredEvidence: [{ name: 'data.steps', before: false }] } };
   s.items.set('CR-07', { ...args.item, local: { startedAt: Date.now() } });
   const draft = path.join(args.matchRoot, 'answers', 'CR-07');
   fs.mkdirSync(draft, { recursive: true });
@@ -81,6 +81,8 @@ test('worktree create returns ignored, readable child paths and moves only the d
   assert.ok(out.next.includes(out.brief.briefFile));
   assert.ok(out.next.includes(out.brief.filesDir));
   assert.deepEqual(JSON.parse(fs.readFileSync(out.brief.briefFile, 'utf8')).submitTemplate, material.submitTemplate);
+  assert.deepEqual(JSON.parse(fs.readFileSync(out.brief.briefFile, 'utf8')).requiredEvidence, [{ name: 'result.json', before: false, strict: false }]);
+  assert.deepEqual(s.readMaterial('CR-07').requiredEvidence, [{ name: 'result.json', before: false, strict: false }]);
 });
 
 async function startFixture(t) {
@@ -308,4 +310,16 @@ test('dispatch order is PI, nearest deadline, then points per minute, including 
     item('CR-96', 'CR', 1000, { local: { startedAt: now, worktree: {} } })];
   assert.deepEqual(rank(items, now, now + 40 * 60000).ranked.map(r => r.id), ['PI-95', 'TASK-94', 'BUG-93', 'CR-92', 'TASK-91']);
   assert.match(alerts(items, now, now + 40 * 60000).join('\n'), /Dispatch a worker now/);
+});
+
+test('late worker cutoff is in the past and unknown cutoff stays null', t => {
+  const args = setup(t);
+  const s = new RuntimeSession({ teamWorkspace: args.checkoutRoot });
+  s.checkoutRoot = args.checkoutRoot; s.matchRoot = args.matchRoot;
+  s.now = () => 1_000_000;
+  for (const left of [0.2, 1, 0, -1, 8, 40]) {
+    const context = s.briefContext({ ...args.item, deadlineAt: s.now() + left * 60000 });
+    assert.equal(context.workerStopAt, s.now() + (left - Math.min(5, Math.max(1.5, left / 4))) * 60000);
+  }
+  assert.equal(s.briefContext(args.item).workerStopAt, null);
 });

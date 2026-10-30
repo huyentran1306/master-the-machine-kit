@@ -6,6 +6,8 @@ function purpose(tool) {
   if (tool.annotations?.readOnlyHint === false || /\b(create|delete|update|submit|mutate|write)\b/.test(words(tool.name))) return null;
   if (/\b(test data|fixtures?|scenario data|test cases)\b/.test(text) && /\b(get|fetch|read|load|retrieve|return|provide)\w*\b/.test(text)) return 'data';
   if (/\b(search|find|lookup|query)\w*\b/.test(text) && /\b(docs?|documents?|documentation|knowledge|kb)\b/.test(text)) return 'search';
+  const action = /\b(restart|send|deploy|reset|notify|trigger|run|execute|apply|approve|cancel|create|update|delete|write|submit|mutate|post|pay|void|issue|email|toggle|enable|disable|set)\b/;
+  if (action.test(text) || (tool.annotations?.readOnlyHint !== true && !/\b(get|list|search|read|fetch|query|lookup|find|describe|show)\b/.test(text))) return null;
   // Incident items are answered from production logs; workers cannot query them, so fetch them up front.
   if (/\b(logs?|observability|traces?|events?|incidents?|audit|telemetry|metrics|requests?)\b/.test(text)) return 'logs';
   // Any other read-only company tool is still tried; an unfillable schema is recorded, not fatal.
@@ -31,11 +33,11 @@ function argumentsFor(tool, item, kind) {
 /** Bounded, read-only discovery. Retain raw responses, including errors, for the worker. */
 export async function collectMcpMaterial(item, call, budgetMs = 30000) {
   const entries = [];
-  const deadline = Date.now() + budgetMs;
-  const invoke = async (request, purpose) => {
+  const deadline = Date.now() + Math.min(budgetMs, 30000);
+  const invoke = async (request, purpose, cutoff = deadline) => {
     const entry = { purpose, tool: request.name || 'tools-list', args: request.args || {} };
     try {
-      entry.result = await until(call({ ...request, raw: true }), Math.min(deadline, Date.now() + 10000));
+      entry.result = await until(call({ ...request, raw: true }), Math.min(cutoff, Date.now() + 10000));
       entry.ok = entry.result?.ok === true;
     } catch (e) { entry.ok = false; entry.error = e.message; }
     entries.push(entry);
@@ -47,21 +49,24 @@ export async function collectMcpMaterial(item, call, budgetMs = 30000) {
   for (const kind of ['data', 'search']) {
     if (!selected.some(x => x.kind === kind)) entries.push({ purpose: kind, ok: false, error: `No matching read-only ${kind} tool advertised; request NEED_INFO if material is still missing.` });
   }
-  // Each advertised purpose is attempted; a timeout or unfamiliar schema cannot block dispatch.
-  // Data and docs first: they decide most items; logs and other tools follow within the budget.
-  const order = { data: 0, search: 1, logs: 2, other: 3 };
-  selected.sort((a, b) => order[a.kind] - order[b.kind]);
-  for (const { tool, kind } of selected) {
-    if (Date.now() >= deadline) { entries.push({ purpose: kind, tool: tool.name, ok: false, error: 'MCP material time budget exhausted.' }); continue; }
-    try { await invoke({ action: 'call', name: tool.name, args: argumentsFor(tool, item, kind) }, kind); }
-    catch (e) { entries.push({ purpose: kind, tool: tool.name, ok: false, error: e.message }); continue; }
-    // A long query dilutes a semantic search; also ask with the title alone.
-    if ((kind === 'search' || kind === 'logs') && item.title && Date.now() < deadline) {
-      try {
-        const args = argumentsFor(tool, { ...item, description: '', startInstruction: '' }, kind);
-        if (JSON.stringify(args) !== JSON.stringify(argumentsFor(tool, item, kind))) await invoke({ action: 'call', name: tool.name, args }, kind);
-      } catch { /* the first call already recorded what this tool accepts */ }
-    }
+  const attempt = async ({ tool, kind }, cutoff = deadline, retry = false) => {
+    if (Date.now() >= cutoff) { entries.push({ purpose: kind, tool: tool.name, ok: false, error: 'MCP material time budget exhausted.' }); return; }
+    try {
+      const args = argumentsFor(tool, retry ? { ...item, description: '', startInstruction: '' } : item, kind);
+      if (retry && JSON.stringify(args) === JSON.stringify(argumentsFor(tool, item, kind))) return;
+      await invoke({ action: 'call', name: tool.name, args }, kind, cutoff);
+    } catch (e) { entries.push({ purpose: kind, tool: tool.name, ok: false, error: e.message }); }
+  };
+  const needed = ['data', 'search', 'logs'].map(kind => selected.find(x => x.kind === kind)).filter(Boolean);
+  // Divide remaining time so slow data/search cannot starve the first log attempt.
+  for (let i = 0; i < needed.length; i++) {
+    await attempt(needed[i], Date.now() + Math.max(0, deadline - Date.now()) / (needed.length - i));
   }
+  for (const candidate of selected.filter(x => x.kind !== 'other' && !needed.includes(x))) await attempt(candidate);
+  for (const candidate of selected.filter(x => x.kind === 'search' || x.kind === 'logs')) {
+    if (item.title) await attempt(candidate, deadline, true);
+  }
+  const optionalDeadline = Math.min(deadline, Date.now() + 2000);
+  for (const candidate of selected.filter(x => x.kind === 'other')) await attempt(candidate, optionalDeadline);
   return entries;
 }

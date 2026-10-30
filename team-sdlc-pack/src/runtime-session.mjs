@@ -970,8 +970,13 @@ export class RuntimeSession {
   }
 
   readMaterial(id) {
-    if (!this.stateDir) return this.materialCache?.[id] || null;
-    return readJson(path.join(this.stateDir, 'items', id, 'start.json'), this.materialCache?.[id] || null);
+    const cached = this.materialCache?.[id] || null;
+    const material = this.stateDir ? readJson(path.join(this.stateDir, 'items', id, 'start.json'), cached) : cached;
+    if (material && (!material.requiredEvidence || material.requiredEvidence.some(e => e.strict === undefined))) {
+      material.requiredEvidence = extractRequiredEvidence(this.items.get(id) || {}, material);
+      this.saveMaterial(id, material);
+    }
+    return material;
   }
 
   saveMaterial(id, material) {
@@ -995,7 +1000,7 @@ export class RuntimeSession {
     const { left } = effectiveLeft(it, this.now(), this.match.endsAt);
     // Keep time to integrate and submit, but a fixed 5 minutes would leave an 8-minute item 3.
     const margin = left == null ? 5 : Math.min(5, Math.max(1.5, left * 0.25));
-    const stopAt = left == null ? null : this.now() + Math.max(0.5, left - margin) * 60000;
+    const stopAt = left == null ? null : this.now() + (left - margin) * 60000;
     return {
       checkoutRoot: worktreeRoot, folder: this.repository?.folder, matchRoot,
       appPath: this.appPath ? path.join(matchRoot, path.relative(this.matchRoot, this.appPath)) : matchRoot,

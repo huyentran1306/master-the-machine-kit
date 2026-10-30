@@ -7,6 +7,7 @@ const FILE = /(?:[\w-]+\/)*[\w-][\w.-]*\.[a-zA-Z][a-zA-Z0-9]{0,9}\b/g;
 const NOT_EVIDENCE = /^(?:submit\.json|.*-submit(?:\.schema)?\.json|.*\.schema\.json|.*minimum-verification-scenarios\.md)$/i;
 // Evidence is a captured artifact; `data.steps`-style field references are not files.
 const EVIDENCE_EXT = /\.(?:png|jpe?g|gif|webp|svg|pdf|txt|log|md|json|csv|tsv|xml|html?|har|zip|mp4|webm|out)$/i;
+const REQUIRED = /\brequired\s+(?:evidence|artifacts?)\b/i;
 const baseName = p => String(p).replace(/\\/g, '/').split('/').pop().toLowerCase();
 
 export function extractRequiredEvidence(item = {}, material = {}) {
@@ -28,15 +29,16 @@ export function extractRequiredEvidence(item = {}, material = {}) {
       // Table rows are self-contained: one row's "before" must not leak into the next.
       if (!line.trim() || /^\s*(?:#{1,6}\s|[-*]\s|\d+[.)]\s|\|)/.test(line)) continuation = '';
       if (/^\s*#{1,6}\s/.test(line) || /^\s*[\w ]+:\s*$/.test(line)) heading = `${context} ${line}`;
+      if (/^\s*(?:\*\*|__)?required\s+(?:evidence|artifacts?)(?:\*\*|__)?\s*:?\s*$/i.test(line) || /^\s*\|\s*required\s+(?:evidence|artifacts?)\s*\|/i.test(line)) heading = `${context} ${line}`;
       // Inline code may name a file; code expressions are not deliverables.
       const clean = line.replace(/`([^`]+)`/g, (_, s) => /^[\w./\\-]+$/.test(s) ? s : '');
       const surrounding = `${heading} ${continuation} ${clean}`;
       for (const match of clean.matchAll(FILE)) {
         // A full answers/<ID>/evidence/<name> path names the same deliverable as evidence/<name>.
-        const token = match[0].replace(/^(?:[\w.-]+\/)*?(?:answers\/[\w.-]+\/)?(?=evidence\/)/, '');
+        const token = match[0].replace(/^answers\/[\w.-]+\/(?=evidence\/)/, '');
         const prefix = clean.slice(0, match.index);
         if (/[:/\\.\w-]$/.test(prefix) || /\.(?:com|org|net|invalid|example)$/i.test(token)) continue;
-        if (!EVIDENCE_EXT.test(token)) continue;
+        if (!token.startsWith('evidence/') && !EVIDENCE_EXT.test(token)) continue;
         if (!token.startsWith('evidence/') && !CUE.test(surrounding)) continue;
         // Source paths named alongside a capture instruction are inputs, not evidence.
         if (!token.startsWith('evidence/') && (token.includes('/') || /\.(?:[cm]?[jt]sx?|py|sql|toml|ya?ml|prisma|html|css)$/i.test(token))) continue;
@@ -46,7 +48,8 @@ export function extractRequiredEvidence(item = {}, material = {}) {
         const before = BEFORE.test(surrounding);
         // Only unambiguous names may block submission: an explicit evidence/ path, a "before"
         // artifact, or a screenshot/capture naming an image. Anything else is a reminder.
-        const strict = token.startsWith('evidence/') || before ||
+        const strict = token.startsWith('evidence/') || before || REQUIRED.test(heading) ||
+          /\brequired\s+(?:evidence|artifacts?)\s*:/i.test(clean) ||
           (/\.(?:png|jpe?g|gif|webp)$/i.test(name) && /\b(?:screenshots?|captur\w*)\b/i.test(surrounding));
         const prev = found.get(name);
         found.set(name, { name, before: before || prev?.before || false, strict: strict || prev?.strict || false });

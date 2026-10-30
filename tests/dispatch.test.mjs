@@ -49,6 +49,7 @@ test('shared build leases enforce configured concurrency, FIFO, idempotence and 
 test('integration gates select schema only, deadline item tests, or ordinary regression checks', () => {
   assert.equal(integrationGate({ type: 'PI', deadlineAt: 123 }), 'schema only');
   assert.equal(integrationGate({ type: 'TASK', local: { answerOnly: true } }), 'schema only');
+  assert.equal(integrationGate({ type: 'TASK', title: 'Question', local: { answerOnly: false }, deadlineAt: 123 }), "item's own tests + typecheck");
   assert.equal(integrationGate({ type: 'BUG', deadlineAt: 123 }), "item's own tests + typecheck");
   assert.equal(integrationGate({ type: 'BUG' }), 'full suite + typecheck; build if needed');
 });

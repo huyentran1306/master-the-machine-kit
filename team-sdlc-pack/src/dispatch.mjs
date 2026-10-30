@@ -21,7 +21,7 @@ export function dispatchPolicy(item, items, parallel = {}, freeBytes = os.freeme
 }
 
 export function integrationGate(item) {
-  return item.local?.answerOnly || answerOnly(item) ? 'schema only' : item.deadlineAt != null ? "item's own tests + typecheck" : 'full suite + typecheck; build if needed';
+  return (item.local?.answerOnly ?? answerOnly(item)) ? 'schema only' : item.deadlineAt != null ? "item's own tests + typecheck" : 'full suite + typecheck; build if needed';
 }
 
 /** Promise pool: independent items overlap without unbounded network fan-out. */

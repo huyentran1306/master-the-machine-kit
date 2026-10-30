@@ -145,15 +145,15 @@ test('sparse blob-filtered clone supports folder trees, ancestry, committed read
   assert.equal((await G.pushedState(checkout, sha, 'main')).pushed, true);
 });
 
-test('fresh temporary installation is READY with 2.7.4 identity and top-level compaction setting', async t => {
+test('fresh temporary installation is READY with 2.7.5 identity and top-level compaction setting', async t => {
   const workspace = path.join(temp(t), 'fresh workspace');
   await install({ teamWorkspace: workspace });
   const result = await check({ teamWorkspace: workspace, source: pack });
   assert.equal(result.ready, true, result.lines.join('\n'));
   const infoPath = path.join(workspace, '.mtm', 'team-pack-info.json');
   assert.equal(read(infoPath).teamName, '[FHM] Bá Khí');
-  assert.equal(read(infoPath).version, '2.7.4');
-  for (const file of ['package.json', 'team-runtime.json', 'team-pack-info.json']) assert.equal(read(path.join(pack, file)).version, '2.7.4');
+  assert.equal(read(infoPath).version, '2.7.5');
+  for (const file of ['package.json', 'team-runtime.json', 'team-pack-info.json']) assert.equal(read(path.join(pack, file)).version, '2.7.5');
   assert.notEqual(fs.readFileSync(infoPath)[0], 0xef, 'no UTF-8 BOM');
   const configPath = path.join(workspace, '.codex', 'config.toml');
   const config = fs.readFileSync(configPath, 'utf8');

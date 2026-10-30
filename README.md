@@ -1,6 +1,6 @@
-# Master the Machine Kit3 — 2.7.4
+# Master the Machine Kit3 — 2.7.5
 
-Team pack **Codex**, protocol 4, cho MTM Player. Bản 2.7.4 trên nhánh `codex/kit3_bou_v4`, cập nhật từ nền 2.7.3.
+Team pack **Codex**, protocol 4, cho MTM Player. Bản 2.7.5 trên nhánh `codex/kit3_bou_v9`, cập nhật từ nền 2.7.4.
 
 ## Thay đổi chính
 
@@ -24,7 +24,7 @@ node .\team-sdlc-pack\scripts\install.mjs --team-workspace "D:\mtm\BAK-Kit3"
 node .\team-sdlc-pack\scripts\check-distribution.mjs --team-workspace "D:\mtm\BAK-Kit3"
 ```
 
-Chỉ tiếp tục khi checker báo **READY**. Trên MTM Player chọn provider **Codex** và load đúng workspace vừa cài. Team identity trong pack là `[FHM] Bá Khí`; metadata package/info/runtime cùng phiên bản `2.7.4`.
+Chỉ tiếp tục khi checker báo **READY**. Trên MTM Player chọn provider **Codex** và load đúng workspace vừa cài. Team identity trong pack là `[FHM] Bá Khí`; metadata package/info/runtime cùng phiên bản `2.7.5`.
 
 Initialize trên Player chỉ tạo round local. Để tập lại cần mã trận mới hoặc Re-match phía BTC.
 
@@ -48,6 +48,17 @@ Repo chỉ chứa runtime Codex, tài liệu và fixture giả. Không đưa cre
 ## Windows contest machine
 
 Use MTM Player **0.9.35**. Install into a fresh workspace using the Node command above (or `team-sdlc-pack/install.ps1`), then run the checker and require **READY**. In Player Init, select Codex, set the Codex CLI path to the installed **codex.exe** (absolute path), and choose the match-authorized model in Init. Keep previous match workspaces separate.
+
+## Changelog - 2.7.5
+
+Written by Codex:
+- Explicit required-evidence/artifact lines, sections and tables block submission when missing; incidental mentions remain CHECK_EVIDENCE warnings.
+- Only anchored `answers/<ID>/evidence/` paths normalize. Explicit evidence paths accept any extension; prose filenames retain the artifact filter.
+- Cached evidence without strictness is re-extracted before submission and brief/worktree reuse.
+- Logs and optional MCP tools require read-only annotations or clear read verbs, with action verbs rejected. Data/search matching is preserved.
+- Data, search and logs each get a first attempt before title-only retries; optional discovery shares a two-second budget within the total 30-second bound.
+- Worker cutoffs reserve the existing margin without a positive floor, including when the cutoff has passed.
+- Validation: 85 synthetic tests passed; fresh temporary install/checker READY.
 
 ## Changelog — 2.7.4
 

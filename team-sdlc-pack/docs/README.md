@@ -24,7 +24,7 @@ configure_session, login_match, refresh_match, wait_for_update, get_backlog_item
 ORCHESTRATOR_STARTED/RESTARTED (configure_session), PREPARATION_STATUS MATCH_LOGIN (login_match), ENVIRONMENT_READY (report_ready), GAME_START_STATUS BACKLOG_SYNC (START/RESUME_GAME), BACKLOG_STATUS DISCOVERED/IN_PROGRESS/SUBMITTED, BACKLOG_TESTS NOT_RUN (start), GAME_MASTER_API REQUESTED/SUCCEEDED/FAILED around every login, refresh, start and submit request, BLOCKER_OPENED/RESOLVED for helper-detected problems, ORCHESTRATOR_ENDED (final_result end=true / MATCH_ENDED).
 The agent writes PREPARATION_STATUS for GIT_AUTH/REPOSITORY/ENVIRONMENT/BUILD, BACKLOG_TESTS RUNNING/PASSED/FAILED and its own blockers through `report_progress`.
 
-## Dispatch contract (2.7.4)
+## Dispatch contract (2.7.5)
 
 Configure helper `parallel.maxWorkers` (default 3) and `parallel.portBase` (default 3100) in config/game-adapter.json before installation. PI may create one overflow worktree. Provider capacity must accommodate root + cap + one PI worker; release completed agents. Checker/scout remain optional, read-only, worker-requested assistance and must not consume reserved PI capacity.
 

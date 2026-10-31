@@ -49,10 +49,12 @@ Repo chỉ chứa runtime Codex, tài liệu và fixture giả. Không đưa cre
 
 Use MTM Player **0.9.35**. Install into a fresh workspace using the Node command above (or `team-sdlc-pack/install.ps1`), then run the checker and require **READY**. In Player Init, select Codex, set the Codex CLI path to the installed **codex.exe** (absolute path), and choose the match-authorized model in Init. Keep previous match workspaces separate.
 
-## Changelog — 2.8.9 (nhánh `codex/kit3_tran_fastdispatch`)
+> Nhánh `codex/kit3_tran_v2` = dòng kit của Tran dựa trên `codex/kit3_bou_v4` (B, 2.8.0); thư mục `Kit3-tran-v2-<version>`, cùng format với `Kit3-bou-v4-<version>` của B.
+
+## Changelog — 2.8.9 (nhánh `codex/kit3_tran_v2`)
 - **Lưới an toàn cho item không có worker:** mỗi item giao đi lưu lại tin nhắn giao việc và "dấu vân tay" worktree (HEAD + file thay đổi). Sau 4 phút mà worktree y nguyên (không file nào đổi, không commit), view báo `!! CHECK WORKERS` và đánh thức vòng chờ; `dispatch_ready` trả `respawnCheck` kèm đúng tin nhắn cũ. Orchestrator phải `list_agents` trước: chỉ tạo lại khi KHÔNG có worker sống cho item đó (không bao giờ 2 worker một worktree). Tối đa 2 lần mỗi item; item READY/PARKED/đã integrate/đã nộp không bao giờ bị đưa lại. Trước đây một lần spawn thất bại mà orchestrator quên thử lại thì item nằm im tới hết trận.
 
-## Changelog — 2.8.8 (nhánh `codex/kit3_tran_fastdispatch`)
+## Changelog — 2.8.8 (nhánh `codex/kit3_tran_v2`)
 Review độc lập toàn bộ thay đổi từ 2.8.0; mỗi lỗi dưới đây có test tái hiện (fail trên 2.8.7, pass trên 2.8.8).
 - **Gate CODE_FAILURE tự rollback ngay trong `ship`.** Trước đây commit đỏ nằm lại trong main; item kế tiếp ship sẽ push luôn code đỏ lên origin và nằm trong bài nộp của item đó, rồi không rollback được nữa.
 - **Ship lại sau khi bị preflight trả về nay lấy commit sửa của worker.** Trước đây ship bỏ qua integrate khi đã có integratedSha nên nộp lại đúng commit cũ, lặp tới hết giờ.
@@ -63,12 +65,12 @@ Review độc lập toàn bộ thay đổi từ 2.8.0; mỗi lỗi dưới đây
 - Liệt kê tiến trình (`ps`, PowerShell WMI) có timeout 20 s: không treo khoá helper khi `worktree remove`.
 - **Log tiến độ:** sau mốc 180 KiB, lượt đọc trang trận định kỳ không còn ghi; trận 60 phút K1SLTZLK lên 224 KiB / 256 KiB, 175 KiB là các lượt đọc này.
 
-## Changelog — 2.8.7 (nhánh `codex/kit3_tran_fastdispatch`)
+## Changelog — 2.8.7 (nhánh `codex/kit3_tran_v2`)
 - Lượt đề thật RBKTH8OM (2.8.6, sol medium): **1000/1000**, nộp cuối phút 25,7, 182,9 credit, cả 10 item nộp 1 lần là qua.
 - **Nâng giới hạn luồng của Codex:** Codex multi-agent v2 mặc định chỉ cho 4 luồng mở mỗi phiên (orchestrator + 3 worker). Lượt trên `spawn_agent` bị từ chối 2 lần ("agent thread limit reached"): CR-01 chờ 1,4 phút, BUG-04 chờ 3,5 phút mới có worker. `config/codex.toml` thêm `[features.multi_agent_v2] enabled = true, max_concurrent_threads_per_session = 12` (đã thử nạp config với Codex 0.149, 0.159, 0.166). Orchestrator được dặn thử lại đúng lệnh spawn sau lần wait kế tiếp nếu vẫn bị từ chối.
 - **Log tiến độ không còn cặp REQUESTED bị hở:** gần mốc 180 KiB, telemetry tuỳ chọn bị bỏ; trước đây có thể ghi REQUESTED rồi bỏ mất kết quả. Giờ đã ghi REQUESTED thì kết quả luôn được ghi, còn REQUESTED bị bỏ thì bỏ luôn kết quả (GAME_MASTER_API và MATCH_MCP).
 
-## Changelog — 2.8.6 (nhánh `codex/kit3_tran_fastdispatch`)
+## Changelog — 2.8.6 (nhánh `codex/kit3_tran_v2`)
 - Lượt set3 (2.8.4, sol): **1000/1000**, nộp cuối phút 30.4, PI nộp sau 3,8 phút (hạng 1), mỗi đợt giao mọi item cùng lúc, gate 2–9 giây.
 - **Bảo vệ test baseline không chặn nhầm item sau:** test baseline mà một item ĐÃ NỘP sửa (kèm TEST-CHANGE) không còn chặn các item nộp sau, nếu file vẫn y như bản đã nộp. Lượt set3: TASK-03/TASK-04 bị từ chối 2 lần vì thay đổi hợp lệ của BUG-01 (mất ~2 phút trên item có deadline). Sửa thêm lần nữa thì vẫn phải có TEST-CHANGE riêng.
 - **validate-answer kiểm đúng như preflight nộp:** đường dẫn evidence viết dạng `answers/<ID>/...`, CR/BUG thiếu evidence, evidence bắt buộc chưa được trích (`--required`, tự điền trong message giao việc). Lượt set3: CR-01, CR-03, BUG-01 bị preflight trả về vì đúng các lỗi này.

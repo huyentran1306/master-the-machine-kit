@@ -1341,7 +1341,8 @@ export class RuntimeSession {
         }
         // Compare against the revision the match started from, not the moving branch head.
         const baseline = this.environmentRevision || this.state.envReady?.revision;
-        const guarded = await guardBaseline({ cwd, folder, sha, baseline, answer });
+        const submittedRevisions = [...this.items.values()].filter((x) => x.id !== id && isSubmitted(x) && x.local?.revision).map((x) => x.local.revision);
+        const guarded = await guardBaseline({ cwd, folder, sha, baseline, answer, submittedRevisions });
         const { errors: guardErrors, ...touched } = guarded;
         touchedBaseline = touched;
         errors.push(...guardErrors);
@@ -1982,7 +1983,8 @@ export class RuntimeSession {
       }
       if (resume) { delete it.local.parked; it.local.ready = false; }
       const schemaRel = Object.keys(material.files || {}).find((k) => k.endsWith(`${id}-submit.schema.json`)) || Object.keys(material.files || {}).find((k) => /submit\.schema\.json$/.test(k));
-      const validateAnswer = `node "${VALIDATE_ANSWER}" "${answerPaths(wtMatchRoot, id).submitJson}"${schemaRel ? ` "${path.join(brief.filesDir, ...schemaRel.split('/'))}"` : ''}`;
+      const mustCite = (material.requiredEvidence || []).filter((r) => r && r.reference !== false && r.name).map((r) => r.name);
+      const validateAnswer = `node "${VALIDATE_ANSWER}" "${answerPaths(wtMatchRoot, id).submitJson}"${schemaRel ? ` "${path.join(brief.filesDir, ...schemaRel.split('/'))}"` : ''}${mustCite.length ? ` --required ${mustCite.join(',')}` : ''}`;
       this.saveState();
       return {
         validateAnswer,

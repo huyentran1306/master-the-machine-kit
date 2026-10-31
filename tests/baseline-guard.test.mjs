@@ -105,3 +105,17 @@ test('submit and dryRun enforce the guard on the selected commit, ignoring a wor
     assert.equal(result.refused, true); assert.equal(result.touchedBaseline.migrations.length, 1);
   }
 });
+
+test('a baseline test changed by an already-submitted item does not block later items; a further change does', async t => {
+  const f = setup(t);
+  f.write('assigned/src/math.test.js', 'changed by BUG-01 with its TEST-CHANGE'); const bug01 = f.commit();
+  f.write('assigned/answers/TASK-03/submit.json', '{}'); f.commit();
+  const head = git(f.cwd, 'rev-parse', 'HEAD');
+  const without = await guardBaseline({ cwd: f.cwd, folder: 'assigned', sha: head, baseline: f.baseline, answer: f.answer });
+  assert.ok(without.errors.some((e) => /BASELINE_TEST_CHANGED: assigned\/src\/math\.test\.js/.test(e)), 'old behaviour without receipts');
+  const ok = await guardBaseline({ cwd: f.cwd, folder: 'assigned', sha: head, baseline: f.baseline, answer: f.answer, submittedRevisions: [bug01] });
+  assert.deepEqual(ok.errors, []); assert.deepEqual(ok.inherited, ['assigned/src/math.test.js']);
+  f.write('assigned/src/math.test.js', 'changed again by TASK-03'); f.commit();
+  const again = await guardBaseline({ cwd: f.cwd, folder: 'assigned', sha: git(f.cwd, 'rev-parse', 'HEAD'), baseline: f.baseline, answer: f.answer, submittedRevisions: [bug01] });
+  assert.ok(again.errors.some((e) => /BASELINE_TEST_CHANGED/.test(e)), 'a new change still needs its own citation');
+});

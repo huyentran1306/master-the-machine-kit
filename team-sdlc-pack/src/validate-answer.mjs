@@ -6,8 +6,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { validate } from './schema.mjs';
+import { checkAnswer } from './answers.mjs';
 
-export function checkSubmit(answerFile, schemaFile) {
+/** Same checks as submit_work's preflight that can run before commit: schema, checkAnswer, evidence files, required evidence. */
+export function checkSubmit(answerFile, schemaFile, { required = [] } = {}) {
   const problems = [];
   let raw;
   try { raw = fs.readFileSync(answerFile, 'utf8'); } catch { return [`cannot read ${answerFile}`]; }
@@ -17,6 +19,13 @@ export function checkSubmit(answerFile, schemaFile) {
   const id = path.basename(path.dirname(answerFile));
   if (ans.backlogId && ans.backlogId !== id) problems.push(`backlogId is ${ans.backlogId}, folder is ${id}`);
   if (['NOT_STARTED', 'DRAFT'].includes(ans.status)) problems.push(`status is still ${ans.status}`);
+  const chk = checkAnswer(ans, id, id.split('-')[0]); // the preflight's own rules (paths written as answers/<ID>/..., missing MVS evidence)
+  for (const e of chk.errors) if (!problems.some((p) => p.includes(e.slice(0, 40)))) problems.push(e);
+  const refs = new Set(chk.evidenceRefs);
+  for (const name of required) {
+    if (!fs.existsSync(path.join(path.dirname(answerFile), 'evidence', name))) problems.push(`required evidence evidence/${name} is missing`);
+    else if (!refs.has(`evidence/${name}`)) problems.push(`REQUIRED_EVIDENCE_UNREFERENCED: add "evidence/${name}" to an evidence array`);
+  }
   if (schemaFile) {
     try { for (const e of validate(JSON.parse(fs.readFileSync(schemaFile, 'utf8')), ans).slice(0, 20)) problems.push(`schema: ${e}`); }
     catch (e) { problems.push(`schema unreadable: ${e.message}`); }
@@ -28,9 +37,12 @@ export function checkSubmit(answerFile, schemaFile) {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const [answer, schema] = process.argv.slice(2);
-  if (!answer) { console.error('usage: validate-answer.mjs <submit.json> [schema.json]'); process.exit(2); }
-  const p = checkSubmit(answer, schema);
+  const args = process.argv.slice(2);
+  const ri = args.indexOf('--required');
+  const required = ri >= 0 ? String(args[ri + 1] || '').split(',').filter(Boolean) : [];
+  const [answer, schema] = args.filter((a, i) => i !== ri && i !== ri + 1);
+  if (!answer) { console.error('usage: validate-answer.mjs <submit.json> [schema.json] [--required a.log,b.png]'); process.exit(2); }
+  const p = checkSubmit(answer, schema, { required });
   if (p.length) { console.log(`ANSWER INVALID (${p.length}):\n- ${p.join('\n- ')}`); process.exit(1); }
   console.log(`ANSWER OK${schema ? ' (schema valid)' : ' (no schema given)'}: ${answer}`);
 }

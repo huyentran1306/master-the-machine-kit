@@ -5,8 +5,30 @@ export const isTestPath = p => /(?:^|\/)(?:__tests__|tests)\/|\.(?:test|spec)\.[
 const strings = v => typeof v === 'string' ? [v] : v && typeof v === 'object' ? Object.values(v).flatMap(strings) : [];
 const sourceCitation = s => /\b(?:TASK|CR|BUG|PI)-\d+\b|\bKB[-:/][\w.-]+|\b(?:knowledge[- ]base|design record)\s*[:#]\s*\S+|\b(?:DECISIONS\.md|README(?:\.md)?|specs?\/\S+)/i.test(s);
 
-export async function guardBaseline({ cwd, folder, sha, baseline, answer }) {
-  const result = { revision: null, tests: [], migrations: [], errors: [] };
+/**
+ * submittedRevisions: commits of items that already have an official receipt. A baseline test those
+ * submissions changed (with their own TEST-CHANGE) is not this item's change when this commit still
+ * carries the identical file: rehearsal set3 refused TASK-03/TASK-04 twice for BUG-01's accepted
+ * test change, about 2 minutes on a deadline item.
+ */
+async function blobAt(cwd, rev, file) {
+  const r = await G.git(cwd, ['rev-parse', '--verify', '--quiet', `${rev}:${file}`]);
+  return r.code === 0 ? r.stdout.trim() : `missing:${rev}`;
+}
+/** The file is exactly as an already-submitted ancestor commit left it. */
+async function inheritedChange(cwd, sha, file, revisions) {
+  if (!revisions.length) return false;
+  const mine = await blobAt(cwd, sha, file);
+  for (const rev of revisions) {
+    if (!rev || rev === sha) continue;
+    if (!(await G.isAncestor(cwd, rev, sha))) continue;
+    if ((await blobAt(cwd, rev, file)) === mine) return true;
+  }
+  return false;
+}
+
+export async function guardBaseline({ cwd, folder, sha, baseline, answer, submittedRevisions = [] }) {
+  const result = { revision: null, tests: [], migrations: [], errors: [], inherited: [] };
   const scope = `:(literal)${folder.replace(/\\/g, '/').replace(/\/$/, '')}/`;
   result.revision = baseline ? await G.revParse(cwd, baseline) : null;
   if (!result.revision) {
@@ -37,6 +59,7 @@ export async function guardBaseline({ cwd, folder, sha, baseline, answer }) {
     }
     if (isTestPath(relative)) {
       result.tests.push({ path: file, status });
+      if (!annotations.has(file) && !annotations.has(relative) && await inheritedChange(cwd, sha, file, submittedRevisions)) { result.inherited.push(file); continue; }
       if (!annotations.has(file) && !annotations.has(relative)) result.errors.push(`BASELINE_TEST_CHANGED: ${file} (${status}); revert this path to baseline ${result.revision}, or add a line "TEST-CHANGE ${file}: <source>" to the existing answer analysis/risks field and commit again. Cite the item ID, a knowledge-base document ID (KB-<id>), or a design record (DECISIONS.md, specs/<path>, or design record: <id>) that explicitly requires the behavior change; use a real source, never add template keys.`);
     }
   }

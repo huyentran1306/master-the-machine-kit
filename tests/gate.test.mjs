@@ -146,3 +146,15 @@ test('ship goes READY -> integrate -> gate -> BACKLOG_TESTS -> push -> submit ->
   assert.equal(pr.ok, false); assert.equal(pr.stage, 'push'); assert.equal(pr.error, 'PUSH_REJECTED');
   assert.equal(submits.length, 1);
 });
+
+test('validate-answer catches the preflight refusals seen in rehearsal set3 before READY', async (t) => {
+  const { checkSubmit } = await import('../team-sdlc-pack/src/validate-answer.mjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kit3-va2-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const ans = path.join(dir, 'answers', 'BUG-01'); fs.mkdirSync(path.join(ans, 'evidence'), { recursive: true });
+  fs.writeFileSync(path.join(ans, 'evidence', 'due_summary_before_fix.log'), 'x'); fs.writeFileSync(path.join(ans, 'evidence', 'mvs.log'), 'x');
+  fs.writeFileSync(path.join(ans, 'submit.json'), JSON.stringify({ backlogId: 'BUG-01', status: 'DONE', evidenceFiles: ['evidence/mvs.log'], engineeringRecord: { analysis: 'answers/BUG-01/evidence: logs' } }));
+  const p = checkSubmit(path.join(ans, 'submit.json'), null, { required: ['due_summary_before_fix.log'] });
+  assert.ok(p.some((x) => /relative to answers\/BUG-01/.test(x)), p.join('\n'));
+  assert.ok(p.some((x) => /REQUIRED_EVIDENCE_UNREFERENCED/.test(x)));
+});

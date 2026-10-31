@@ -1,4 +1,4 @@
-# Master the Machine Kit3 — 2.8.5
+# Master the Machine Kit3 — 2.8.6
 
 Team pack **Codex**, protocol 4, cho MTM Player. Bản 2.8.0 trên nhánh `codex/kit3_bou_v11`, cập nhật từ nền 2.7.7.
 
@@ -49,7 +49,12 @@ Repo chỉ chứa runtime Codex, tài liệu và fixture giả. Không đưa cre
 
 Use MTM Player **0.9.35**. Install into a fresh workspace using the Node command above (or `team-sdlc-pack/install.ps1`), then run the checker and require **READY**. In Player Init, select Codex, set the Codex CLI path to the installed **codex.exe** (absolute path), and choose the match-authorized model in Init. Keep previous match workspaces separate.
 
-## Changelog — 2.8.5 (nhánh `codex/kit3_tran_fastdispatch`)
+## Changelog — 2.8.6 (nhánh `codex/kit3_tran_fastdispatch`)
+- Lượt set3 (2.8.4, sol): **1000/1000**, nộp cuối phút 30.4, PI nộp sau 3,8 phút (hạng 1), mỗi đợt giao mọi item cùng lúc, gate 2–9 giây.
+- **Bảo vệ test baseline không chặn nhầm item sau:** test baseline mà một item ĐÃ NỘP sửa (kèm TEST-CHANGE) không còn chặn các item nộp sau, nếu file vẫn y như bản đã nộp. Lượt set3: TASK-03/TASK-04 bị từ chối 2 lần vì thay đổi hợp lệ của BUG-01 (mất ~2 phút trên item có deadline). Sửa thêm lần nữa thì vẫn phải có TEST-CHANGE riêng.
+- **validate-answer kiểm đúng như preflight nộp:** đường dẫn evidence viết dạng `answers/<ID>/...`, CR/BUG thiếu evidence, evidence bắt buộc chưa được trích (`--required`, tự điền trong message giao việc). Lượt set3: CR-01, CR-03, BUG-01 bị preflight trả về vì đúng các lỗi này.
+
+## Changelog — 2.8.5
 - **Tool `ship <ID>`:** một lần gọi helper làm trọn READY → integrate → gate → BACKLOG_TESTS (số liệu thật từ lần gate) → git push (chỉ fast-forward, không bao giờ force) → submit_work → xoá worktree. Các lần ship chạy lần lượt (không giẫm main). Dừng và trả `{stage, error, next}` ở mọi chỗ bị từ chối: CONFLICT/MAIN_DIRTY, gate CODE_FAILURE (không push, không nộp), ENVIRONMENT (thử lại hoặc `force:true` khi gần deadline), push bị từ chối, preflight nộp. Lượt set2: item READY phải chờ orchestrator 3,5–7 phút; worker CR-02 xong sau 7,7 phút nhưng nộp sau 14,9 phút.
 - Gate không còn báo GREEN khi không tìm thấy trình chạy test nào; thời gian gate tối đa 90 s; `tool_timeout_sec` của MCP 300 s (ship gồm gate + push + nộp).
 

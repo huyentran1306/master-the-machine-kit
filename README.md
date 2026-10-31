@@ -1,4 +1,4 @@
-# Master the Machine Kit3 — 2.8.3
+# Master the Machine Kit3 — 2.8.4
 
 Team pack **Codex**, protocol 4, cho MTM Player. Bản 2.8.0 trên nhánh `codex/kit3_bou_v11`, cập nhật từ nền 2.7.7.
 
@@ -49,7 +49,10 @@ Repo chỉ chứa runtime Codex, tài liệu và fixture giả. Không đưa cre
 
 Use MTM Player **0.9.35**. Install into a fresh workspace using the Node command above (or `team-sdlc-pack/install.ps1`), then run the checker and require **READY**. In Player Init, select Codex, set the Codex CLI path to the installed **codex.exe** (absolute path), and choose the match-authorized model in Init. Keep previous match workspaces separate.
 
-## Changelog — 2.8.3 (nhánh `codex/kit3_tran_fastdispatch`)
+## Changelog — 2.8.4 (nhánh `codex/kit3_tran_fastdispatch`)
+- **PI / item chỉ trả lời nộp nhanh hơn:** lệnh kiểm tra đáp án có sẵn `node <pack>/src/validate-answer.mjs <submit.json> <schema>` (cùng bộ kiểm của helper) được gửi kèm trong message giao việc; worker không cần cài jsonschema/ajv. Message của item trả lời có "FAST PATH": đọc brief một lần, điền submit.json, chạy lệnh kiểm, commit, READY; không tạo evidence thừa. Lượt set2: PI-01 có đáp án ở phút 2,3 sau khi giao nhưng mất thêm 2,4 phút cài validator và viết test.log, nộp sau 6,4 phút nên về thứ 2.
+
+## Changelog — 2.8.3
 - `dispatch_ready` luôn giao TẤT CẢ item đang mở (bỏ tham số `max`). Lượt set2: orchestrator gọi `max:1` nên đợt 3 giao lần lượt ở phút 12.9 / 13.6 / 14.2 và đợt 4 ở 20.9 / 22.6 / 22.8 thay vì cùng lúc.
 
 ## Changelog — 2.8.2

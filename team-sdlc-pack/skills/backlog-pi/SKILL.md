@@ -7,7 +7,7 @@ description: Playbook for an MTM Product Incident (PI-xx) - production issue wit
 
 The clock started at reveal; rank is by the server's receivedAt of a PASSED submission (100/90/75/60%). FAILED = 0, so verify once, properly, then ship. No MVS: Grader has its own criteria. Target <= 10 minutes.
 
-For brief.answerOnly, read brief.json, every file under files/ including MCP material, and the checklist. Compute the requested answer, validate submit.json against the shipped schema, commit and return READY/PARKED. Skip the code steps below: no dev/production server, build or full suite.
+For brief.answerOnly (target <= 4 minutes): read brief.json and every file under files/ (MCP material included) once, decide each field from the logs (UTC-normalise mixed offsets, dedupe retries, keep corrected entries, ignore decoys), write submit.json, run the validateAnswer command from your dispatch message, commit and return READY. No extra evidence/test.log unless requiredEvidence lists it; never pip/npm install a validator. Skip the code steps below: no dev/production server, build or full suite.
 
 1. Read brief.json, every file under files/ including MCP material, and the checklist before deciding anything is missing. Return NEED_INFO: <what> to the orchestrator for missing material; never submit BLOCKED. Produce required BEFORE artifacts before source edits; follow evidence-and-answer. Note outcome + repro only.
 2. Locate (aim 4 minutes). If cheap, request read-only scout help from the orchestrator with checkoutRoot, folder, matchRoot, brief and organizer-file paths, scope and a <=2-minute limit. Continue your own search:

@@ -71,3 +71,17 @@ test('gate helpers', () => {
   assert.equal(assertionFailure({ exit: 1, text: 'error TS2322: nope' }, 'types'), true);
   assert.equal(assertionFailure({ exit: 1, timedOut: true, text: 'Tests 1 failed' }, 'tests'), false);
 });
+
+test('validate-answer checks schema, status, backlogId and evidence without installs', async (t) => {
+  const { checkSubmit } = await import('../team-sdlc-pack/src/validate-answer.mjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kit3-va-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const ans = path.join(dir, 'answers', 'PI-07'); fs.mkdirSync(ans, { recursive: true });
+  const schema = path.join(dir, 'PI-07-submit.schema.json');
+  fs.writeFileSync(schema, JSON.stringify({ type: 'object', required: ['backlogId', 'status', 'rootCause'], properties: { backlogId: { const: 'PI-07' }, status: { enum: ['DONE', 'PARTIAL', 'BLOCKED'] }, rootCause: { type: 'string', minLength: 1 } } }));
+  fs.writeFileSync(path.join(ans, 'submit.json'), JSON.stringify({ backlogId: 'PI-07', status: 'NOT_STARTED', rootCause: '', evidenceFiles: ['evidence/x.log'] }));
+  const bad = checkSubmit(path.join(ans, 'submit.json'), schema);
+  assert.ok(bad.some((p) => /NOT_STARTED/.test(p))); assert.ok(bad.some((p) => /schema/.test(p))); assert.ok(bad.some((p) => /missing evidence\/x\.log/.test(p)));
+  fs.writeFileSync(path.join(ans, 'submit.json'), JSON.stringify({ backlogId: 'PI-07', status: 'DONE', rootCause: 'cache' }));
+  assert.deepEqual(checkSubmit(path.join(ans, 'submit.json'), schema), []);
+});

@@ -93,8 +93,8 @@ export function buildChecklist({ id, type, answerOnly = false, startInstruction 
 
   const steps = answerOnly ? [
     'Read brief.json and all files/ including MCP material. Compute the requested answer/values; change no application code.',
-    'Validate submit.json against the shipped schema. Do not start a dev/production server, build or full suite.',
-    'Commit the answer and requested evidence; return READY with the SHA and schema validation result.',
+    'Validate submit.json against the shipped schema with the validateAnswer command from the dispatch message (node <pack>/src/validate-answer.mjs <submit.json> <schema>); never install a validator. Do not start a dev/production server, build or full suite.',
+    'Add evidence files only when requiredEvidence lists them. Commit and return READY with the SHA immediately: an answer item is scored by how fast it lands.',
   ] : [
     'Read brief.json, every file under files/ (including MCP material), and this checklist. Produce every required BEFORE artifact immediately on your own port before source edits; save it without committing yet. If already edited, capture the baseSha state in a temporary copy, never skip it. Return NEED_INFO: <what> to the orchestrator if material is still missing.',
     `Turn the acceptance criteria below into the definition of done for ${id}; nothing else counts.`,

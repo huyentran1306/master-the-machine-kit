@@ -8,6 +8,8 @@ import { answerOnly, dispatchPolicy, integrationGate, mapBounded, BuildQueue, av
 import { stopWorktreeProcesses } from './process-cleanup.mjs';
 import { PNPM_SAFE_ENV, itemTestFiles, gateCommands, runBounded, assertionFailure, testSummary } from './gate.mjs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+const VALIDATE_ANSWER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'validate-answer.mjs');
 import { ProgressLog, scrubSummary, playerRuleErrors } from './progress.mjs';
 import { parseLifecycleText, validateDescriptor, publicDescriptor } from './lifecycle.mjs';
 import { CookieJar, request } from './http.mjs';
@@ -1762,7 +1764,7 @@ export class RuntimeSession {
       spawn.push({
         id: r.id, type: it.type, answerOnly: !!c.answerOnly,
         taskName: `${r.id.toLowerCase().replace(/[^a-z0-9]/g, '')}${it.local.dispatches > 1 ? `r${it.local.dispatches}` : ''}`,
-        message: `${resumeText}Item ${r.id} (${it.type}${c.answerOnly ? ', answer-only: no dev server, build or full suite' : ''}). checkoutRoot = worktreeRoot = ${c.worktreeRoot}; folder ${c.folder}; matchRoot ${c.matchRoot}; briefFile ${c.brief?.briefFile}; filesDir ${c.brief?.filesDir}; answer ${c.answer?.submitJson || ''} (evidence in ${c.answer?.evidenceDir || ''}); ports dev=${c.ports?.dev} production=${c.ports?.production} (override fixed runner ports). Read briefFile first: it has the commands, playbook, checklist and organizer files. Work only in this worktree. Stop and return by ${stop} (Game Master clock). Commit the complete item (code, tests, evidence, answer) and reply STATUS READY or PARKED with COMMIT <sha>. Never push, submit, delegate or call Game APIs.`,
+        message: `${resumeText}Item ${r.id} (${it.type}${c.answerOnly ? ', answer-only: no dev server, build or full suite' : ''}).${c.answerOnly ? ` FAST PATH (points drop with every minute${it.type === 'PI' ? ', PI is ranked by submit order' : ''}): read brief.json + files/ (MCP material included) once, fill submit.json, run \`${c.validateAnswer}\`, commit, reply READY. No extra evidence or test.log unless the brief lists requiredEvidence; never install validators.` : ` Check the answer with \`${c.validateAnswer}\` (no installs).`} checkoutRoot = worktreeRoot = ${c.worktreeRoot}; folder ${c.folder}; matchRoot ${c.matchRoot}; briefFile ${c.brief?.briefFile}; filesDir ${c.brief?.filesDir}; answer ${c.answer?.submitJson || ''} (evidence in ${c.answer?.evidenceDir || ''}); ports dev=${c.ports?.dev} production=${c.ports?.production} (override fixed runner ports). Read briefFile first: it has the commands, playbook, checklist and organizer files. Work only in this worktree. Stop and return by ${stop} (Game Master clock). Commit the complete item (code, tests, evidence, answer) and reply STATUS READY or PARKED with COMMIT <sha>. Never push, submit, delegate or call Game APIs.`,
       });
     }
     this.saveState();
@@ -1920,8 +1922,11 @@ export class RuntimeSession {
         fs.writeFileSync(context.checklistFile, checklist.split(this.appPath).join(context.appPath));
       }
       if (resume) { delete it.local.parked; it.local.ready = false; }
+      const schemaRel = Object.keys(material.files || {}).find((k) => k.endsWith(`${id}-submit.schema.json`)) || Object.keys(material.files || {}).find((k) => /submit\.schema\.json$/.test(k));
+      const validateAnswer = `node "${VALIDATE_ANSWER}" "${answerPaths(wtMatchRoot, id).submitJson}"${schemaRel ? ` "${path.join(brief.filesDir, ...schemaRel.split('/'))}"` : ''}`;
       this.saveState();
       return {
+        validateAnswer,
         ok: true, resume: resume || null, answerOnly: it.local.answerOnly, worktreeRoot: wtRoot, checkoutRoot: wtRoot, folder: this.repository.folder, matchRoot: wtMatchRoot, linked, movedDraftAnswer, brief, ports, workerStopAt: context.workerStopAt,
         answer: it.local.startedAt ? answerPaths(wtMatchRoot, id) : undefined,
         note: linked.some((l) => l.includes('TEST_DATABASE_URL')) ? 'This copy got its own TEST_DATABASE_URL (tests truncate between cases, so copies must not share one).' : undefined,

@@ -1,5 +1,11 @@
 model_auto_compact_token_limit = 120000
 
+# Every shell command the agents run: pnpm 10/11 must not run an implicit install before a script
+# (verify-deps-before-run). Without a TTY it aborts with ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY;
+# with one it waits on a prompt. Rehearsals 2026-10-29 and 2026-10-31 lost items to both.
+[shell_environment_policy]
+set = { npm_config_verify_deps_before_run = "false", pnpm_config_verify_deps_before_run = "false" }
+
 [mcp_servers.mtm_minimal]
 command = "node"
 args = ["../team-sdlc-pack/runtime/bin/runtime-server.mjs"]

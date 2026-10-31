@@ -76,6 +76,12 @@ export const TOOLS = [
     handler: (s, a) => s.build_slot(a),
   },
   {
+    name: 'gate',
+    description: 'Integration gate for an integrated item, run by the helper: direct vitest/tsc (no pnpm), the item\'s own test files for deadline items, time box that leaves a minute to push and submit. verdict GREEN -> push + submit_work; CODE_FAILURE -> worktree rollback + worker fix-up; ENVIRONMENT (timeout/hang/tool noise) -> never roll back, retry once or submit the worker-verified commit. Logs in .mtm-notes/gate-<ID>-*.log.',
+    inputSchema: obj({ backlogItemKey: key, full: { type: 'boolean', description: 'Force the full suite even for a deadline item.' } }, ['backlogItemKey']),
+    handler: (s, a) => s.gate(a),
+  },
+  {
     name: 'dispatch_ready',
     description: 'Dispatch EVERY open item in one call: start_work + worktree create for each item that has no worker (new reveals, PI, parked resumes, workers lost in a restart), within the RAM/code-worker policy. Returns spawn[] = {taskName, message}: spawn one team_feature_worker per entry in the same turn. Call it whenever the view shows DISPATCH NOW, after every submit and right after configure_session.',
     inputSchema: obj({ max: { type: 'integer', minimum: 1, description: 'Optional cap on items dispatched in this call (default: all).' } }),

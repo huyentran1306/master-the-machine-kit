@@ -6,6 +6,7 @@ import crypto from 'node:crypto';
 import os from 'node:os';
 import { answerOnly, dispatchPolicy, integrationGate, mapBounded, BuildQueue, availableMemory } from './dispatch.mjs';
 import { stopWorktreeProcesses } from './process-cleanup.mjs';
+import { PNPM_SAFE_ENV, itemTestFiles, gateCommands, runBounded, assertionFailure, testSummary } from './gate.mjs';
 import path from 'node:path';
 import { ProgressLog, scrubSummary, playerRuleErrors } from './progress.mjs';
 import { parseLifecycleText, validateDescriptor, publicDescriptor } from './lifecycle.mjs';
@@ -1773,6 +1774,56 @@ export class RuntimeSession {
     });
   }
 
+  /**
+   * The integration gate for an integrated, unsubmitted item, run by the helper (see gate.mjs): direct
+   * vitest/tsc, the item's own test files for a deadline item, a time box that leaves a minute to push
+   * and submit, and a verdict: GREEN, CODE_FAILURE (failing assertions / type errors: roll back) or
+   * ENVIRONMENT (timeout, hang, tool noise without a failing assertion: never roll back for it).
+   */
+  async gate({ backlogItemKey, full = false, budgetSec: forcedBudget } = {}) {
+    const id = String(backlogItemKey || '');
+    const it = this.items.get(id);
+    if (!it) return { ok: false, error: 'UNKNOWN_ITEM' };
+    const wt = it.local?.worktree;
+    if (!wt?.integratedSha) return { ok: false, error: 'NOT_INTEGRATED', next: `Call worktree integrate ${id} first.` };
+    const { left } = effectiveLeft(it, this.now(), this.match.endsAt);
+    const leftMin = left == null ? 40 : left;
+    if (it.local.answerOnly ?? answerOnly(it, this.readMaterial(id) || {})) {
+      it.local.gate = { verdict: 'GREEN', at: this.now(), note: 'answer-only' };
+      return this.clean({ ok: true, verdict: 'GREEN', note: 'Answer-only: no code gate. submit_work validates the shipped schema.', next: `Push now, then submit_work ${id}.` });
+    }
+    const appDir = this.appPath || this.matchRoot;
+    const appRel = path.relative(this.checkoutRoot, appDir).split(path.sep).join('/');
+    const diff = await G.git(this.checkoutRoot, ['diff', '--name-only', `${wt.integrationBase || wt.mainBefore}`, wt.integratedSha]);
+    const own = itemTestFiles(diff.stdout.split('\n').filter(Boolean), appRel).filter((f) => fs.existsSync(path.join(appDir, f)));
+    const scope = !full && (it.deadlineAt != null || leftMin < 8) && own.length ? 'item' : 'full';
+    const { test, types } = gateCommands(appDir, { files: scope === 'item' ? own : [], recon: this.commands || {} });
+    const budgetSec = forcedBudget || Math.round(Math.max(20, Math.min(100, leftMin * 60 - 60))); // forcedBudget: tests only (not in the tool schema)
+    const notes = path.join(this.checkoutRoot, '.mtm-notes');
+    fs.mkdirSync(notes, { recursive: true });
+    G.ensureExcluded(this.checkoutRoot, '/.mtm-notes/');
+    const env = { ...process.env, ...PNPM_SAFE_ENV, FORCE_COLOR: '0', NO_COLOR: '1' };
+    delete env.NODE_TEST_CONTEXT;
+    const t0 = Date.now();
+    const [tr, ty] = await Promise.all([
+      test ? runBounded(test, { cwd: appDir, env, timeoutMs: budgetSec * 1000, logFile: path.join(notes, `gate-${id}-tests.log`) }) : null,
+      types ? runBounded(types, { cwd: appDir, env, timeoutMs: budgetSec * 1000, logFile: path.join(notes, `gate-${id}-types.log`) }) : null,
+    ]);
+    const green = (!tr || tr.exit === 0) && (!ty || ty.exit === 0);
+    const code = assertionFailure(tr, 'tests') || assertionFailure(ty, 'types');
+    const verdict = green ? 'GREEN' : code ? 'CODE_FAILURE' : 'ENVIRONMENT';
+    const leftNow = effectiveLeft(it, this.now(), this.match.endsAt).left;
+    const part = (r, label) => r ? { command: label, exit: r.exit, timedOut: r.timedOut, seconds: Math.round(r.ms / 100) / 10, summary: testSummary(r.text), tail: r.tail.slice(-6) } : { command: null, note: 'no runner found' };
+    it.local.gate = { verdict, at: this.now(), scope };
+    this.saveState();
+    const leftTxt = leftNow == null ? '' : ` (${leftNow.toFixed(1)}m left)`;
+    const next = verdict === 'GREEN' ? `Gate GREEN: push now, then submit_work ${id} immediately${leftTxt}.`
+      : verdict === 'CODE_FAILURE' ? `Failing assertions/type errors: worktree rollback ${id}, send the worker .mtm-notes/gate-${id}-*.log and the main SHA for a fix-up.`
+      : leftNow != null && leftNow <= 3 ? `ENVIRONMENT problem, not a code failure${leftTxt}: do NOT roll back. Push and submit_work ${id} NOW with the worker-verified commit.`
+      : `ENVIRONMENT problem (timeout/hang/tool exit without a failing test), not a code failure: do NOT roll back. Call gate ${id} once more; if it repeats, push and submit_work (the worker already passed MVS + suite on its worktree).`;
+    return this.clean({ ok: verdict === 'GREEN', verdict, scope, files: scope === 'item' ? own : 'full suite', budgetSec, seconds: Math.round((Date.now() - t0) / 100) / 10, tests: part(tr, test?.label), types: part(ty, types?.label), next });
+  }
+
   hasDispatchAction() {
     if (this.phase !== 'GAME' || ['PAUSED', 'FINISHED'].includes(this.match.status)) return false;
     return rank([...this.items.values()], this.now(), this.match.endsAt, this.adapter.planner).ranked.some(r =>
@@ -1907,7 +1958,7 @@ export class RuntimeSession {
       delete wt.retryBaseSha;
       it.local.owner = 'orchestrator';
       this.saveState();
-      return { ok: true, integratedSha: p.sha, next: `Run the <=2-minute integration gate (${integrationGate(it)}), report BACKLOG_TESTS, push, submit_work ${id}, remove. Red gate: worktree rollback, delegate fix-up; never debug in main.` };
+      return { ok: true, integratedSha: p.sha, next: `Call gate ${id} now (the helper runs ${integrationGate(it)} with direct vitest/tsc and a deadline time box; never run pnpm test/typecheck in main yourself). GREEN -> push, submit_work ${id}, report BACKLOG_TESTS, remove. Roll back only on verdict CODE_FAILURE.` };
     }
     if (action === 'rollback') {
       const wt = it.local.worktree;

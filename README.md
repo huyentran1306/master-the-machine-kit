@@ -1,4 +1,4 @@
-# Master the Machine Kit3 — 2.8.1
+# Master the Machine Kit3 — 2.8.2
 
 Team pack **Codex**, protocol 4, cho MTM Player. Bản 2.8.0 trên nhánh `codex/kit3_bou_v11`, cập nhật từ nền 2.7.7.
 
@@ -49,7 +49,11 @@ Repo chỉ chứa runtime Codex, tài liệu và fixture giả. Không đưa cre
 
 Use MTM Player **0.9.35**. Install into a fresh workspace using the Node command above (or `team-sdlc-pack/install.ps1`), then run the checker and require **READY**. In Player Init, select Codex, set the Codex CLI path to the installed **codex.exe** (absolute path), and choose the match-authorized model in Init. Keep previous match workspaces separate.
 
-## Changelog — 2.8.1 (nhánh `codex/kit3_tran_fastdispatch`)
+## Changelog — 2.8.2 (nhánh `codex/kit3_tran_fastdispatch`)
+- **Gate do helper chạy (tool `gate`):** vitest/tsc gọi thẳng binary trong node_modules (không qua pnpm), item có deadline chỉ chạy test của chính item, giới hạn thời gian chừa 1 phút để push + nộp. Kết quả GREEN / CODE_FAILURE / ENVIRONMENT; chỉ rollback khi CODE_FAILURE. Lượt set2 (31/10): BUG-03 READY phút 11.5, gate `pnpm test` mất 118 s, báo ELIFECYCLE dù 15/15 test đạt, `pnpm typecheck` treo, bị rollback nhầm, push phút 23.16 trễ deadline 10 giây. Chạy thẳng vitest: 1,9 s.
+- **Tắt verify-deps-before-run của pnpm** cho mọi lệnh shell của agent (`shell_environment_policy` trong codex.toml), như kit 2.3.4.
+
+## Changelog — 2.8.1
 - **Giao việc ngay khi đề mở:** tool mới `dispatch_ready` chạy start_work + worktree create cho MỌI item đang mở chưa có worker trong một lần gọi, trả về sẵn `spawn[]` (taskName + message) để orchestrator spawn hết trong cùng lượt. Mọi view có cảnh báo `!! DISPATCH NOW` kèm số phút item đã mở. Lượt tập 2.8.0: CR-01 mở phút 8 mà phút 14.2 mới giao, BUG-04 mở phút 12 mà 17.9 mới giao, vì orchestrator giao từng item một giữa các lượt phục vụ worker.
 - **Khôi phục nhanh khi model quá tải / phiên bị thay:** RESUME_GAME đánh dấu worktree của worker cũ là `orphaned`; `dispatch_ready` spawn lại worker trên đúng worktree (giữ commit, file chưa commit và port) với message bắt đầu bằng RESUME.
 - Vòng chờ worker 45s -> 20s để thấy đợt đề mới sớm hơn.

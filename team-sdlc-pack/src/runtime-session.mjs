@@ -35,6 +35,11 @@ import {
 const PREP_STAGES = ['GIT_AUTH', 'REPOSITORY', 'ENVIRONMENT', 'BUILD', 'MATCH_LOGIN'];
 const HELPER_ONLY_TYPES = new Set(['ORCHESTRATOR_STARTED', 'ORCHESTRATOR_RESTARTED', 'ENVIRONMENT_READY', 'GAME_MASTER_API', 'ORCHESTRATOR_ENDED']);
 const PLAYBOOK = { PI: 'backlog-pi', BUG: 'backlog-bug', CR: 'backlog-cr', TASK: 'backlog-task' };
+// A dispatched worktree with no file change and no commit this long after its spawn message probably
+// has no worker (spawn failed and was not retried, or the list was lost): re-offer it. Workers write
+// evidence or edit code within ~0.5-3 min in every rehearsal so far.
+const IDLE_WORKER_MS = 4 * 60000;
+const MAX_RESPAWNS = 2;
 
 export const DEFAULT_ADAPTER = {
   login: { strategy: 'auto', strategies: ['nextauth', 'form', 'json'] },
@@ -904,6 +909,8 @@ export class RuntimeSession {
     const al = [
       ...(undispatched.length && this.phase === 'GAME' && !['PAUSED', 'FINISHED'].includes(this.match.status)
         ? [`!! DISPATCH NOW: ${undispatched.join(', ')} have no worker. Call dispatch_ready and spawn every returned worker in this same turn, before servicing READY/messages.`] : []),
+      ...(this.phase === 'GAME' && !['PAUSED', 'FINISHED'].includes(this.match.status) && this.idleCandidates(now).length
+        ? [`!! CHECK WORKERS: ${this.idleCandidates(now).map(i => i.id).join(', ')} unchanged ${Math.round(IDLE_WORKER_MS / 60000)}+ min after dispatch. Call dispatch_ready and follow its respawnCheck (list_agents first; never start a second worker on a live one).`] : []),
       ...plannerAlerts(items, now, this.match.endsAt, { current, paused: this.phase === 'PAUSED', status: this.match.status }, this.adapter.planner),
       ...[...(this.localAlerts?.values() || [])].map((t) => `!! ${t}`),
       ...this.logProblems.splice(0).map((t) => `!! progress log: ${t}`),
@@ -1765,6 +1772,40 @@ export class RuntimeSession {
    * revealed at minute 8 or 12 waiting 4-6 minutes behind worker relays. Idempotent: an item that
    * already has a live worker is not returned again.
    */
+  /** HEAD + dirty file list of a worker copy: unchanged since dispatch means nobody is working there. */
+  async worktreeFingerprint(root) {
+    const head = await G.revParse(root, 'HEAD').catch(() => null);
+    const dirty = await G.statusPorcelain(root).catch(() => null);
+    return { head, dirty: Array.isArray(dirty) ? [...dirty].sort().join('\n') : null };
+  }
+
+  /** Dispatched items with an unchanged worktree for IDLE_WORKER_MS: candidates for a missing worker. */
+  idleCandidates(now = this.now()) {
+    return [...this.items.values()].filter((it) => {
+      const l = it.local || {};
+      const e = l.spawnEntry;
+      return e && !e.active && l.worktree && !l.ready && !l.parked && !l.worktree.integratedSha && !isSubmitted(it)
+        && e.respawns < MAX_RESPAWNS && now - e.at >= IDLE_WORKER_MS;
+    });
+  }
+
+  async idleWorkers() {
+    const out = [];
+    for (const it of this.idleCandidates()) {
+      const e = it.local.spawnEntry;
+      const fp = await this.worktreeFingerprint(it.local.worktree.worktreeRoot);
+      if (fp.head == null || fp.dirty == null) continue; // cannot tell: never guess a duplicate worker
+      if (fp.head !== e.head || fp.dirty !== e.dirty) { e.active = true; continue; } // someone is working there
+      const previousTaskName = e.taskName;
+      e.respawns += 1;
+      e.at = this.now();
+      e.taskName = `${previousTaskName.replace(/w\d+$/, '')}w${e.respawns}`;
+      out.push({ id: it.id, type: it.type, previousTaskName, taskName: e.taskName, idleMin: Math.round((this.now() - (it.local.dispatchedAt || e.at)) / 6000) / 10,
+        message: `NO-WORKER RESPAWN: this worktree had no change since dispatch; start the item from the beginning. ${e.message}` });
+    }
+    return out;
+  }
+
   async dispatch_ready() {
     if (this.phase !== 'GAME') return { ok: false, error: 'NOT_IN_GAME', next: this.nextHint() };
     if (['PAUSED', 'FINISHED'].includes(this.match.status)) return this.clean({ ok: false, error: `MATCH_${this.match.status}`, next: this.nextHint() });
@@ -1791,18 +1832,21 @@ export class RuntimeSession {
       const stop = c.workerStopAt ? new Date(c.workerStopAt).toISOString() : 'match end minus 5 minutes';
       const resumeText = c.resume ? `RESUME: preserved commit ${c.resume.commit}; do only the remaining step: ${c.resume.remainingStep}. `
         : orphaned ? 'RESUME: the previous worker on this item stopped when the session restarted. Its commits and uncommitted files are in this worktree: check git status and git log first, keep that work and continue it; do not restart. ' : '';
-      spawn.push({
+      const entry = {
         id: r.id, type: it.type, answerOnly: !!c.answerOnly,
         taskName: `${r.id.toLowerCase().replace(/[^a-z0-9]/g, '')}${it.local.dispatches > 1 ? `r${it.local.dispatches}` : ''}`,
         message: `${resumeText}Item ${r.id} (${it.type}${c.answerOnly ? ', answer-only: no dev server, build or full suite' : ''}).${c.answerOnly ? ` FAST PATH (points drop with every minute${it.type === 'PI' ? ', PI is ranked by submit order' : ''}): read brief.json + files/ (MCP material included) once, fill submit.json, run \`${c.validateAnswer}\`, commit, reply READY. No extra evidence or test.log unless the brief lists requiredEvidence; never install validators.` : ` Check the answer with \`${c.validateAnswer}\` (no installs).`} checkoutRoot = worktreeRoot = ${c.worktreeRoot}; folder ${c.folder}; matchRoot ${c.matchRoot}; briefFile ${c.brief?.briefFile}; filesDir ${c.brief?.filesDir}; answer ${c.answer?.submitJson || ''} (evidence in ${c.answer?.evidenceDir || ''}); ports dev=${c.ports?.dev} production=${c.ports?.production} (override fixed runner ports). Read briefFile first: it has the commands, playbook, checklist and organizer files. Work only in this worktree. Stop and return by ${stop} (Game Master clock). Commit the complete item (code, tests, evidence, answer) and reply STATUS READY or PARKED with COMMIT <sha>. Never push, submit, delegate or call Game APIs.`,
-      });
+      };
+      spawn.push(entry);
+      it.local.spawnEntry = { taskName: entry.taskName, message: entry.message, at: this.now(), respawns: 0, ...(await this.worktreeFingerprint(c.worktreeRoot)) };
     }
+    const respawnCheck = await this.idleWorkers();
     this.saveState();
     return this.clean({
-      ok: true, spawn, waiting,
-      next: spawn.length
+      ok: true, spawn, waiting, ...(respawnCheck.length ? { respawnCheck } : {}),
+      next: (respawnCheck.length ? `respawnCheck: ${respawnCheck.map(e => e.id).join(', ')} show no file change or commit ${Math.round(IDLE_WORKER_MS / 60000)}+ min after dispatch. For each: list_agents; if NO live agent has a task path ending in its previous taskName (${respawnCheck.map(e => e.previousTaskName).join(', ')}), spawn_agent with the entry's taskName and message exactly (same worktree); if one is alive, ignore the entry. ` : '') + (spawn.length
         ? `Spawn ALL ${spawn.length} worker(s) NOW, in this same turn, before anything else: one spawn_agent per entry with agent_type "team_feature_worker", fork_turns "none", task_name = taskName and message exactly as given (pick a model from allowedModels). If a spawn fails (e.g. "agent thread limit reached"), keep its entry and retry that same spawn right after the next wait_agent; the worktree already exists. Then service READY items.`
-        : waiting.length ? 'Nothing could be dispatched yet (see waiting); service READY, then wait.' : 'Every open item already has a worker; service READY, then wait.',
+        : waiting.length ? 'Nothing could be dispatched yet (see waiting); service READY, then wait.' : 'Every open item already has a worker; service READY, then wait.'),
       view: this.view(),
     });
   }
@@ -1943,6 +1987,7 @@ export class RuntimeSession {
 
   hasDispatchAction() {
     if (this.phase !== 'GAME' || ['PAUSED', 'FINISHED'].includes(this.match.status)) return false;
+    if (this.idleCandidates().length) return true; // dispatch_ready checks them (and clears the active ones)
     return rank([...this.items.values()], this.now(), this.match.endsAt, this.adapter.planner).ranked.some(r =>
       r.action === 'submit' || dispatchPolicy(this.items.get(r.id), [...this.items.values()].filter(i => !isSubmitted(i)), this.adapter.parallel, this.freeMemory()).allowed);
   }

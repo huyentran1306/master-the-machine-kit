@@ -115,3 +115,31 @@ test('validate-answer requires required evidence inside an "evidence" array, lik
   assert.ok(!checkSubmit(path.join(ans, 'submit.json'), null, { required: ['before.log'] }).some((p) => /REQUIRED_EVIDENCE/.test(p)));
   assert.equal(evidenceArrayRefs({ evidence: ['evidence/before.log'] }).has('evidence/before.log'), true);
 });
+
+test('a dispatched worktree with no change for 4 min is re-offered once per check; any change marks it active', async (t) => {
+  const { s } = shipFixture(t);
+  const add = async (id) => {
+    s.items.set(id, { id, type: 'BUG', deadlineAt: null, local: { startedAt: Date.now() } });
+    s.materialCache[id] = { files: {}, submitTemplate: { backlogId: id } };
+    const c = await s.worktree({ action: 'create', backlogItemKey: id });
+    assert.equal(c.ok, true, JSON.stringify(c));
+    s.items.get(id).local.spawnEntry = { taskName: id.toLowerCase().replace('-', ''), message: `Item ${id}`, at: s.now(), respawns: 0, ...(await s.worktreeFingerprint(c.worktreeRoot)) };
+    return c;
+  };
+  const idle = await add('BUG-81');
+  const busy = await add('BUG-82');
+  fs.writeFileSync(path.join(busy.matchRoot, 'answers-note.txt'), 'worker was here');
+  assert.equal((await s.idleWorkers()).length, 0, 'nothing before 4 minutes');
+  const real = s.now.bind(s); s.now = () => real() + 4.5 * 60000;
+  assert.equal(s.hasDispatchAction(), true, 'idle candidates wake the loop');
+  const r = await s.idleWorkers();
+  assert.deepEqual(r.map(e => e.id), ['BUG-81']);
+  assert.equal(r[0].previousTaskName, 'bug81');
+  assert.equal(r[0].taskName, 'bug81w1');
+  assert.match(r[0].message, /^NO-WORKER RESPAWN/);
+  assert.equal(s.items.get('BUG-82').local.spawnEntry.active, true);
+  assert.equal(await s.idleWorkers().then(x => x.length), 0, 'timer restarted after a re-offer');
+  s.items.get('BUG-81').local.ready = true;
+  s.now = () => real() + 10 * 60000;
+  assert.equal(await s.idleWorkers().then(x => x.length), 0, 'READY items are never re-offered');
+});

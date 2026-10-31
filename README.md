@@ -1,4 +1,4 @@
-# Master the Machine Kit3 — 2.8.2
+# Master the Machine Kit3 — 2.8.3
 
 Team pack **Codex**, protocol 4, cho MTM Player. Bản 2.8.0 trên nhánh `codex/kit3_bou_v11`, cập nhật từ nền 2.7.7.
 
@@ -49,7 +49,10 @@ Repo chỉ chứa runtime Codex, tài liệu và fixture giả. Không đưa cre
 
 Use MTM Player **0.9.35**. Install into a fresh workspace using the Node command above (or `team-sdlc-pack/install.ps1`), then run the checker and require **READY**. In Player Init, select Codex, set the Codex CLI path to the installed **codex.exe** (absolute path), and choose the match-authorized model in Init. Keep previous match workspaces separate.
 
-## Changelog — 2.8.2 (nhánh `codex/kit3_tran_fastdispatch`)
+## Changelog — 2.8.3 (nhánh `codex/kit3_tran_fastdispatch`)
+- `dispatch_ready` luôn giao TẤT CẢ item đang mở (bỏ tham số `max`). Lượt set2: orchestrator gọi `max:1` nên đợt 3 giao lần lượt ở phút 12.9 / 13.6 / 14.2 và đợt 4 ở 20.9 / 22.6 / 22.8 thay vì cùng lúc.
+
+## Changelog — 2.8.2
 - **Gate do helper chạy (tool `gate`):** vitest/tsc gọi thẳng binary trong node_modules (không qua pnpm), item có deadline chỉ chạy test của chính item, giới hạn thời gian chừa 1 phút để push + nộp. Kết quả GREEN / CODE_FAILURE / ENVIRONMENT; chỉ rollback khi CODE_FAILURE. Lượt set2 (31/10): BUG-03 READY phút 11.5, gate `pnpm test` mất 118 s, báo ELIFECYCLE dù 15/15 test đạt, `pnpm typecheck` treo, bị rollback nhầm, push phút 23.16 trễ deadline 10 giây. Chạy thẳng vitest: 1,9 s.
 - **Tắt verify-deps-before-run của pnpm** cho mọi lệnh shell của agent (`shell_environment_policy` trong codex.toml), như kit 2.3.4.
 

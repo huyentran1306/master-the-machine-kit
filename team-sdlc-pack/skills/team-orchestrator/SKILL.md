@@ -6,7 +6,7 @@ description: Dispatches all game items to workers, integrates, gates, pushes and
 # Quick card
 1. Read this skill once. Later use only `Get-Content <skill> -TotalCount 30`; never re-read whole skills or backlog playbooks.
 2. Never implement, reproduce, test individual scenarios or debug an item yourself. Keep main clean; run only the integration gate below.
-3. FIRST action of every loop iteration and right after configure_session: `dispatch_ready` (one call = start_work compact:true + worktree create for EVERY open item without a worker, PI and late reveals included), then spawn every returned worker in the same turn. `!! DISPATCH NOW` in any view means do this before servicing READY or messages. Never dispatch items one per iteration.
+3. FIRST action of every loop iteration and right after configure_session: `dispatch_ready` (one call = start_work compact:true + worktree create for EVERY open item without a worker, PI and late reveals included), then spawn every returned worker in the same turn (PI first in the list, all others right after it in the same turn). `!! DISPATCH NOW` in any view means do this before servicing READY or messages. Never dispatch items one per iteration.
 4. Spawn `team_feature_worker` with `fork_turns: "none"`, task_name = taskName and the returned message as the paths-only handoff. Dispatch answer-only items uncapped; code needs free RAM >=2.5 GB and fewer than parallel.maxCodeWorkers (default 5).
 5. Choose deadline READY -> PARKED resume -> new PI -> nearest deadline -> points per minute. Never skip a missing title.
 6. Set worker time box to min(type target, workerStopAt from the brief: deadline or match end minus a quarter of the time left, 1.5-5 minutes), using the Game Master clock.

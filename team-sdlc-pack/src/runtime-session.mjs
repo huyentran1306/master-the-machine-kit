@@ -1733,11 +1733,12 @@ export class RuntimeSession {
    * revealed at minute 8 or 12 waiting 4-6 minutes behind worker relays. Idempotent: an item that
    * already has a live worker is not returned again.
    */
-  async dispatch_ready({ max } = {}) {
+  async dispatch_ready() {
     if (this.phase !== 'GAME') return { ok: false, error: 'NOT_IN_GAME', next: this.nextHint() };
     if (['PAUSED', 'FINISHED'].includes(this.match.status)) return this.clean({ ok: false, error: `MATCH_${this.match.status}`, next: this.nextHint() });
     const plan = rank([...this.items.values()], this.now(), this.match.endsAt, this.adapter.planner).ranked.filter(r => r.action !== 'submit');
-    const picked = plan.slice(0, Math.max(1, Number(max) || plan.length));
+    // Always every open item: the set2 rehearsal called it with max:1 and wave items waited 1-2.5 min each.
+    const picked = plan;
     const needStart = picked.filter(r => !this.items.get(r.id)?.local?.startedAt || !this.readMaterial(r.id)).map(r => r.id);
     const startErrors = {};
     if (needStart.length) {

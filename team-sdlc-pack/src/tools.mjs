@@ -84,8 +84,8 @@ export const TOOLS = [
   {
     name: 'dispatch_ready',
     description: 'Dispatch EVERY open item in one call: start_work + worktree create for each item that has no worker (new reveals, PI, parked resumes, workers lost in a restart), within the RAM/code-worker policy. Returns spawn[] = {taskName, message}: spawn one team_feature_worker per entry in the same turn. Call it whenever the view shows DISPATCH NOW, after every submit and right after configure_session.',
-    inputSchema: obj({ max: { type: 'integer', minimum: 1, description: 'Optional cap on items dispatched in this call (default: all).' } }),
-    handler: (s, a) => s.dispatch_ready(a),
+    inputSchema: obj({}),
+    handler: (s) => s.dispatch_ready(),
   },
   {
     name: 'worktree',

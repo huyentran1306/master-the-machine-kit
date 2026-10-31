@@ -773,7 +773,10 @@ export class RuntimeSession {
     // and in full only now and then, so the audit trail stays readable inside the Player's budget.
     const routine = reason === 'refresh' || reason === 'poll' || reason === 'status-check';
     const sinceLogged = this.lastLoggedRefreshAt ? Date.now() - this.lastLoggedRefreshAt : Infinity;
-    const log = this.apiLogger(reason === 'login' ? 'LOGIN' : 'REFRESH_MATCH', null, { optional: routine && sinceLogged < 60000 });
+    // Past the soft limit (~180 KiB, reached after ~30 min in a 60-minute practice match) routine polls stay
+    // optional even once a minute, so they are dropped: only state-changing reads keep growing the log
+    // toward the Player's 256 KiB wall. K1SLTZLK (60 min) ended at 224 KiB, 175 KiB of it routine polls.
+    const log = this.apiLogger(reason === 'login' ? 'LOGIN' : 'REFRESH_MATCH', null, { optional: routine && (sinceLogged < 60000 || this.log?.pressure !== 'OK') });
     for (let attempt = 0; attempt < 2; attempt++) {
       if (!this.loggedIn && !noRelogin) {
         try {
@@ -1824,7 +1827,7 @@ export class RuntimeSession {
     }
     const appDir = this.appPath || this.matchRoot;
     const appRel = path.relative(this.checkoutRoot, appDir).split(path.sep).join('/');
-    const diff = await G.git(this.checkoutRoot, ['diff', '--name-only', `${wt.integrationBase || wt.mainBefore}`, wt.integratedSha]);
+    const diff = await G.git(this.checkoutRoot, ['diff', '--name-only', `${wt.mainBefore || wt.integrationBase}`, wt.integratedSha]);
     const own = itemTestFiles(diff.stdout.split('\n').filter(Boolean), appRel).filter((f) => fs.existsSync(path.join(appDir, f)));
     const scope = !full && (it.deadlineAt != null || leftMin < 8) && own.length ? 'item' : 'full';
     const { test, types } = gateCommands(appDir, { files: scope === 'item' ? own : [], recon: this.commands || {} });
@@ -1876,26 +1879,52 @@ export class RuntimeSession {
     if (isSubmitted(it)) return this.clean({ ok: true, stage: 'already-submitted', next: `${id} already has a receipt. Take NEXT.` });
     if (!it.local?.worktree) return { ok: false, stage: 'integrate', error: 'NO_WORKTREE', next: `No worker copy for ${id}: dispatch_ready.` };
     const steps = [];
-    if (!it.local.worktree.integratedSha) {
+    // Always integrate: an unchanged worker HEAD is a replay (no-op), while a fix-up commit made after a
+    // gate failure or a submit refusal is cherry-picked on top. Skipping integrate when integratedSha
+    // was set resubmitted the stale commit after every refusal.
+    {
       const r = await this.worktree({ action: 'integrate', backlogItemKey: id });
-      steps.push({ step: 'integrate', ok: r.ok, error: r.error || null });
+      steps.push({ step: 'integrate', ok: r.ok, error: r.error || null, replay: !!r.replay });
       if (!r.ok) return this.clean({ ok: false, stage: 'integrate', error: r.error, message: r.message, conflicts: r.conflicts, steps, next: r.next || 'Resolve as the integrate result says, then ship again.' });
     }
     const wt = it.local.worktree;
     const g = await this.gate({ backlogItemKey: id });
     steps.push({ step: 'gate', verdict: g.verdict, seconds: g.seconds ?? null });
     const leftNow = effectiveLeft(it, this.now(), this.match.endsAt).left;
-    if (g.verdict === 'CODE_FAILURE') return this.clean({ ok: false, stage: 'gate', verdict: g.verdict, tests: g.tests, types: g.types, steps, next: g.next });
+    if (g.verdict === 'CODE_FAILURE') {
+      // Roll back now (still inside the ship chain, before anything else is integrated): left in main,
+      // the failing commits would be pushed by the next ship and could then never be rolled back.
+      const rb = await this.worktree({ action: 'rollback', backlogItemKey: id }).catch((e) => ({ ok: false, error: e.message }));
+      steps.push({ step: 'rollback', ok: !!rb.ok, error: rb.error || null });
+      return this.clean({ ok: false, stage: 'gate', verdict: g.verdict, tests: g.tests, types: g.types, steps, rolledBack: !!rb.ok,
+        next: rb.ok ? `Main restored (revert commits). Send the worker .mtm-notes/gate-${id}-*.log and retryBaseSha ${rb.retryBaseSha} for a fix-up (rebase onto current main, verify, commit, READY), then ship ${id} again. Ship other READY items now.`
+          : `${g.next} Automatic rollback failed (${rb.error}): do not ship another item until main is restored.` });
+    }
     if (g.verdict === 'ENVIRONMENT' && !force && !(leftNow != null && leftNow <= 3)) {
       return this.clean({ ok: false, stage: 'gate', verdict: g.verdict, tests: g.tests, types: g.types, steps, next: `${g.next} To submit the worker-verified commit now, call ship ${id} with force:true.` });
     }
     // Truthful test record from the gate run itself (code items; answer-only items have none).
-    const counts = (text) => { const m = String(text || '').match(/Tests\s+(?:(\d+) failed\s*\|\s*)?(\d+) passed(?:\s*\|\s*(\d+) skipped)?/); return m ? { failed: Number(m[1] || 0), passed: Number(m[2]), skipped: Number(m[3] || 0) } : null; };
+    // vitest "Tests  1 failed | 2 passed (3)" and jest "Tests:  1 failed, 2 passed, 3 total".
+    const counts = (text) => {
+      const line = (String(text || '').match(/Tests:?\s+[^\u00b7]*/) || [])[0];
+      if (!line) return null;
+      const n = (w) => Number((line.match(new RegExp(`(\\d+) ${w}`)) || [])[1] || 0);
+      const r = { failed: n('failed'), passed: n('passed'), skipped: n('skipped') };
+      return r.passed || r.failed ? r : null;
+    };
     const c = g.verdict === 'GREEN' ? counts(g.tests?.summary) : null;
+    let recorded = false;
     if (c && c.passed > 0 && !it.local.answerOnly) {
-      const prevReq = this.lastTests?.[id]?.required ?? 0;
-      await this.report_progress({ event: { type: 'BACKLOG_TESTS', backlogId: id, status: 'PASSED', required: prevReq, executed: c.passed + c.failed, passed: c.passed, failed: 0, skipped: c.skipped, summary: oneLine(`Integration gate in main (${g.scope === 'item' ? "item's own tests" : 'full suite'}): ${g.tests.summary}; typecheck exit ${g.types?.exit ?? 'n/a'}.`) } });
+      const executed = c.passed + c.failed + c.skipped;
+      const prevReq = Math.min(this.lastTests?.[id]?.required ?? 0, c.passed); // the Player requires executed >= required for PASSED
+      const rp = await this.report_progress({ event: { type: 'BACKLOG_TESTS', backlogId: id, status: 'PASSED', required: prevReq, executed, passed: c.passed, failed: 0, skipped: c.skipped, summary: oneLine(`Integration gate in main (${g.scope === 'item' ? "item's own tests" : 'full suite'}): ${g.tests.summary}; typecheck exit ${g.types?.exit ?? 'n/a'}.`) } });
+      recorded = rp?.ok !== false;
     }
+    // A forced/late ENVIRONMENT gate, or a GREEN run whose output could not be counted, has no test record:
+    // without this the submit preflight refused AFTER the push ("no test run reported").
+    const untested = !recorded && !it.local.answerOnly
+      ? { allowUntested: true, reason: g.verdict === 'GREEN' ? `integration gate GREEN (exit 0) but its output had no countable test summary: ${g.tests?.summary || 'none'}` : `integration gate ${g.verdict} (tooling/timeout, no failing assertion); the worker verified MVS and suite in its worktree; ${force ? 'forced' : 'last 3 minutes'}` }
+      : {};
     // Push the assigned branch (fast-forward only; never forced).
     const branch = this.repository.branch;
     const cur = (await G.git(this.checkoutRoot, ['rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim();
@@ -1904,7 +1933,7 @@ export class RuntimeSession {
     steps.push({ step: 'push', ok: p.code === 0 });
     if (p.code !== 0) return this.clean({ ok: false, stage: 'push', error: p.timedOut ? 'PUSH_TIMEOUT' : 'PUSH_REJECTED', message: (p.stderr || p.stdout).trim().slice(0, 400), steps, next: 'Recovery flow for a rejected push (pull --rebase, gate, push; never force), then ship again: it continues from the integrated commit.' });
     await G.git(this.checkoutRoot, ['fetch', '--quiet', 'origin', branch], { timeoutMs: 30000 }); // refresh the tracking ref for the submit preflight
-    const s = await this.submit_work({ backlogItemKey: id, gitRevision: wt.integratedSha });
+    const s = await this.submit_work({ backlogItemKey: id, gitRevision: wt.integratedSha, ...untested });
     steps.push({ step: 'submit', ok: !!s.ok, outcome: s.outcome || s.error || null });
     if (!s.ok) return this.clean({ ok: false, stage: 'submit', error: s.error || 'SUBMIT_REFUSED', errors: s.errors, steps, next: s.next || 'Fix what the preflight lists (commit in the worker copy, ship again), or replay submit_work unchanged on UNCERTAIN.' });
     const rm = await this.worktree({ action: 'remove', backlogItemKey: id }).catch(() => ({ ok: false }));

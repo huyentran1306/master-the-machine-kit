@@ -73,5 +73,5 @@ export function assertionFailure(r, kind) {
 /** Summary line of a vitest/jest/node --test run. */
 export function testSummary(text = '') {
   const pick = (re) => (text.match(re) || [])[0];
-  return [pick(/Test Files .*/), pick(/Tests\s+.*/), pick(/# pass \d+/), pick(/# fail \d+/)].filter(Boolean).join(' · ') || null;
+  return [pick(/Test Files .*/), pick(/Tests:?\s+.*/), pick(/# pass \d+/), pick(/# fail \d+/)].filter(Boolean).join(' · ') || null;
 }

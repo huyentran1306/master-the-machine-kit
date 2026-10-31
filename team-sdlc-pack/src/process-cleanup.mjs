@@ -27,13 +27,16 @@ export async function stopWorktreeProcesses(root) {
   if (!root || !path.isAbsolute(root)) throw new Error('An absolute worktree path is required');
   let rows;
   if (process.platform === 'win32') {
-    const { stdout } = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CommandLine | ConvertTo-Json -Compress'], { windowsHide: true, maxBuffer: 8_000_000 });
-    rows = JSON.parse(stdout || '[]');
-    if (!Array.isArray(rows)) rows = [rows];
+    // Bounded: a hung WMI query must not hold the helper lock (worktree remove) for the rest of the match.
+    try {
+      const { stdout } = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CommandLine | ConvertTo-Json -Compress'], { windowsHide: true, maxBuffer: 8_000_000, timeout: 20000 });
+      rows = JSON.parse(stdout || '[]');
+      if (!Array.isArray(rows)) rows = [rows];
+    } catch { rows = []; }
   } else {
     // macOS has no /proc: `ps` works on macOS and Linux and also gives the parent pid we must not kill.
     try {
-      const { stdout } = await exec('ps', ['-axww', '-o', 'pid=,ppid=,command='], { maxBuffer: 16_000_000 });
+      const { stdout } = await exec('ps', ['-axww', '-o', 'pid=,ppid=,command='], { maxBuffer: 16_000_000, timeout: 20000 });
       rows = parsePs(stdout);
     } catch {
       rows = fs.existsSync('/proc') ? fs.readdirSync('/proc').filter(n => /^\d+$/.test(n)).flatMap(n => {

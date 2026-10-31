@@ -1,4 +1,4 @@
-# Master the Machine Kit3 — 2.8.7
+# Master the Machine Kit3 — 2.8.8
 
 Team pack **Codex**, protocol 4, cho MTM Player. Bản 2.8.0 trên nhánh `codex/kit3_bou_v11`, cập nhật từ nền 2.7.7.
 
@@ -48,6 +48,17 @@ Repo chỉ chứa runtime Codex, tài liệu và fixture giả. Không đưa cre
 ## Windows contest machine
 
 Use MTM Player **0.9.35**. Install into a fresh workspace using the Node command above (or `team-sdlc-pack/install.ps1`), then run the checker and require **READY**. In Player Init, select Codex, set the Codex CLI path to the installed **codex.exe** (absolute path), and choose the match-authorized model in Init. Keep previous match workspaces separate.
+
+## Changelog — 2.8.8 (nhánh `codex/kit3_tran_fastdispatch`)
+Review độc lập toàn bộ thay đổi từ 2.8.0; mỗi lỗi dưới đây có test tái hiện (fail trên 2.8.7, pass trên 2.8.8).
+- **Gate CODE_FAILURE tự rollback ngay trong `ship`.** Trước đây commit đỏ nằm lại trong main; item kế tiếp ship sẽ push luôn code đỏ lên origin và nằm trong bài nộp của item đó, rồi không rollback được nữa.
+- **Ship lại sau khi bị preflight trả về nay lấy commit sửa của worker.** Trước đây ship bỏ qua integrate khi đã có integratedSha nên nộp lại đúng commit cũ, lặp tới hết giờ.
+- **`ship force:true` / 3 phút cuối với gate ENVIRONMENT không còn bị từ chối sau khi đã push** ("no test run reported"): nộp kèm `allowUntested` và lý do. Gate GREEN mà không đọc được số test (jest) cũng vậy; giờ đọc được cả định dạng jest.
+- `validate-answer` kiểm evidence bắt buộc đúng như preflight (chỉ tính mảng `evidence`).
+- Gate tính "test của item" theo đúng các commit của item (`mainBefore..integratedSha`), không lẫn test của item khác.
+- BACKLOG_TESTS từ ship không vi phạm luật `executed >= required` của Player.
+- Liệt kê tiến trình (`ps`, PowerShell WMI) có timeout 20 s: không treo khoá helper khi `worktree remove`.
+- **Log tiến độ:** sau mốc 180 KiB, lượt đọc trang trận định kỳ không còn ghi; trận 60 phút K1SLTZLK lên 224 KiB / 256 KiB, 175 KiB là các lượt đọc này.
 
 ## Changelog — 2.8.7 (nhánh `codex/kit3_tran_fastdispatch`)
 - Lượt đề thật RBKTH8OM (2.8.6, sol medium): **1000/1000**, nộp cuối phút 25,7, 182,9 credit, cả 10 item nộp 1 lần là qua.

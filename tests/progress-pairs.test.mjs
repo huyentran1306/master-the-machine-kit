@@ -56,3 +56,19 @@ test('a retried request reopens its pair with the same request object', () => {
   const phases = fs.readFileSync(path.join(dir, 'M.progress.ndjson'), 'utf8').trim().split('\n').map(l => JSON.parse(l).phase);
   assert.deepEqual(phases, ['REQUESTED', 'FAILED', 'REQUESTED', 'SUCCEEDED']);
 });
+
+test('past the soft limit, routine match polls are dropped as whole pairs', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-'));
+  const s = shell(path.join(dir, 'M.progress.ndjson'));
+  s.log.bytes = LOG_SOFT_LIMIT + 10;
+  s.lastLoggedRefreshAt = Date.now() - 120000; // a minute since the last full log: before, this forced a mandatory pair
+  s.matchPageUrl = 'https://example.test/match/X';
+  s.matchUrl = () => s.matchPageUrl;
+  s.loggedIn = true;
+  const before = s.log.written;
+  const log = s.apiLogger('REFRESH_MATCH', null, { optional: true && (Date.now() - s.lastLoggedRefreshAt < 60000 || s.log.pressure !== 'OK') });
+  const req = { method: 'GET', url: 'https://example.test/match/X' };
+  await log('REQUESTED', req); await log('SUCCEEDED', req, { status: 200 });
+  assert.equal(s.log.written, before);
+  assert.equal(s.log.pressure, 'HIGH');
+});

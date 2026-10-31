@@ -76,6 +76,12 @@ export const TOOLS = [
     handler: (s, a) => s.build_slot(a),
   },
   {
+    name: 'ship',
+    description: 'READY -> SUBMITTED in ONE call: integrate (if needed) -> gate -> BACKLOG_TESTS from the gate run -> git push (fast-forward only) -> submit_work -> worktree remove. Calls are serialized. Stops and returns {stage, error, next} on any refusal: CONFLICT/MAIN_DIRTY at integrate, CODE_FAILURE at gate (roll back + worker fix-up), ENVIRONMENT at gate (retry, or force:true to submit the worker-verified commit), push rejection, submit preflight errors. Use it for every READY item instead of the separate steps.',
+    inputSchema: obj({ backlogItemKey: key, force: { type: 'boolean', description: 'Only after an ENVIRONMENT gate verdict: submit the worker-verified commit anyway.' } }, ['backlogItemKey']),
+    handler: (s, a) => s.ship(a),
+  },
+  {
     name: 'gate',
     description: 'Integration gate for an integrated item, run by the helper: direct vitest/tsc (no pnpm), the item\'s own test files for deadline items, time box that leaves a minute to push and submit. verdict GREEN -> push + submit_work; CODE_FAILURE -> worktree rollback + worker fix-up; ENVIRONMENT (timeout/hang/tool noise) -> never roll back, retry once or submit the worker-verified commit. Logs in .mtm-notes/gate-<ID>-*.log.',
     inputSchema: obj({ backlogItemKey: key, full: { type: 'boolean', description: 'Force the full suite even for a deadline item.' } }, ['backlogItemKey']),

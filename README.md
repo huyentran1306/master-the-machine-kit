@@ -1,4 +1,4 @@
-# Master the Machine Kit3 — 2.8.4
+# Master the Machine Kit3 — 2.8.5
 
 Team pack **Codex**, protocol 4, cho MTM Player. Bản 2.8.0 trên nhánh `codex/kit3_bou_v11`, cập nhật từ nền 2.7.7.
 
@@ -49,7 +49,11 @@ Repo chỉ chứa runtime Codex, tài liệu và fixture giả. Không đưa cre
 
 Use MTM Player **0.9.35**. Install into a fresh workspace using the Node command above (or `team-sdlc-pack/install.ps1`), then run the checker and require **READY**. In Player Init, select Codex, set the Codex CLI path to the installed **codex.exe** (absolute path), and choose the match-authorized model in Init. Keep previous match workspaces separate.
 
-## Changelog — 2.8.4 (nhánh `codex/kit3_tran_fastdispatch`)
+## Changelog — 2.8.5 (nhánh `codex/kit3_tran_fastdispatch`)
+- **Tool `ship <ID>`:** một lần gọi helper làm trọn READY → integrate → gate → BACKLOG_TESTS (số liệu thật từ lần gate) → git push (chỉ fast-forward, không bao giờ force) → submit_work → xoá worktree. Các lần ship chạy lần lượt (không giẫm main). Dừng và trả `{stage, error, next}` ở mọi chỗ bị từ chối: CONFLICT/MAIN_DIRTY, gate CODE_FAILURE (không push, không nộp), ENVIRONMENT (thử lại hoặc `force:true` khi gần deadline), push bị từ chối, preflight nộp. Lượt set2: item READY phải chờ orchestrator 3,5–7 phút; worker CR-02 xong sau 7,7 phút nhưng nộp sau 14,9 phút.
+- Gate không còn báo GREEN khi không tìm thấy trình chạy test nào; thời gian gate tối đa 90 s; `tool_timeout_sec` của MCP 300 s (ship gồm gate + push + nộp).
+
+## Changelog — 2.8.4
 - **PI / item chỉ trả lời nộp nhanh hơn:** lệnh kiểm tra đáp án có sẵn `node <pack>/src/validate-answer.mjs <submit.json> <schema>` (cùng bộ kiểm của helper) được gửi kèm trong message giao việc; worker không cần cài jsonschema/ajv. Message của item trả lời có "FAST PATH": đọc brief một lần, điền submit.json, chạy lệnh kiểm, commit, READY; không tạo evidence thừa. Lượt set2: PI-01 có đáp án ở phút 2,3 sau khi giao nhưng mất thêm 2,4 phút cài validator và viết test.log, nộp sau 6,4 phút nên về thứ 2.
 
 ## Changelog — 2.8.3

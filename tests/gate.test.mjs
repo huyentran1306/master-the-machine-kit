@@ -25,7 +25,7 @@ function fixture(t) {
   const app = path.join(root, 'assigned', 'src');
   fs.mkdirSync(path.join(app, 'tests'), { recursive: true });
   fs.writeFileSync(path.join(app, 'tsconfig.json'), '{}');
-  fs.writeFileSync(path.join(root, '.gitignore'), 'node_modules/\n');
+  fs.writeFileSync(path.join(root, '.gitignore'), 'node_modules\n');
   fs.writeFileSync(path.join(app, 'a.ts'), 'export const a = 1;\n');
   git(root, 'add', '-A'); git(root, 'commit', '-qm', 'base');
   const base = git(root, 'rev-parse', 'HEAD');
@@ -84,4 +84,65 @@ test('validate-answer checks schema, status, backlogId and evidence without inst
   assert.ok(bad.some((p) => /NOT_STARTED/.test(p))); assert.ok(bad.some((p) => /schema/.test(p))); assert.ok(bad.some((p) => /missing evidence\/x\.log/.test(p)));
   fs.writeFileSync(path.join(ans, 'submit.json'), JSON.stringify({ backlogId: 'PI-07', status: 'DONE', rootCause: 'cache' }));
   assert.deepEqual(checkSubmit(path.join(ans, 'submit.json'), schema), []);
+});
+
+test('ship goes READY -> integrate -> gate -> BACKLOG_TESTS -> push -> submit -> remove in one call and stops on refusals', async (t) => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kit3-ship-'));
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const remote = path.join(tmp, 'remote.git'); const root = path.join(tmp, 'checkout');
+  execFileSync('git', ['init', '-q', '--bare', '-b', 'main', remote]);
+  execFileSync('git', ['clone', '-q', remote, root]);
+  git(root, 'config', 'user.name', 'F'); git(root, 'config', 'user.email', 'f@example.invalid'); git(root, 'checkout', '-q', '-b', 'main');
+  const app = path.join(root, 'assigned', 'src'); fs.mkdirSync(path.join(app, 'tests'), { recursive: true });
+  fs.writeFileSync(path.join(app, 'tsconfig.json'), '{}'); fs.writeFileSync(path.join(root, '.gitignore'), 'node_modules\n');
+  fs.writeFileSync(path.join(app, 'a.ts'), 'export const a = 1;\n');
+  git(root, 'add', '-A'); git(root, 'commit', '-qm', 'base'); git(root, 'push', '-q', '-u', 'origin', 'main');
+  for (const [dir, file] of [['vitest', 'vitest.mjs'], ['typescript/bin', 'tsc']]) {
+    const d = path.join(app, 'node_modules', dir); fs.mkdirSync(d, { recursive: true });
+    fs.writeFileSync(path.join(d, file), `import fs from 'node:fs'; const m=fs.readFileSync(${JSON.stringify(path.join(app, 'node_modules', 'mode'))},'utf8').trim(); if(m==='fail'){console.log(' FAIL x\\n      Tests  1 failed | 2 passed (3)');process.exit(1)} console.log(' Test Files  1 passed (1)\\n      Tests  4 passed (4)');`);
+    if (file === 'tsc') fs.writeFileSync(path.join(d, file), `console.log('ok')`);
+  }
+  const mode = (m) => fs.writeFileSync(path.join(app, 'node_modules', 'mode'), m);
+  const s = new RuntimeSession({ teamWorkspace: root });
+  s.checkoutRoot = root; s.matchRoot = path.join(root, 'assigned'); s.appPath = app; s.repository = { folder: 'assigned', branch: 'main' };
+  s.phase = 'GAME'; s.match.status = 'IN_PROGRESS'; s.match.endsAt = Date.now() + 25 * 60000; s.freeMemory = () => 8 * 1024 ** 3;
+  s.materialCache = {};
+  const events = []; s.report_progress = async ({ event }) => { events.push(event); s.lastTests = { ...(s.lastTests || {}), [event.backlogId]: event }; return { ok: true }; };
+  const submits = []; s.submit_work = async (a) => { submits.push(a); s.items.get(a.backlogItemKey).local.receiptId = 'r' + submits.length; return { ok: true, outcome: 'SUBMITTED', receipt: { receiptId: 'r1' }, gitRevision: a.gitRevision }; };
+  const mk = async (id) => {
+    s.items.set(id, { id, type: 'BUG', deadlineAt: Date.now() + 10 * 60000, local: { startedAt: Date.now() } });
+    s.materialCache[id] = { files: {}, submitTemplate: { backlogId: id } };
+    const c = await s.worktree({ action: 'create', backlogItemKey: id });
+    assert.equal(c.ok, true, JSON.stringify(c));
+    const wapp = path.join(c.matchRoot, 'src');
+    fs.writeFileSync(path.join(wapp, `${id.toLowerCase()}.ts`), `export const a = '${id}';\n`);
+    fs.mkdirSync(path.join(wapp, 'tests'), { recursive: true });
+    fs.writeFileSync(path.join(wapp, 'tests', `${id.toLowerCase()}.test.ts`), 'x');
+    git(c.worktreeRoot, 'add', '-A'); git(c.worktreeRoot, 'commit', '-qm', `${id}: fix`);
+    s.items.get(id).local.ready = true;
+    return c;
+  };
+  await mk('BUG-71');
+  mode('green');
+  const r = await s.ship({ backlogItemKey: 'BUG-71' });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.deepEqual(r.steps.map((x) => x.step), ['integrate', 'gate', 'push', 'submit', 'remove']);
+  assert.equal(git(remote, 'rev-parse', 'main'), s.items.get('BUG-71').local.worktree?.integratedSha ?? git(root, 'rev-parse', 'HEAD'));
+  assert.equal(submits[0].gitRevision, git(root, 'rev-parse', 'HEAD'));
+  assert.equal(events[0]?.type, 'BACKLOG_TESTS', JSON.stringify(r.gate)); assert.equal(events[0].passed, 4);
+  assert.equal(s.items.get('BUG-71').local.worktree, undefined, 'worker copy removed');
+
+  await mk('BUG-72'); mode('fail');
+  const f = await s.ship({ backlogItemKey: 'BUG-72' });
+  assert.equal(f.ok, false); assert.equal(f.stage, 'gate', JSON.stringify(f).slice(0, 600)); assert.equal(f.verdict, 'CODE_FAILURE');
+  assert.equal(submits.length, 1, 'nothing submitted on a red gate');
+  assert.notEqual(git(remote, 'rev-parse', 'main'), git(root, 'rev-parse', 'HEAD'), 'nothing pushed on a red gate');
+  // Remote moved by someone else: push is refused, never forced.
+  mode('green');
+  const other = path.join(tmp, 'other'); execFileSync('git', ['clone', '-q', remote, other]);
+  git(other, 'config', 'user.name', 'O'); git(other, 'config', 'user.email', 'o@example.invalid');
+  fs.writeFileSync(path.join(other, 'x.txt'), 'x'); git(other, 'add', '-A'); git(other, 'commit', '-qm', 'other'); git(other, 'push', '-q', 'origin', 'HEAD:main');
+  const pr = await s.ship({ backlogItemKey: 'BUG-72' });
+  assert.equal(pr.ok, false); assert.equal(pr.stage, 'push'); assert.equal(pr.error, 'PUSH_REJECTED');
+  assert.equal(submits.length, 1);
 });

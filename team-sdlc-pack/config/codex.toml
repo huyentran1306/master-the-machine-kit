@@ -10,4 +10,4 @@ set = { npm_config_verify_deps_before_run = "false", pnpm_config_verify_deps_bef
 command = "node"
 args = ["../team-sdlc-pack/runtime/bin/runtime-server.mjs"]
 startup_timeout_sec = 15
-tool_timeout_sec = 120
+tool_timeout_sec = 300

@@ -79,6 +79,7 @@ export class RuntimeSession {
     this.state = { submissions: {}, items: {}, loginPreferred: null, envReady: null, current: null };
     this.lock = Promise.resolve();
     this.submissionsInFlight = new Set();
+    this.shipChain = Promise.resolve(); // ship() calls run one at a time: main checkout, gate and push are shared
     this.poller = null;
     this.lastPollError = null;
   }
@@ -1801,7 +1802,7 @@ export class RuntimeSession {
     const own = itemTestFiles(diff.stdout.split('\n').filter(Boolean), appRel).filter((f) => fs.existsSync(path.join(appDir, f)));
     const scope = !full && (it.deadlineAt != null || leftMin < 8) && own.length ? 'item' : 'full';
     const { test, types } = gateCommands(appDir, { files: scope === 'item' ? own : [], recon: this.commands || {} });
-    const budgetSec = forcedBudget || Math.round(Math.max(20, Math.min(100, leftMin * 60 - 60))); // forcedBudget: tests only (not in the tool schema)
+    const budgetSec = forcedBudget || Math.round(Math.max(20, Math.min(90, leftMin * 60 - 60))); // forcedBudget: tests only (not in the tool schema)
     const notes = path.join(this.checkoutRoot, '.mtm-notes');
     fs.mkdirSync(notes, { recursive: true });
     G.ensureExcluded(this.checkoutRoot, '/.mtm-notes/');
@@ -1812,7 +1813,8 @@ export class RuntimeSession {
       test ? runBounded(test, { cwd: appDir, env, timeoutMs: budgetSec * 1000, logFile: path.join(notes, `gate-${id}-tests.log`) }) : null,
       types ? runBounded(types, { cwd: appDir, env, timeoutMs: budgetSec * 1000, logFile: path.join(notes, `gate-${id}-types.log`) }) : null,
     ]);
-    const green = (!tr || tr.exit === 0) && (!ty || ty.exit === 0);
+    // Nothing runnable found is not a green gate: treat it like an environment problem.
+    const green = !!(tr || ty) && (!tr || tr.exit === 0) && (!ty || ty.exit === 0);
     const code = assertionFailure(tr, 'tests') || assertionFailure(ty, 'types');
     const verdict = green ? 'GREEN' : code ? 'CODE_FAILURE' : 'ENVIRONMENT';
     const leftNow = effectiveLeft(it, this.now(), this.match.endsAt).left;
@@ -1825,6 +1827,63 @@ export class RuntimeSession {
       : leftNow != null && leftNow <= 3 ? `ENVIRONMENT problem, not a code failure${leftTxt}: do NOT roll back. Push and submit_work ${id} NOW with the worker-verified commit.`
       : `ENVIRONMENT problem (timeout/hang/tool exit without a failing test), not a code failure: do NOT roll back. Call gate ${id} once more; if it repeats, push and submit_work (the worker already passed MVS + suite on its worktree).`;
     return this.clean({ ok: verdict === 'GREEN', verdict, scope, files: scope === 'item' ? own : 'full suite', budgetSec, seconds: Math.round((Date.now() - t0) / 100) / 10, tests: part(tr, test?.label), types: part(ty, types?.label), next });
+  }
+
+  /**
+   * One call from READY to SUBMITTED: integrate -> gate -> BACKLOG_TESTS -> push -> submit_work -> remove.
+   * The orchestrator used to do these as 5-8 separate model turns per item, interleaved with worker
+   * relays; in the set2 rehearsal READY items waited 3.5-7 minutes in that queue. Every safety check of
+   * the separate steps still applies (integrate guards, gate verdicts, push refusal, submit preflight);
+   * nothing is forced: on any refusal ship stops and returns the step and its next action.
+   */
+  async ship(args = {}) {
+    const run = this.shipChain.then(() => this.shipOne(args), () => this.shipOne(args));
+    this.shipChain = run.catch(() => {});
+    return run;
+  }
+
+  async shipOne({ backlogItemKey, force = false } = {}) {
+    const id = String(backlogItemKey || '').trim();
+    const t0 = Date.now();
+    const it = this.items.get(id);
+    if (!it) return { ok: false, error: 'UNKNOWN_ITEM' };
+    if (isSubmitted(it)) return this.clean({ ok: true, stage: 'already-submitted', next: `${id} already has a receipt. Take NEXT.` });
+    if (!it.local?.worktree) return { ok: false, stage: 'integrate', error: 'NO_WORKTREE', next: `No worker copy for ${id}: dispatch_ready.` };
+    const steps = [];
+    if (!it.local.worktree.integratedSha) {
+      const r = await this.worktree({ action: 'integrate', backlogItemKey: id });
+      steps.push({ step: 'integrate', ok: r.ok, error: r.error || null });
+      if (!r.ok) return this.clean({ ok: false, stage: 'integrate', error: r.error, message: r.message, conflicts: r.conflicts, steps, next: r.next || 'Resolve as the integrate result says, then ship again.' });
+    }
+    const wt = it.local.worktree;
+    const g = await this.gate({ backlogItemKey: id });
+    steps.push({ step: 'gate', verdict: g.verdict, seconds: g.seconds ?? null });
+    const leftNow = effectiveLeft(it, this.now(), this.match.endsAt).left;
+    if (g.verdict === 'CODE_FAILURE') return this.clean({ ok: false, stage: 'gate', verdict: g.verdict, tests: g.tests, types: g.types, steps, next: g.next });
+    if (g.verdict === 'ENVIRONMENT' && !force && !(leftNow != null && leftNow <= 3)) {
+      return this.clean({ ok: false, stage: 'gate', verdict: g.verdict, tests: g.tests, types: g.types, steps, next: `${g.next} To submit the worker-verified commit now, call ship ${id} with force:true.` });
+    }
+    // Truthful test record from the gate run itself (code items; answer-only items have none).
+    const counts = (text) => { const m = String(text || '').match(/Tests\s+(?:(\d+) failed\s*\|\s*)?(\d+) passed(?:\s*\|\s*(\d+) skipped)?/); return m ? { failed: Number(m[1] || 0), passed: Number(m[2]), skipped: Number(m[3] || 0) } : null; };
+    const c = g.verdict === 'GREEN' ? counts(g.tests?.summary) : null;
+    if (c && c.passed > 0 && !it.local.answerOnly) {
+      const prevReq = this.lastTests?.[id]?.required ?? 0;
+      await this.report_progress({ event: { type: 'BACKLOG_TESTS', backlogId: id, status: 'PASSED', required: prevReq, executed: c.passed + c.failed, passed: c.passed, failed: 0, skipped: c.skipped, summary: oneLine(`Integration gate in main (${g.scope === 'item' ? "item's own tests" : 'full suite'}): ${g.tests.summary}; typecheck exit ${g.types?.exit ?? 'n/a'}.`) } });
+    }
+    // Push the assigned branch (fast-forward only; never forced).
+    const branch = this.repository.branch;
+    const cur = (await G.git(this.checkoutRoot, ['rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim();
+    if (cur !== branch) return this.clean({ ok: false, stage: 'push', error: 'NOT_ON_BRANCH', message: `main checkout is on ${cur}, expected ${branch}`, steps, next: 'Recovery flow: check out the assigned branch; never push another branch.' });
+    const p = await G.git(this.checkoutRoot, ['push', 'origin', `HEAD:refs/heads/${branch}`], { timeoutMs: 60000 });
+    steps.push({ step: 'push', ok: p.code === 0 });
+    if (p.code !== 0) return this.clean({ ok: false, stage: 'push', error: p.timedOut ? 'PUSH_TIMEOUT' : 'PUSH_REJECTED', message: (p.stderr || p.stdout).trim().slice(0, 400), steps, next: 'Recovery flow for a rejected push (pull --rebase, gate, push; never force), then ship again: it continues from the integrated commit.' });
+    await G.git(this.checkoutRoot, ['fetch', '--quiet', 'origin', branch], { timeoutMs: 30000 }); // refresh the tracking ref for the submit preflight
+    const s = await this.submit_work({ backlogItemKey: id, gitRevision: wt.integratedSha });
+    steps.push({ step: 'submit', ok: !!s.ok, outcome: s.outcome || s.error || null });
+    if (!s.ok) return this.clean({ ok: false, stage: 'submit', error: s.error || 'SUBMIT_REFUSED', errors: s.errors, steps, next: s.next || 'Fix what the preflight lists (commit in the worker copy, ship again), or replay submit_work unchanged on UNCERTAIN.' });
+    const rm = await this.worktree({ action: 'remove', backlogItemKey: id }).catch(() => ({ ok: false }));
+    steps.push({ step: 'remove', ok: !!rm.ok });
+    return this.clean({ ok: true, stage: 'submitted', outcome: s.outcome, receipt: s.receipt, gitRevision: s.gitRevision, gate: { verdict: g.verdict, scope: g.scope, summary: g.tests?.summary || null }, steps, seconds: Math.round((Date.now() - t0) / 100) / 10, next: 'Submitted. Ship the next READY item, then dispatch_ready.' });
   }
 
   hasDispatchAction() {
@@ -1964,7 +2023,7 @@ export class RuntimeSession {
       delete wt.retryBaseSha;
       it.local.owner = 'orchestrator';
       this.saveState();
-      return { ok: true, integratedSha: p.sha, next: `Call gate ${id} now (the helper runs ${integrationGate(it)} with direct vitest/tsc and a deadline time box; never run pnpm test/typecheck in main yourself). GREEN -> push, submit_work ${id}, report BACKLOG_TESTS, remove. Roll back only on verdict CODE_FAILURE.` };
+      return { ok: true, integratedSha: p.sha, next: `Prefer ship ${id} (does all of this in one call). Otherwise call gate ${id} now (the helper runs ${integrationGate(it)} with direct vitest/tsc and a deadline time box; never run pnpm test/typecheck in main yourself). GREEN -> push, submit_work ${id}, report BACKLOG_TESTS, remove. Roll back only on verdict CODE_FAILURE.` };
     }
     if (action === 'rollback') {
       const wt = it.local.worktree;

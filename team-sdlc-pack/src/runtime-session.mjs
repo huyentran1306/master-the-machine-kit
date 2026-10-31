@@ -78,6 +78,8 @@ export class RuntimeSession {
     this.logProblems = [];
     this.state = { submissions: {}, items: {}, loginPreferred: null, envReady: null, current: null };
     this.lock = Promise.resolve();
+    // REQUESTED -> outcome pairs (keyed by the request object both phases share): see pairEvent().
+    this.openPairs = new WeakMap();
     this.submissionsInFlight = new Set();
     this.shipChain = Promise.resolve(); // ship() calls run one at a time: main checkout, gate and push are shared
     this.poller = null;
@@ -180,12 +182,15 @@ export class RuntimeSession {
    */
   event(ev, { optional = false } = {}) {
     if (!this.log) {
+      this.lastEventDropped = true;
       this.logProblems.push(`no progress log yet for ${ev.type}`);
       return false;
     }
     const safe = typeof ev.summary === 'string' ? { ...ev, summary: oneLine(scrubSummary(ev.summary)) } : ev;
+    this.lastEventDropped = false;
     try {
       const r = this.log.append(safe, { optional });
+      this.lastEventDropped = !!r.dropped;
       if (r.queued) this.raiseLocalAlert('PROGRESS_LOG_UNAVAILABLE', `progress log append failed (${this.log.lastError}); events are queued and retried in order`);
       else this.clearLocalAlert('PROGRESS_LOG_UNAVAILABLE');
       if (this.log.pressure !== 'OK') {
@@ -193,9 +198,29 @@ export class RuntimeSession {
       }
       return r.ok;
     } catch (e) {
+      this.lastEventDropped = true; // refused (schema/size): nothing reached the log
       this.logProblems.push(e.message);
       return false;
     }
+  }
+
+  /**
+   * Writes one phase of a REQUESTED -> outcome pair. Optional pairs are dropped near the log limit,
+   * but never split: once a REQUESTED is in the log its outcome is written as mandatory (so the
+   * Player and validators never see a request left open), and the outcome of a dropped REQUESTED is
+   * dropped too. Retries reuse the same request object; each REQUESTED reopens the pair.
+   */
+  pairEvent(ev, req, phase, optional) {
+    const key = req && typeof req === 'object' ? req : null;
+    if (phase === 'REQUESTED') {
+      this.event(ev, { optional });
+      if (key) this.openPairs.set(key, this.lastEventDropped ? 'dropped' : 'written');
+      return;
+    }
+    const open = key ? this.openPairs.get(key) : undefined;
+    if (key) this.openPairs.delete(key);
+    if (open === 'dropped') return;
+    this.event(ev, { optional: open === 'written' ? false : optional });
   }
 
   raiseLocalAlert(id, text) {
@@ -222,11 +247,11 @@ export class RuntimeSession {
       const summary = realPhase === 'REQUESTED' ? 'Calling mtm-game-server.'
         : realPhase === 'SUCCEEDED' ? 'Received the mtm-game-server result.'
           : `Failed: ${res ? `HTTP ${res.status} ${res.json?.error?.code || ''}`.trim() : `${err?.code || ''} ${err?.message || ''}`.trim()}`;
-      this.event({
+      this.pairEvent({
         type: 'GAME_MASTER_API', operation, backlogId: safeId(backlogId ?? req?.backlogId ?? null), method: req?.method || null,
         origin: loggableOrigin(req?.url), path: loggablePath(req?.url), phase: realPhase, httpStatus,
         requestId: realPhase === 'REQUESTED' ? null : safeId(res?.requestId), summary,
-      }, { optional });
+      }, req, realPhase, optional);
     };
   }
 
@@ -599,13 +624,13 @@ export class RuntimeSession {
 
   mcpLogger(operation) {
     return async (phase, req, res, err) => {
-      this.event({
+      this.pairEvent({
         type: 'NETWORK_ACTIVITY', operation: safeId(operation) || 'MATCH_MCP', backlogId: safeId(this.state.current),
         method: req?.method || 'POST', origin: loggableOrigin(req?.url) || loggableOrigin(this.matchPageUrl) || 'https://invalid.local',
         path: loggablePath(req?.url) || '/', phase, httpStatus: res ? res.status : null, requestId: safeId(res?.requestId),
         summary: phase === 'REQUESTED' ? oneLine(`Calling the match MCP server (${req?.operation || operation}).`)
           : phase === 'SUCCEEDED' ? 'Received the match MCP result.' : oneLine(`Match MCP failed: ${res ? `HTTP ${res.status}` : `${err?.code || ''} ${err?.message || ''}`}`),
-      }, { optional: true });
+      }, req, phase, true);
     };
   }
 
@@ -1773,7 +1798,7 @@ export class RuntimeSession {
     return this.clean({
       ok: true, spawn, waiting,
       next: spawn.length
-        ? `Spawn ALL ${spawn.length} worker(s) NOW, in this same turn, before anything else: one spawn_agent per entry with agent_type "team_feature_worker", fork_turns "none", task_name = taskName and message exactly as given (pick a model from allowedModels). Then service READY items.`
+        ? `Spawn ALL ${spawn.length} worker(s) NOW, in this same turn, before anything else: one spawn_agent per entry with agent_type "team_feature_worker", fork_turns "none", task_name = taskName and message exactly as given (pick a model from allowedModels). If a spawn fails (e.g. "agent thread limit reached"), keep its entry and retry that same spawn right after the next wait_agent; the worktree already exists. Then service READY items.`
         : waiting.length ? 'Nothing could be dispatched yet (see waiting); service READY, then wait.' : 'Every open item already has a worker; service READY, then wait.',
       view: this.view(),
     });

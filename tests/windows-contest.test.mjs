@@ -145,19 +145,19 @@ test('sparse blob-filtered clone supports folder trees, ancestry, committed read
   assert.equal((await G.pushedState(checkout, sha, 'main')).pushed, true);
 });
 
-test('fresh temporary installation is READY with 2.8.6 identity and top-level compaction setting', async t => {
+test('fresh temporary installation is READY with 2.8.7 identity and top-level compaction setting', async t => {
   const workspace = path.join(temp(t), 'fresh workspace');
   await install({ teamWorkspace: workspace });
   const result = await check({ teamWorkspace: workspace, source: pack });
   assert.equal(result.ready, true, result.lines.join('\n'));
   const infoPath = path.join(workspace, '.mtm', 'team-pack-info.json');
   assert.equal(read(infoPath).teamName, '[FHM] Bá Khí');
-  assert.equal(read(infoPath).version, '2.8.6');
-  for (const file of ['package.json', 'team-runtime.json', 'team-pack-info.json']) assert.equal(read(path.join(pack, file)).version, '2.8.6');
+  assert.equal(read(infoPath).version, '2.8.7');
+  for (const file of ['package.json', 'team-runtime.json', 'team-pack-info.json']) assert.equal(read(path.join(pack, file)).version, '2.8.7');
   assert.notEqual(fs.readFileSync(infoPath)[0], 0xef, 'no UTF-8 BOM');
   const configPath = path.join(workspace, '.codex', 'config.toml');
   const config = fs.readFileSync(configPath, 'utf8');
-  assert.match(config, /^model_auto_compact_token_limit = 120000\s+(?:#[^\n]*\n)*\[shell_environment_policy\]\nset = \{ npm_config_verify_deps_before_run = \"false\", pnpm_config_verify_deps_before_run = \"false\" \}\s+\[mcp_servers/);
+  assert.match(config, /^model_auto_compact_token_limit = 120000\s+(?:#[^\n]*\n)*\[shell_environment_policy\]\nset = \{ npm_config_verify_deps_before_run = \"false\", pnpm_config_verify_deps_before_run = \"false\" \}\s+(?:#[^\n]*\n)*\[features\.multi_agent_v2\]\nenabled = true\nmax_concurrent_threads_per_session = 12\s+\[mcp_servers/);
   write(configPath, config.replace('120000', '99999'));
   assert.equal((await check({ teamWorkspace: workspace, source: pack, mcp: false })).ready, false);
 });

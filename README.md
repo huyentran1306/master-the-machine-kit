@@ -1,4 +1,4 @@
-# Master the Machine Kit3 — 2.8.6
+# Master the Machine Kit3 — 2.8.7
 
 Team pack **Codex**, protocol 4, cho MTM Player. Bản 2.8.0 trên nhánh `codex/kit3_bou_v11`, cập nhật từ nền 2.7.7.
 
@@ -48,6 +48,11 @@ Repo chỉ chứa runtime Codex, tài liệu và fixture giả. Không đưa cre
 ## Windows contest machine
 
 Use MTM Player **0.9.35**. Install into a fresh workspace using the Node command above (or `team-sdlc-pack/install.ps1`), then run the checker and require **READY**. In Player Init, select Codex, set the Codex CLI path to the installed **codex.exe** (absolute path), and choose the match-authorized model in Init. Keep previous match workspaces separate.
+
+## Changelog — 2.8.7 (nhánh `codex/kit3_tran_fastdispatch`)
+- Lượt đề thật RBKTH8OM (2.8.6, sol medium): **1000/1000**, nộp cuối phút 25,7, 182,9 credit, cả 10 item nộp 1 lần là qua.
+- **Nâng giới hạn luồng của Codex:** Codex multi-agent v2 mặc định chỉ cho 4 luồng mở mỗi phiên (orchestrator + 3 worker). Lượt trên `spawn_agent` bị từ chối 2 lần ("agent thread limit reached"): CR-01 chờ 1,4 phút, BUG-04 chờ 3,5 phút mới có worker. `config/codex.toml` thêm `[features.multi_agent_v2] enabled = true, max_concurrent_threads_per_session = 12` (đã thử nạp config với Codex 0.149, 0.159, 0.166). Orchestrator được dặn thử lại đúng lệnh spawn sau lần wait kế tiếp nếu vẫn bị từ chối.
+- **Log tiến độ không còn cặp REQUESTED bị hở:** gần mốc 180 KiB, telemetry tuỳ chọn bị bỏ; trước đây có thể ghi REQUESTED rồi bỏ mất kết quả. Giờ đã ghi REQUESTED thì kết quả luôn được ghi, còn REQUESTED bị bỏ thì bỏ luôn kết quả (GAME_MASTER_API và MATCH_MCP).
 
 ## Changelog — 2.8.6 (nhánh `codex/kit3_tran_fastdispatch`)
 - Lượt set3 (2.8.4, sol): **1000/1000**, nộp cuối phút 30.4, PI nộp sau 3,8 phút (hạng 1), mỗi đợt giao mọi item cùng lúc, gate 2–9 giây.

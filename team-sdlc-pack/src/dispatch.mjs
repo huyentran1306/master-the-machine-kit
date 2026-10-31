@@ -1,4 +1,28 @@
 import os from 'node:os';
+import { execFileSync } from 'node:child_process';
+
+/**
+ * Pages macOS can hand out right now. os.freemem() on macOS counts only "Pages free" and leaves out the
+ * inactive/speculative cache the kernel reclaims instantly, so a healthy 16 GB Mac often reports <1 GB
+ * and every code item would wait on LOW_RAM forever. Same idea as Activity Monitor's available memory.
+ */
+export function parseVmStat(text) {
+  const size = Number(/page size of (\d+) bytes/.exec(text || '')?.[1]) || 4096;
+  const pages = (label) => Number(new RegExp(`^${label}:\\s+(\\d+)`, 'm').exec(text || '')?.[1]) || 0;
+  const avail = pages('Pages free') + pages('Pages inactive') + pages('Pages speculative');
+  return avail > 0 ? avail * size : 0;
+}
+
+let memCache = { at: 0, bytes: 0 };
+export function availableMemory({ platform = process.platform, readVmStat = () => execFileSync('vm_stat', { encoding: 'utf8', timeout: 2000 }), now = Date.now() } = {}) {
+  if (platform !== 'darwin') return os.freemem(); // Linux: MemAvailable; Windows: available physical memory.
+  if (now - memCache.at < 5000 && memCache.bytes) return memCache.bytes;
+  try {
+    const bytes = parseVmStat(readVmStat());
+    if (bytes) { memCache = { at: now, bytes }; return bytes; }
+  } catch { /* fall back below */ }
+  return os.freemem();
+}
 
 export function answerOnly(item, material = {}) {
   if (item.type === 'PI') return true;
@@ -12,7 +36,7 @@ export function answerOnly(item, material = {}) {
   return !hasMvs && /\b(?:question|answer|values?|report[ -]only|calculate|compute|identify)\b/i.test(text);
 }
 
-export function dispatchPolicy(item, items, parallel = {}, freeBytes = os.freemem()) {
+export function dispatchPolicy(item, items, parallel = {}, freeBytes = availableMemory()) {
   const codeWorkers = items.filter(i => i.id !== item.id && i.local?.worktree && !(i.local?.answerOnly ?? answerOnly(i)) && !i.local?.parked && !i.local?.ready && !i.local?.submittedAt && !i.local?.receiptId).length;
   const maxCodeWorkers = Math.max(1, Math.floor(Number(parallel.maxCodeWorkers) || 5));
   const freeRamGB = freeBytes / 1024 ** 3;

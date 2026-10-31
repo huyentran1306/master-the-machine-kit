@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import os from 'node:os';
-import { answerOnly, dispatchPolicy, integrationGate, mapBounded, BuildQueue } from './dispatch.mjs';
+import { answerOnly, dispatchPolicy, integrationGate, mapBounded, BuildQueue, availableMemory } from './dispatch.mjs';
 import { stopWorktreeProcesses } from './process-cleanup.mjs';
 import path from 'node:path';
 import { ProgressLog, scrubSummary, playerRuleErrors } from './progress.mjs';
@@ -59,7 +59,7 @@ export class RuntimeSession {
     this.teamWorkspace = teamWorkspace || null;
     this.packRoot = packRoot;
     this.adapter = deepMerge(DEFAULT_ADAPTER, adapter || {});
-    this.freeMemory = () => os.freemem();
+    this.freeMemory = () => availableMemory();
     this.buildQueue = new BuildQueue(this.adapter.parallel.maxBuilds);
     this.identity = identity || null; // team-pack-info.json
     this.phase = 'IDLE';

@@ -432,3 +432,35 @@ test('batch start_work overlaps MCP collection across newly revealed items with 
   assert.equal(peak, 2);
   for (const id of ids) assert.ok(s.readMaterial(id).mcpMaterial.some(e => e.tool === 'search_logs' && e.ok));
 });
+
+test('dispatch_ready dispatches every open item in one call and respawns workers lost in a restart', async t => {
+  const { s } = worktreeSession(t);
+  s.phase = 'GAME'; s.match.status = 'IN_PROGRESS'; s.match.endsAt = Date.now() + 30 * 60000;
+  for (const [id, type] of [['BUG-31', 'BUG'], ['CR-32', 'CR'], ['PI-33', 'PI'], ['TASK-34', 'TASK']]) {
+    s.items.set(id, { id, type, revealedAt: Date.now() - 2 * 60000, local: { startedAt: Date.now() } });
+    s.materialCache[id] = { files: {}, submitTemplate: { backlogId: id } };
+  }
+  assert.match(s.view().alerts[0], /^!! DISPATCH NOW: .*BUG-31 \(open 2\.0m\).*CR-32.*PI-33.*TASK-34/);
+  const first = await s.dispatch_ready();
+  assert.equal(first.ok, true);
+  assert.deepEqual(first.spawn.map(x => x.id).sort(), ['BUG-31', 'CR-32', 'PI-33', 'TASK-34']);
+  for (const sp of first.spawn) {
+    assert.match(sp.message, /briefFile .*\.json/); assert.match(sp.message, /ports dev=\d+/);
+    assert.doesNotMatch(sp.message, /RESUME/);
+  }
+  assert.match(first.next, /Spawn ALL 4 worker\(s\) NOW/);
+  assert.equal(s.view().alerts.some(a => /DISPATCH NOW/.test(a)), false);
+  assert.equal((await s.dispatch_ready()).spawn.length, 0, 'idempotent while workers are live');
+
+  // A replacement session: every worker is gone, worktrees (and their ports) stay.
+  for (const it of s.items.values()) if (it.local.worktree) it.local.orphaned = true;
+  const portsBefore = Object.fromEntries([...s.items.values()].map(i => [i.id, i.local.worktree.ports.dev]));
+  const again = await s.dispatch_ready();
+  assert.equal(again.spawn.length, 4);
+  for (const sp of again.spawn) {
+    assert.match(sp.message, /^RESUME: the previous worker/);
+    assert.match(sp.taskName, /r2$/);
+    assert.equal(s.items.get(sp.id).local.worktree.ports.dev, portsBefore[sp.id]);
+    assert.equal(s.items.get(sp.id).local.orphaned, undefined);
+  }
+});

@@ -6,14 +6,14 @@ description: Dispatches all game items to workers, integrates, gates, pushes and
 # Quick card
 1. Read this skill once. Later use only `Get-Content <skill> -TotalCount 30`; never re-read whole skills or backlog playbooks.
 2. Never implement, reproduce, test individual scenarios or debug an item yourself. Keep main clean; run only the integration gate below.
-3. Use configure_session's current view. Dispatch every startable item, including PI and late reveals: `start_work backlogItemKeys:[...] compact:true` -> `worktree create` -> worker.
-4. Spawn `team_feature_worker` with `fork_turns: "none"` and a paths-only handoff. Dispatch answer-only items uncapped; code needs free RAM >=2.5 GB and fewer than parallel.maxCodeWorkers (default 5).
+3. FIRST action of every loop iteration and right after configure_session: `dispatch_ready` (one call = start_work compact:true + worktree create for EVERY open item without a worker, PI and late reveals included), then spawn every returned worker in the same turn. `!! DISPATCH NOW` in any view means do this before servicing READY or messages. Never dispatch items one per iteration.
+4. Spawn `team_feature_worker` with `fork_turns: "none"`, task_name = taskName and the returned message as the paths-only handoff. Dispatch answer-only items uncapped; code needs free RAM >=2.5 GB and fewer than parallel.maxCodeWorkers (default 5).
 5. Choose deadline READY -> PARKED resume -> new PI -> nearest deadline -> points per minute. Never skip a missing title.
 6. Set worker time box to min(type target, workerStopAt from the brief: deadline or match end minus a quarter of the time left, 1.5-5 minutes), using the Game Master clock.
 7. Deadline READY: before any other orchestrator work, integrate -> bounded gate -> push -> submit_work -> remove -> dispatch NEXT. Never hold READY for other work.
 8. Conflict/red gate: delegate fix-up. Never repair item code in main; only a trivial one-line conflict may be resolved there.
 9. Late worker: tell it to stop and return what passes, evidence and a commit; submit READY immediately.
-10. Active workers, nothing actionable: native agent wait <=45s -> `wait_for_update timeoutMs:1000` -> process events/completions -> repeat.
+10. Active workers, nothing actionable: native agent wait <=20s -> `wait_for_update timeoutMs:1000` -> process events/completions -> repeat.
 11. No active workers: `wait_for_update` without timeoutMs. On pause stop workers; on mustEnd call `final_result end:true` immediately.
 12. Never view_image, print item diffs or dump logs. Use `git diff --stat`, exit codes and `Get-Content -Tail 15` / `Select-String` summaries.
 13. NEED_INFO: fetch missing MCP material with backlogItemKey; send the updated brief path and follow-up. Never submit BLOCKED/all-NOT_RUN/FAIL/zero while time remains.

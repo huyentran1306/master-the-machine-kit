@@ -57,13 +57,13 @@ export function rank(items, now, endsAt, opts = {}) {
       continue;
     }
     const { left } = effectiveLeft(it, now, endsAt);
-    if (l.worktree && !l.parked && !l.ready) continue;
+    if (l.worktree && !l.parked && !l.ready && !l.orphaned) continue;
     if (l.parked?.remainingMinutes && left != null && l.parked.remainingMinutes > left) {
       skipped.push({ id: it.id, action: 'resume', why: 'parked remaining step cannot fit' }); continue;
     }
-    const action = l.ready ? 'submit' : l.parked || l.startedAt && !l.worktree && !l.queued ? 'resume' : 'dispatch';
+    const action = l.ready ? 'submit' : l.parked || l.orphaned || l.startedAt && !l.worktree && !l.queued ? 'resume' : 'dispatch';
     const tier = l.ready && it.deadlineAt != null ? -3 : action === 'resume' ? -2 : l.ready ? -1 : it.type === 'PI' ? 0 : it.deadlineAt != null ? 1 : 2;
-    const why = action === 'submit' ? 'submit READY immediately' : action === 'resume' ? 'resume preserved work; remaining step only' : tier === 0 ? 'PI race: dispatch a new worker now'
+    const why = action === 'submit' ? 'submit READY immediately' : l.orphaned ? 'worker lost in the restart: respawn on the same worktree' : action === 'resume' ? 'resume preserved work; remaining step only' : tier === 0 ? 'PI race: dispatch a new worker now'
       : tier === 1 ? 'nearest deadline; reserve 5 minutes to integrate and submit'
       : String(it.maxPoints ?? '?') + ' pts / ~' + est(it) + 'm';
     ranked.push({ id: it.id, type: it.type, tier, action, why, left: left == null ? null : Math.round(left * 10) / 10,

@@ -437,6 +437,12 @@ export class RuntimeSession {
       this.loadState({ fresh: false });
       this.reconcileFromLog();
       if (resume) {
+        // A replacement session has no subagents: every worker of the previous one is gone. Keep
+        // their worktrees (commits + uncommitted files) and let dispatch_ready respawn them at once.
+        for (const it of this.items.values()) {
+          const l = it.local || {};
+          if (l.worktree && !l.parked && !l.ready && !isSubmitted(it) && l.owner === 'team_feature_worker') l.orphaned = true;
+        }
         this.event({ type: 'ORCHESTRATOR_RESTARTED', attempt: Math.max(1, Number(d.restartAttempt) || 1), phase: 'GAME', reason: safeId(d.reason) || 'OPERATOR_RESUME', summary: 'Reconciled Git, receipts and progress before continuing.' });
       }
       const out = { message: resume ? 'Game resumed.' : 'Game started.' };
@@ -470,7 +476,7 @@ export class RuntimeSession {
       out.view = this.view({ includeEvents: true });
       // The view is here. Two extra round trips before the first start_work cost real match
       // minutes, so make it explicit rather than leaving the agent to be cautious.
-      out.next = `The backlog view is in this result; it is current. Go straight to start_work on NEXT - do not call refresh_match or session_status first. ${this.nextHint()}`;
+      out.next = `The backlog view is in this result; it is current. Call dispatch_ready NOW and spawn every worker it returns in the same turn - do not call refresh_match or session_status first.${resume ? ' Workers of the previous session are gone; dispatch_ready respawns them on their preserved worktrees.' : ''} ${this.nextHint()}`;
       if (out.sync?.startsWith('FAILED:')) out.next = 'Backlog data was NOT synchronized. Call login_match once to restore the contestant session, then refresh_match. Do not mark BACKLOG_SYNC complete or interpret the loading shell as an empty backlog.';
       if (resume) out.recovery = await this.recoveryReport();
       this.saveState();
@@ -482,7 +488,7 @@ export class RuntimeSession {
   nextHint() {
     switch (this.phase) {
       case 'PREPARATION': return 'Preparation: GIT_AUTH -> REPOSITORY -> ENVIRONMENT -> BUILD (report_progress each start/end), login_match, report_ready, then reply with its final JSON and end the turn.';
-      case 'GAME': return `${this.view().next}. Game: dispatch every item (start_work compact:true -> worktree create -> team_feature_worker). Integrate READY, bounded gate, push, submit_work, remove. Never implement in main; use the bounded worker/event wait loop.`;
+      case 'GAME': return `${this.view().next}. Game: dispatch every open item at once with dispatch_ready (it runs start_work + worktree create for all of them) and spawn every returned team_feature_worker in the same turn. Integrate READY, bounded gate, push, submit_work, remove. Never implement in main; use the bounded worker/event wait loop.`;
       case 'PAUSED': return 'Paused: stop work and end the turn with final_result status BLOCKED.';
       case 'ENDED': return 'Ended: reply with the final JSON and stop.';
       default: return 'Call configure_session with the lifecycle input (raw text including its marker line).';
@@ -859,7 +865,13 @@ export class RuntimeSession {
     const queued = plan.ranked.filter(r => !eligible(r));
     const skipped = plan.skipped;
     const current = this.state.current;
+    const undispatched = ranked.filter(r => r.action !== 'submit').map((r) => {
+      const it = this.items.get(r.id);
+      return `${r.id}${it?.revealedAt ? ` (open ${Math.max(0, (now - it.revealedAt) / 60000).toFixed(1)}m)` : ''}`;
+    });
     const al = [
+      ...(undispatched.length && this.phase === 'GAME' && !['PAUSED', 'FINISHED'].includes(this.match.status)
+        ? [`!! DISPATCH NOW: ${undispatched.join(', ')} have no worker. Call dispatch_ready and spawn every returned worker in this same turn, before servicing READY/messages.`] : []),
       ...plannerAlerts(items, now, this.match.endsAt, { current, paused: this.phase === 'PAUSED', status: this.match.status }, this.adapter.planner),
       ...[...(this.localAlerts?.values() || [])].map((t) => `!! ${t}`),
       ...this.logProblems.splice(0).map((t) => `!! progress log: ${t}`),
@@ -892,7 +904,7 @@ export class RuntimeSession {
     if (this.lastParse && !this.lastParse.structured) out.parse = `page structure unknown (${this.lastParse.warnings.join('; ')}): read pageText; pass matchUuid to start_work if needed`;
     if (pageText && this.lastPageText) out.pageText = truncate(this.lastPageText, 12000);
     out.maxCodeWorkers = this.adapter.parallel.maxCodeWorkers;
-    if (this.phase === 'GAME' && this.match.status !== 'FINISHED') out.keepAlive = 'Match running: dispatch NEXT or submit READY immediately. With workers: native agent wait <=45s, then wait_for_update timeoutMs:1000. Without workers: wait_for_update with no timeoutMs.';
+    if (this.phase === 'GAME' && this.match.status !== 'FINISHED') out.keepAlive = 'Match running: dispatch_ready whenever DISPATCH NOW shows, submit READY immediately. With workers: native agent wait <=20s, then wait_for_update timeoutMs:1000. Without workers: wait_for_update with no timeoutMs.';
     return out;
   }
 
@@ -1710,6 +1722,54 @@ export class RuntimeSession {
       ok: true, phase: this.phase, matchId: this.matchId, playerSessionId: this.playerSessionId, prep: this.prep, envReady: this.state.envReady,
       account: !!this.account, bearer: !!this.bearer, loggedIn: !!this.loggedIn, progressLogFile: this.progressLogFile, checkoutRoot: this.checkoutRoot, matchRoot: this.matchRoot,
       repository: this.repository, recovery: this.checkoutRoot ? await this.recoveryReport() : null, view: this.view({ includeEvents: true }),
+    });
+  }
+
+  /**
+   * Dispatch every open item in ONE tool call: start_work (bounded concurrency) + worktree create
+   * for each dispatch/resume item the policy allows, returning ready-to-send spawn handoffs. The
+   * orchestrator is a single serial model loop: dispatching one item per loop iteration left items
+   * revealed at minute 8 or 12 waiting 4-6 minutes behind worker relays. Idempotent: an item that
+   * already has a live worker is not returned again.
+   */
+  async dispatch_ready({ max } = {}) {
+    if (this.phase !== 'GAME') return { ok: false, error: 'NOT_IN_GAME', next: this.nextHint() };
+    if (['PAUSED', 'FINISHED'].includes(this.match.status)) return this.clean({ ok: false, error: `MATCH_${this.match.status}`, next: this.nextHint() });
+    const plan = rank([...this.items.values()], this.now(), this.match.endsAt, this.adapter.planner).ranked.filter(r => r.action !== 'submit');
+    const picked = plan.slice(0, Math.max(1, Number(max) || plan.length));
+    const needStart = picked.filter(r => !this.items.get(r.id)?.local?.startedAt || !this.readMaterial(r.id)).map(r => r.id);
+    const startErrors = {};
+    if (needStart.length) {
+      const res = await mapBounded(needStart, this.adapter.parallel.materialConcurrency, id => this.start_work({ backlogItemKey: id, compact: true }));
+      res.forEach((r, i) => { if (!r?.ok) startErrors[needStart[i]] = r?.error || 'START_FAILED'; });
+    }
+    const spawn = [];
+    const waiting = [];
+    for (const r of picked) {
+      if (startErrors[r.id]) { waiting.push({ id: r.id, reason: startErrors[r.id] }); continue; }
+      const it = this.items.get(r.id);
+      const orphaned = !!it.local?.orphaned;
+      const c = await this.worktree({ action: 'create', backlogItemKey: r.id });
+      if (!c.ok) { waiting.push({ id: r.id, reason: c.error, queued: !!c.queued }); continue; }
+      delete it.local.orphaned;
+      it.local.dispatches = (it.local.dispatches || 0) + 1;
+      it.local.dispatchedAt = this.now();
+      const stop = c.workerStopAt ? new Date(c.workerStopAt).toISOString() : 'match end minus 5 minutes';
+      const resumeText = c.resume ? `RESUME: preserved commit ${c.resume.commit}; do only the remaining step: ${c.resume.remainingStep}. `
+        : orphaned ? 'RESUME: the previous worker on this item stopped when the session restarted. Its commits and uncommitted files are in this worktree: check git status and git log first, keep that work and continue it; do not restart. ' : '';
+      spawn.push({
+        id: r.id, type: it.type, answerOnly: !!c.answerOnly,
+        taskName: `${r.id.toLowerCase().replace(/[^a-z0-9]/g, '')}${it.local.dispatches > 1 ? `r${it.local.dispatches}` : ''}`,
+        message: `${resumeText}Item ${r.id} (${it.type}${c.answerOnly ? ', answer-only: no dev server, build or full suite' : ''}). checkoutRoot = worktreeRoot = ${c.worktreeRoot}; folder ${c.folder}; matchRoot ${c.matchRoot}; briefFile ${c.brief?.briefFile}; filesDir ${c.brief?.filesDir}; answer ${c.answer?.submitJson || ''} (evidence in ${c.answer?.evidenceDir || ''}); ports dev=${c.ports?.dev} production=${c.ports?.production} (override fixed runner ports). Read briefFile first: it has the commands, playbook, checklist and organizer files. Work only in this worktree. Stop and return by ${stop} (Game Master clock). Commit the complete item (code, tests, evidence, answer) and reply STATUS READY or PARKED with COMMIT <sha>. Never push, submit, delegate or call Game APIs.`,
+      });
+    }
+    this.saveState();
+    return this.clean({
+      ok: true, spawn, waiting,
+      next: spawn.length
+        ? `Spawn ALL ${spawn.length} worker(s) NOW, in this same turn, before anything else: one spawn_agent per entry with agent_type "team_feature_worker", fork_turns "none", task_name = taskName and message exactly as given (pick a model from allowedModels). Then service READY items.`
+        : waiting.length ? 'Nothing could be dispatched yet (see waiting); service READY, then wait.' : 'Every open item already has a worker; service READY, then wait.',
+      view: this.view(),
     });
   }
 

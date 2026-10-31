@@ -13,7 +13,7 @@ Principle: the Game Master and the progress log are the record. Reconcile, then 
 2. `recovery.started` = started, not submitted. `recovery.dirty` = uncommitted files; `recovery.stashes` = stashes (`WIP <ID>` is yours from this match).
    - Dirty files belong to `recovery.current` (or the started item whose files they are). Preserve them; dispatch a worker to recover, verify and commit in an isolated worktree. Never finish/debug item work in main.
    - `start_work <ID>` on an already-started item only replays its material (no second start).
-3. Reconcile worktree list and live worker IDs before spawning replacements; preserve committed work. Then continue the team-orchestrator Quick card (do not re-read the whole skill). Never redo preparation steps.
+3. Workers of the previous session are gone. Call `dispatch_ready` right away: it respawns a worker on every preserved worktree (message starts with RESUME) and dispatches every open item in the same call; spawn all of them in this turn. Preserve committed and uncommitted work. Then continue the team-orchestrator Quick card (do not re-read the whole skill). Never redo preparation steps.
 
 ## RESUME_PREPARATION_V1
 Re-run only the preparation stages not COMPLETED (configure result `prep`), then login_match and report_ready.

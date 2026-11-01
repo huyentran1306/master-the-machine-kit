@@ -47,7 +47,7 @@ Repo chỉ chứa runtime Codex, tài liệu và fixture giả. Không đưa cre
 
 ## Windows contest machine
 
-Use MTM Player **0.9.35**. Install into a fresh workspace using the Node command above (or `team-sdlc-pack/install.ps1`), then run the checker and require **READY**. In Player Init, select Codex, set the Codex CLI path to the installed **codex.exe** (absolute path), and choose the match-authorized model in Init. Keep previous match workspaces separate.
+Use MTM Player **0.9.44** or newer (from 0.9.44 the Game Master can refuse Init with PLAYER_VERSION_TOO_OLD; the team pack contract and progress schema are unchanged from 0.9.40; 0.9.44 also ships a Linux launcher `mtm-player.sh` + `install-team-pack.sh`). Install into a fresh workspace using the Node command above (or `team-sdlc-pack/install.ps1`), then run the checker and require **READY**. In Player Init, select Codex, set the Codex CLI path to the installed **codex.exe** (absolute path), and choose the match-authorized model in Init. Keep previous match workspaces separate.
 
 > Nhánh `codex/kit3_tran_v2` = dòng kit của Tran dựa trên `codex/kit3_bou_v4` (B, 2.8.0); thư mục `Kit3-tran-v2-<version>`, cùng format với `Kit3-bou-v4-<version>` của B.
 

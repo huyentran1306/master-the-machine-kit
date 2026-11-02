@@ -143,3 +143,16 @@ test('a dispatched worktree with no change for 4 min is re-offered once per chec
   s.now = () => real() + 10 * 60000;
   assert.equal(await s.idleWorkers().then(x => x.length), 0, 'READY items are never re-offered');
 });
+
+test('worker reasoning effort: low for answer-only, medium for code, high for a retry with time left', () => {
+  const s = Object.create(RuntimeSession.prototype);
+  s.adapter = { parallel: {} }; s.match = { endsAt: Date.now() + 30 * 60000 }; s.now = () => Date.now();
+  const it = (over = {}) => ({ id: 'X-1', type: 'TASK', deadlineAt: null, local: { dispatches: 1 }, ...over });
+  assert.equal(s.workerEffort(it(), { answerOnly: true }), 'low');
+  assert.equal(s.workerEffort(it({ type: 'BUG' }), {}), 'medium');
+  assert.equal(s.workerEffort(it({ deadlineAt: Date.now() + 3 * 60000 }), { answerOnly: true }), 'medium', 'no time for a second try');
+  assert.equal(s.workerEffort(it({ local: { dispatches: 2 } }), {}), 'high');
+  assert.equal(s.workerEffort(it({ local: { dispatches: 2 }, deadlineAt: Date.now() + 6 * 60000 }), {}), 'medium');
+  s.adapter = { parallel: { workerEffort: { answerOnly: 'medium' } } };
+  assert.equal(s.workerEffort(it(), { answerOnly: true }), 'medium', 'adapter override');
+});

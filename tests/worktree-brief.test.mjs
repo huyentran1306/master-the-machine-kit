@@ -444,10 +444,18 @@ test('dispatch_ready dispatches every open item in one call and respawns workers
   const first = await s.dispatch_ready();
   assert.equal(first.ok, true);
   assert.deepEqual(first.spawn.map(x => x.id).sort(), ['BUG-31', 'CR-32', 'PI-33', 'TASK-34']);
+  const task = (sp) => fs.readFileSync(sp.taskFile, 'utf8');
   for (const sp of first.spawn) {
-    assert.match(sp.message, /briefFile .*\.json/); assert.match(sp.message, /ports dev=\d+/);
-    assert.doesNotMatch(sp.message, /RESUME/);
+    // One-line spawn message; the full task is in a git-ignored file next to briefFile.
+    assert.ok(sp.message.length < 400, sp.message);
+    assert.ok(sp.message.includes(sp.taskFile));
+    assert.match(task(sp), /briefFile .*\.json/); assert.match(task(sp), /ports dev=\d+/);
+    assert.doesNotMatch(task(sp), /RESUME/);
+    assert.equal(sp.reasoningEffort, ['PI-33', 'TASK-34'].includes(sp.id) && s.items.get(sp.id).local.answerOnly !== false ? sp.reasoningEffort : 'medium');
   }
+  assert.ok(first.spawn.every(sp => ['low', 'medium'].includes(sp.reasoningEffort)));
+  assert.equal(first.spawn.find(sp => sp.id === 'BUG-31').reasoningEffort, 'medium');
+  assert.match(first.next, /reasoning_effort/);
   assert.match(first.next, /Spawn ALL 4 worker\(s\) NOW/);
   assert.equal(s.view().alerts.some(a => /DISPATCH NOW/.test(a)), false);
   assert.equal((await s.dispatch_ready()).spawn.length, 0, 'idempotent while workers are live');
@@ -458,7 +466,8 @@ test('dispatch_ready dispatches every open item in one call and respawns workers
   const again = await s.dispatch_ready();
   assert.equal(again.spawn.length, 4);
   for (const sp of again.spawn) {
-    assert.match(sp.message, /^RESUME: the previous worker/);
+    assert.match(task(sp), /^RESUME: the previous worker/);
+    assert.ok(['high', 'medium'].includes(sp.reasoningEffort), 'a re-dispatch never drops below medium');
     assert.match(sp.taskName, /r2$/);
     assert.equal(s.items.get(sp.id).local.worktree.ports.dev, portsBefore[sp.id]);
     assert.equal(s.items.get(sp.id).local.orphaned, undefined);

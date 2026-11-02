@@ -1772,6 +1772,23 @@ export class RuntimeSession {
    * revealed at minute 8 or 12 waiting 4-6 minutes behind worker relays. Idempotent: an item that
    * already has a live worker is not returned again.
    */
+  /**
+   * Reasoning effort per worker, decided by the helper at dispatch (no model call, no latency):
+   * - answer-only items (most TASK/PI): low. Every rehearsal finished them in 1.5-3 min; lower effort also answers faster.
+   * - code items (BUG/CR/code TASK): medium, as in every 1000-point run.
+   * - a re-dispatch (parked, rolled back, orphaned, no-worker respawn) with >= 10 min left: high; with less time: medium.
+   * - an answer-only item with < 4 min left stays medium: no time for a second attempt.
+   * adapter.parallel.workerEffort { answerOnly, code, retry } overrides the defaults.
+   */
+  workerEffort(it, c = {}) {
+    const cfg = { answerOnly: 'low', code: 'medium', retry: 'high', ...(this.adapter.parallel?.workerEffort || {}) };
+    const { left } = effectiveLeft(it, this.now(), this.match.endsAt);
+    const retry = (it.local?.dispatches || 0) > 1;
+    if (retry) return left != null && left < 10 ? cfg.code : cfg.retry;
+    if (c.answerOnly) return left != null && left < 4 ? cfg.code : cfg.answerOnly;
+    return cfg.code;
+  }
+
   /** HEAD + dirty file list of a worker copy: unchanged since dispatch means nobody is working there. */
   async worktreeFingerprint(root) {
     const head = await G.revParse(root, 'HEAD').catch(() => null);
@@ -1800,7 +1817,7 @@ export class RuntimeSession {
       e.respawns += 1;
       e.at = this.now();
       e.taskName = `${previousTaskName.replace(/w\d+$/, '')}w${e.respawns}`;
-      out.push({ id: it.id, type: it.type, previousTaskName, taskName: e.taskName, idleMin: Math.round((this.now() - (it.local.dispatchedAt || e.at)) / 6000) / 10,
+      out.push({ id: it.id, type: it.type, previousTaskName, taskName: e.taskName, reasoningEffort: e.reasoningEffort || 'medium', idleMin: Math.round((this.now() - (it.local.dispatchedAt || e.at)) / 6000) / 10,
         message: `NO-WORKER RESPAWN: this worktree had no change since dispatch; start the item from the beginning. ${e.message}` });
     }
     return out;
@@ -1837,15 +1854,28 @@ export class RuntimeSession {
         taskName: `${r.id.toLowerCase().replace(/[^a-z0-9]/g, '')}${it.local.dispatches > 1 ? `r${it.local.dispatches}` : ''}`,
         message: `${resumeText}Item ${r.id} (${it.type}${c.answerOnly ? ', answer-only: no dev server, build or full suite' : ''}).${c.answerOnly ? ` FAST PATH (points drop with every minute${it.type === 'PI' ? ', PI is ranked by submit order' : ''}): read brief.json + files/ (MCP material included) once, fill submit.json, run \`${c.validateAnswer}\`, commit, reply READY. No extra evidence or test.log unless the brief lists requiredEvidence; never install validators.` : ` Check the answer with \`${c.validateAnswer}\` (no installs).`} checkoutRoot = worktreeRoot = ${c.worktreeRoot}; folder ${c.folder}; matchRoot ${c.matchRoot}; briefFile ${c.brief?.briefFile}; filesDir ${c.brief?.filesDir}; answer ${c.answer?.submitJson || ''} (evidence in ${c.answer?.evidenceDir || ''}); ports dev=${c.ports?.dev} production=${c.ports?.production} (override fixed runner ports). Read briefFile first: it has the commands, playbook, checklist and organizer files. Work only in this worktree. Stop and return by ${stop} (Game Master clock). Commit the complete item (code, tests, evidence, answer) and reply STATUS READY or PARKED with COMMIT <sha>. Never push, submit, delegate or call Game APIs.`,
       };
+      entry.reasoningEffort = this.workerEffort(it, c);
+      // The orchestrator retypes every spawn message as model output (~1.5 KB each): in the set4 rehearsal
+      // three spawns took 79 s after dispatch_ready returned. The full brief goes to a file next to
+      // briefFile (git-ignored with .mtm-briefs); the spawn message is one line pointing at it.
+      const full = entry.message;
+      const taskFile = c.brief?.briefFile ? path.join(path.dirname(c.brief.briefFile), `task-${entry.taskName}.md`) : null;
+      if (taskFile) {
+        try {
+          fs.writeFileSync(taskFile, `${full}\n`);
+          entry.message = `Item ${r.id}${c.answerOnly ? ' (answer-only FAST PATH)' : ''}: read ${taskFile} first and follow it exactly; it is your complete task. Work only in ${c.worktreeRoot}.`;
+          entry.taskFile = taskFile;
+        } catch { /* keep the full inline message */ }
+      }
       spawn.push(entry);
-      it.local.spawnEntry = { taskName: entry.taskName, message: entry.message, at: this.now(), respawns: 0, ...(await this.worktreeFingerprint(c.worktreeRoot)) };
+      it.local.spawnEntry = { taskName: entry.taskName, message: entry.message, reasoningEffort: entry.reasoningEffort, at: this.now(), respawns: 0, ...(await this.worktreeFingerprint(c.worktreeRoot)) };
     }
     const respawnCheck = await this.idleWorkers();
     this.saveState();
     return this.clean({
       ok: true, spawn, waiting, ...(respawnCheck.length ? { respawnCheck } : {}),
       next: (respawnCheck.length ? `respawnCheck: ${respawnCheck.map(e => e.id).join(', ')} show no file change or commit ${Math.round(IDLE_WORKER_MS / 60000)}+ min after dispatch. For each: list_agents; if NO live agent has a task path ending in its previous taskName (${respawnCheck.map(e => e.previousTaskName).join(', ')}), spawn_agent with the entry's taskName and message exactly (same worktree); if one is alive, ignore the entry. ` : '') + (spawn.length
-        ? `Spawn ALL ${spawn.length} worker(s) NOW, in this same turn, before anything else: one spawn_agent per entry with agent_type "team_feature_worker", fork_turns "none", task_name = taskName and message exactly as given (pick a model from allowedModels). If a spawn fails (e.g. "agent thread limit reached"), keep its entry and retry that same spawn right after the next wait_agent; the worktree already exists. Then service READY items.`
+        ? `Spawn ALL ${spawn.length} worker(s) NOW, in this same turn, before anything else: one spawn_agent per entry with agent_type "team_feature_worker", fork_turns "none", task_name = taskName, message exactly as given and reasoning_effort = the entry's reasoningEffort (always pass it: omitted, the worker inherits yours). Omit model (inherit yours) unless your model is not in allowedModels. If a spawn fails (e.g. "agent thread limit reached"), keep its entry and retry that same spawn right after the next wait_agent; the worktree already exists. Then service READY items.`
         : waiting.length ? 'Nothing could be dispatched yet (see waiting); service READY, then wait.' : 'Every open item already has a worker; service READY, then wait.'),
       view: this.view(),
     });

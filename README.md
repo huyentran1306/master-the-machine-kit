@@ -1,4 +1,4 @@
-# Master the Machine Kit3 — 2.8.9
+# Master the Machine Kit3 — 2.9.0
 
 Team pack **Codex**, protocol 4, cho MTM Player. Bản 2.8.0 trên nhánh `codex/kit3_bou_v11`, cập nhật từ nền 2.7.7.
 
@@ -50,6 +50,12 @@ Repo chỉ chứa runtime Codex, tài liệu và fixture giả. Không đưa cre
 Use MTM Player **0.9.44** or newer (from 0.9.44 the Game Master can refuse Init with PLAYER_VERSION_TOO_OLD; the team pack contract and progress schema are unchanged from 0.9.40; 0.9.44 also ships a Linux launcher `mtm-player.sh` + `install-team-pack.sh`). Install into a fresh workspace using the Node command above (or `team-sdlc-pack/install.ps1`), then run the checker and require **READY**. In Player Init, select Codex, set the Codex CLI path to the installed **codex.exe** (absolute path), and choose the match-authorized model in Init. Keep previous match workspaces separate.
 
 > Nhánh `codex/kit3_tran_v2` = dòng kit của Tran dựa trên `codex/kit3_bou_v4` (B, 2.8.0); thư mục `Kit3-tran-v2-<version>`, cùng format với `Kit3-bou-v4-<version>` của B.
+
+## Changelog — 2.9.0 (nhánh `codex/kit3_tran_v2`)
+Bản 2.8.9 giữ nguyên ở thư mục `Kit3-tran-v2-2.8.9` (tag `kit3-tran-v2-2.8.9`) để rollback.
+- **Effort theo từng worker, do helper quyết khi giao việc (không thêm lượt gọi model):** item chỉ trả lời (đa số TASK/PI) `low`; item sửa code (BUG/CR) `medium`; giao lại (PARKED, rollback, mất worker) `high` nếu còn ≥10 phút, ít hơn thì `medium`; item trả lời còn <4 phút vẫn `medium`. `dispatch_ready` trả `reasoningEffort` cho từng entry và orchestrator luôn truyền `reasoning_effort` (bỏ trống thì worker kế thừa effort của orchestrator). Đổi mặc định bằng `parallel.workerEffort` trong game-adapter. Model: kế thừa của orchestrator (sol).
+- **Tin nhắn giao việc 1 dòng:** nội dung đầy đủ ghi ra `.mtm-briefs/<ID>/task-<taskName>.md` (đã git-ignore), tin nhắn spawn chỉ trỏ tới file đó. Lượt set4: orchestrator mất 79 giây gõ lại 3 tin nhắn ~1,5 KB sau `dispatch_ready`; giờ ngắn ~15 lần, đỡ credit output.
+- Orchestrator vẫn để effort `medium` (chỉnh ở form Init của Player / `MTM_REASONING_EFFORT` của auto-rematch); hạ `low` sau khi đo.
 
 ## Changelog — 2.8.9 (nhánh `codex/kit3_tran_v2`)
 - **Lưới an toàn cho item không có worker:** mỗi item giao đi lưu lại tin nhắn giao việc và "dấu vân tay" worktree (HEAD + file thay đổi). Sau 4 phút mà worktree y nguyên (không file nào đổi, không commit), view báo `!! CHECK WORKERS` và đánh thức vòng chờ; `dispatch_ready` trả `respawnCheck` kèm đúng tin nhắn cũ. Orchestrator phải `list_agents` trước: chỉ tạo lại khi KHÔNG có worker sống cho item đó (không bao giờ 2 worker một worktree). Tối đa 2 lần mỗi item; item READY/PARKED/đã integrate/đã nộp không bao giờ bị đưa lại. Trước đây một lần spawn thất bại mà orchestrator quên thử lại thì item nằm im tới hết trận.

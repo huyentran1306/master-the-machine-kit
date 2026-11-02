@@ -944,8 +944,25 @@ export class RuntimeSession {
     if (this.lastParse && !this.lastParse.structured) out.parse = `page structure unknown (${this.lastParse.warnings.join('; ')}): read pageText; pass matchUuid to start_work if needed`;
     if (pageText && this.lastPageText) out.pageText = truncate(this.lastPageText, 12000);
     out.maxCodeWorkers = this.adapter.parallel.maxCodeWorkers;
-    if (this.phase === 'GAME' && this.match.status !== 'FINISHED') out.keepAlive = 'Match running: dispatch_ready whenever DISPATCH NOW shows, submit READY immediately. With workers: native agent wait <=20s, then wait_for_update timeoutMs:1000. Without workers: wait_for_update with no timeoutMs.';
+    if (this.phase === 'GAME' && this.match.status !== 'FINISHED') out.keepAlive = 'Match running: when wait_for_update returns spawn entries, spawn them at once (it already dispatched); otherwise dispatch_ready whenever DISPATCH NOW shows; submit READY immediately. With workers: native agent wait <=20s, then wait_for_update timeoutMs:1000. Without workers: wait_for_update with no timeoutMs.';
     return out;
+  }
+
+  /**
+   * When a wait ends with startable work, run dispatch_ready right here and return its spawn entries:
+   * the orchestrator spawns in the same turn instead of spending a model turn calling dispatch_ready
+   * (DZCZCBAT: PI-01 appeared at 12.0', wait_for_update reported it at 12.14', dispatch_ready was only
+   * called at 12.75' and PI finished third). Entries are kept as recentSpawn so a dispatch_ready call
+   * right after re-offers them instead of returning an empty list.
+   */
+  async withAutoDispatch(out) {
+    if (this.phase !== 'GAME' || ['PAUSED', 'FINISHED'].includes(this.match.status)) return out;
+    let d;
+    try { d = await this.dispatch_ready(); } catch (e) { return { ...out, autoDispatchError: e.message }; }
+    if (!d?.ok || !(d.spawn?.length || d.respawnCheck?.length)) return out;
+    this.recentSpawn = { at: this.now(), spawn: d.spawn || [] };
+    return { ...out, spawn: d.spawn, ...(d.respawnCheck?.length ? { respawnCheck: d.respawnCheck } : {}), waiting: d.waiting,
+      next: `SPAWN NOW (already dispatched by wait_for_update, do not call dispatch_ready for these): ${d.next}`, view: d.view || out.view };
   }
 
   async wait_for_update({ timeoutMs } = {}) {
@@ -953,7 +970,7 @@ export class RuntimeSession {
     const max = Math.min(Number(timeoutMs) || ceiling, ceiling);
     const until = Date.now() + max;
     let lastErr = null;
-    if (this.pendingEvents.length || this.hasDispatchAction()) return this.clean({ ok: true, changed: true, view: this.view({ includeEvents: true }) });
+    if (this.pendingEvents.length || this.hasDispatchAction()) return this.clean(await this.withAutoDispatch({ ok: true, changed: true, view: this.view({ includeEvents: true }) }));
     const startStatus = this.match.status;
     while (Date.now() < until) {
       const r = await this.withLock(() => this.doRefresh());
@@ -961,7 +978,7 @@ export class RuntimeSession {
       const changed = r.ok && !!r.events?.some((e) => e.kind !== 'RESULT'); // grading results do not wake the agent
       const newlyPaused = this.match.status === 'PAUSED' && startStatus !== 'PAUSED'; // a pause that persists is waited out, not spun on
       if (changed || this.hasDispatchAction() || this.match.status === 'FINISHED' || newlyPaused || this.phase !== 'GAME' && this.phase !== 'PREPARATION') {
-        return this.clean({ ok: true, changed, view: this.view({ includeEvents: true, pageText: !!r.events?.some((e) => e.kind === 'NEW' || e.kind === 'EDITED') && !this.lastParse?.structured }) });
+        return this.clean(await this.withAutoDispatch({ ok: true, changed, view: this.view({ includeEvents: true, pageText: !!r.events?.some((e) => e.kind === 'NEW' || e.kind === 'EDITED') && !this.lastParse?.structured }) }));
       }
       const wait = r.ok ? this.adapter.polling.successMs : this.adapter.polling.errorMs;
       if (Date.now() + wait >= until) break;
@@ -1872,6 +1889,18 @@ export class RuntimeSession {
       it.local.spawnEntry = { taskName: entry.taskName, message: entry.message, reasoningEffort: entry.reasoningEffort, at: this.now(), respawns: 0, ...(await this.worktreeFingerprint(c.worktreeRoot)) };
     }
     const respawnCheck = await this.idleWorkers();
+    // Once, within 30 s: covers an orchestrator that ignored the spawn field of wait_for_update; the
+    // no-worker watchdog (4 min) remains the net for anything else.
+    if (!spawn.length && this.recentSpawn && this.now() - this.recentSpawn.at < 30000) {
+      const again = this.recentSpawn.spawn.filter((e) => { const l = this.items.get(e.id)?.local; return l && !l.ready && !l.parked && !isSubmitted(this.items.get(e.id)); });
+      const ageSec = Math.round((this.now() - this.recentSpawn.at) / 1000);
+      this.recentSpawn = null;
+      if (again.length) {
+        this.saveState();
+        return this.clean({ ok: true, spawn: again, alreadyReturned: true, waiting,
+          next: `These ${again.length} entries were returned by wait_for_update ${ageSec} s ago. If you already spawned them, ignore this. Otherwise run list_agents and spawn only entries with no live agent of that task_name; never twice.`, view: this.view() });
+      }
+    }
     this.saveState();
     return this.clean({
       ok: true, spawn, waiting, ...(respawnCheck.length ? { respawnCheck } : {}),
@@ -2078,6 +2107,9 @@ export class RuntimeSession {
         this.state.nextPortSlot = slot + 1;
       }
       G.ensureExcluded(this.checkoutRoot, '/.mtm-wt/');
+      // `node_modules/` in the app .gitignore matches directories only; the worktree's node_modules is a
+      // symlink and showed as untracked: integrate refused WORKER_DIRTY (PI-01 and TASK-03 in DZCZCBAT).
+      G.ensureExcluded(this.checkoutRoot, 'node_modules');
       const wtRoot = path.join(base, id);
       if (!fs.existsSync(wtRoot)) {
         const r = await G.worktreeAdd(this.checkoutRoot, wtRoot, `mtm-wt/${id}`, resume?.commit || 'HEAD');
@@ -2129,7 +2161,7 @@ export class RuntimeSession {
       if (urgent && urgent.id !== id) return { ok: false, error: 'DEADLINE_READY_FIRST', next: `Integrate and submit ${urgent.id} first.` };
       const wt = it.local.worktree;
       if (!wt) return { ok: false, error: 'NO_WORKTREE' };
-      const workerDirty = await G.statusPorcelain(wt.worktreeRoot);
+      const workerDirty = (await G.statusPorcelain(wt.worktreeRoot))?.filter((l) => !/(^|\/)node_modules\/?$/.test(l.slice(3).trim())) ?? null;
       if (!workerDirty || workerDirty.length) return { ok: false, error: 'WORKER_DIRTY', next: 'Ask the worker to finish evidence, self-review and commit before READY.' };
       const sha = await G.revParse(wt.worktreeRoot, 'HEAD');
       if (sha === wt.integratedWorkerSha) return { ok: true, integratedSha: wt.integratedSha, replay: true };

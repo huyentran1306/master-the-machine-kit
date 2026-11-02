@@ -1,4 +1,4 @@
-# Master the Machine Kit3 — 2.9.1
+# Master the Machine Kit3 — 2.9.2
 
 Team pack **Codex**, protocol 4, cho MTM Player. Bản 2.8.0 trên nhánh `codex/kit3_bou_v11`, cập nhật từ nền 2.7.7.
 
@@ -50,6 +50,14 @@ Repo chỉ chứa runtime Codex, tài liệu và fixture giả. Không đưa cre
 Use MTM Player **0.9.44** or newer (from 0.9.44 the Game Master can refuse Init with PLAYER_VERSION_TOO_OLD; the team pack contract and progress schema are unchanged from 0.9.40; 0.9.44 also ships a Linux launcher `mtm-player.sh` + `install-team-pack.sh`). Install into a fresh workspace using the Node command above (or `team-sdlc-pack/install.ps1`), then run the checker and require **READY**. In Player Init, select Codex, set the Codex CLI path to the installed **codex.exe** (absolute path), and choose the match-authorized model in Init. Keep previous match workspaces separate.
 
 > Nhánh `codex/kit3_tran_v2` = dòng kit của Tran dựa trên `codex/kit3_bou_v4` (B, 2.8.0); thư mục `Kit3-tran-v2-<version>`, cùng format với `Kit3-bou-v4-<version>` của B.
+
+## Changelog — 2.9.2 (nhánh `codex/kit3_tran_v2`)
+Bản trước giữ ở `Kit3-tran-v2-2.9.1` (tag `kit3-tran-v2-2.9.1`) để rollback. Trận luyện tập DZCZCBAT (2/11, 2.9.1): BAK 910 (hạng 3/4; LAZ 986, AIK 984). Mất: PI-01 −40 (nộp thứ 3, phút 16,5), BUG-02 −20, CR-01/CR-02/CR-03 −10 mỗi item (test ẩn). TASK và effort low không mất điểm.
+- **`wait_for_update` tự giao việc:** có item mới thì chạy luôn `dispatch_ready` và trả `spawn` cho orchestrator tạo worker ngay trong lượt đó (trận DZCZCBAT: PI ra phút 12,0, orchestrator mất ~37 giây suy nghĩ mới gọi `dispatch_ready`). Gọi `dispatch_ready` trong 30 giây sau đó thì được đưa lại 1 lần (kèm nhắc kiểm tra `list_agents`); lưới cuối vẫn là watchdog 4 phút.
+- **`node_modules` không còn làm WORKER_DIRTY:** `.gitignore` của app ghi `node_modules/` (chỉ khớp thư mục) nên link `node_modules` trong worktree hiện như file lạ; PI-01 và TASK-03 bị nộp hụt lần đầu (~40 giây mỗi lần). Kit thêm `node_modules` vào exclude và bỏ qua dòng đó khi integrate.
+- **Xem ảnh giới hạn:** worker xem tối đa 2 ảnh, mỗi ảnh 1 lần, bản thu nhỏ ≤800 px; còn lại kiểm bằng script chụp. Sau khi xem 5–6 ảnh, lượt gọi model kế tiếp treo 5,8–11 phút khi mạng yếu (CR-01 ở H6GGOXRM và DZCZCBAT).
+- **CR/BUG theo chuẩn công ty một cách chặt:** chỉ nhận đúng dạng chuẩn liệt kê, điều kiện trong ngoặc chỉ áp cho dạng đi kèm, mơ hồ thì chọn cách chặt hơn, viết test phủ định cho đầu vào "gần đúng" (CR-01/02/03 mất 10 điểm test ẩn mỗi item).
+- **Luật phạm vi:** không sửa hành vi thuộc Out of scope hay thuộc item khác (vd. luật trạng thái thanh toán của BUG-03), kể cả khi test gốc fail vì nó; ghi rõ "pre-existing failure owned by <ID>" (BUG-02 mất 20/100 ở H6GGOXRM và DZCZCBAT sau khi sửa luôn luật của BUG-03; các đội không sửa đạt 100).
 
 ## Changelog — 2.9.1 (nhánh `codex/kit3_tran_v2`)
 Bản trước giữ ở `Kit3-tran-v2-2.9.0` (tag `kit3-tran-v2-2.9.0`) và `Kit3-tran-v2-2.8.9` để rollback.

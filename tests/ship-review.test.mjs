@@ -156,3 +156,32 @@ test('worker reasoning effort: low for answer-only, medium for code, high for a 
   s.adapter = { parallel: { workerEffort: { answerOnly: 'medium' } } };
   assert.equal(s.workerEffort(it(), { answerOnly: true }), 'medium', 'adapter override');
 });
+
+test('a node_modules symlink in the worker copy is not WORKER_DIRTY even when .gitignore says node_modules/', async (t) => {
+  const { s, root, mode, mk } = shipFixture(t);
+  fs.writeFileSync(path.join(root, '.gitignore'), 'node_modules/\n');
+  git(root, 'add', '.gitignore'); git(root, 'commit', '-qm', 'dir-only ignore'); git(root, 'push', '-q', 'origin', 'main');
+  s.submit_work = async (a) => { s.items.get(a.backlogItemKey).local.receiptId = 'r'; return { ok: true, outcome: 'SUBMITTED' }; };
+  const c = await mk('BUG-75', null); mode('green');
+  const link = path.join(c.matchRoot, 'src', 'node_modules');
+  if (!fs.existsSync(link)) fs.symlinkSync(path.join(root, 'assigned', 'src', 'node_modules'), link);
+  const r = await s.ship({ backlogItemKey: 'BUG-75' });
+  assert.notEqual(r.error, 'WORKER_DIRTY', JSON.stringify(r));
+  assert.equal(r.ok, true, JSON.stringify(r));
+});
+
+test('wait_for_update dispatches by itself; dispatch_ready re-offers those entries once within 30 s', async (t) => {
+  const { s } = shipFixture(t);
+  s.start_work = async ({ backlogItemKey }) => { const it = s.items.get(backlogItemKey); it.local.startedAt = Date.now(); return { ok: true }; };
+  s.doRefresh = async () => ({ ok: true, events: [] });
+  s.items.set('TASK-41', { id: 'TASK-41', type: 'TASK', revealedAt: Date.now(), local: {} });
+  s.materialCache['TASK-41'] = { files: {}, submitTemplate: { backlogId: 'TASK-41' } };
+  const w = await s.wait_for_update({ timeoutMs: 1000 });
+  assert.equal(w.spawn?.[0]?.id, 'TASK-41', JSON.stringify(w).slice(0, 400));
+  assert.match(w.next, /^SPAWN NOW/);
+  const again = await s.dispatch_ready();
+  assert.equal(again.alreadyReturned, true);
+  assert.equal(again.spawn[0].id, 'TASK-41');
+  const third = await s.dispatch_ready();
+  assert.equal(third.spawn.length, 0, 'offered once only');
+});

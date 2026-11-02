@@ -366,10 +366,14 @@ test('parked commit survives recovery and resumes before new work after PI submi
   recovered.matchId = s.matchId; recovered.repository = s.repository;
   recovered.phase = 'GAME'; recovered.freeMemory = s.freeMemory;
   assert.equal(recovered.loadState({ fresh: false }), true);
-  const view = (await recovered.wait_for_update()).view;
+  const view = recovered.view();
   assert.match(view.next, /^BUG-91 .*resume/);
   assert.equal(view.parked[0].commit, commit);
   assert.equal(view.parked[0].remainingStep, 'Verify development rendering only');
+  // 2.9.2: the wait dispatches by itself and returns the resume spawn entry first.
+  const waited = await recovered.wait_for_update();
+  assert.equal(waited.spawn?.[0]?.id, 'BUG-91', JSON.stringify(waited.spawn));
+  assert.match(fs.readFileSync(waited.spawn[0].taskFile, 'utf8'), /^RESUME: preserved commit/);
   const resume = await recovered.worktree({ action: 'create', backlogItemKey: 'BUG-91' });
   assert.equal(resume.ok, true, JSON.stringify(resume));
   assert.equal(resume.worktreeRoot, wt.worktreeRoot);

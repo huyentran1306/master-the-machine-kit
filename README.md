@@ -1,4 +1,4 @@
-# Master the Machine Kit3 — 2.9.0
+# Master the Machine Kit3 — 2.9.1
 
 Team pack **Codex**, protocol 4, cho MTM Player. Bản 2.8.0 trên nhánh `codex/kit3_bou_v11`, cập nhật từ nền 2.7.7.
 
@@ -50,6 +50,11 @@ Repo chỉ chứa runtime Codex, tài liệu và fixture giả. Không đưa cre
 Use MTM Player **0.9.44** or newer (from 0.9.44 the Game Master can refuse Init with PLAYER_VERSION_TOO_OLD; the team pack contract and progress schema are unchanged from 0.9.40; 0.9.44 also ships a Linux launcher `mtm-player.sh` + `install-team-pack.sh`). Install into a fresh workspace using the Node command above (or `team-sdlc-pack/install.ps1`), then run the checker and require **READY**. In Player Init, select Codex, set the Codex CLI path to the installed **codex.exe** (absolute path), and choose the match-authorized model in Init. Keep previous match workspaces separate.
 
 > Nhánh `codex/kit3_tran_v2` = dòng kit của Tran dựa trên `codex/kit3_bou_v4` (B, 2.8.0); thư mục `Kit3-tran-v2-<version>`, cùng format với `Kit3-bou-v4-<version>` của B.
+
+## Changelog — 2.9.1 (nhánh `codex/kit3_tran_v2`)
+Bản trước giữ ở `Kit3-tran-v2-2.9.0` (tag `kit3-tran-v2-2.9.0`) và `Kit3-tran-v2-2.8.9` để rollback.
+- **Worker tự lấy build slot, không chờ orchestrator chuyển lời.** Trận luyện tập H6GGOXRM (2/11, kit 2.8.9): worker CR-01 xin build slot qua orchestrator lúc phút 14, slot đã cấp nhưng orchestrator bận ship nên tới phút 26,9 mới báo; worker ngồi không **11 phút** cho một lần `pnpm build` chạy 2,4 giây. Giờ worker chạy `node <pack>/src/build-lock.mjs --slots N -- pnpm build`: lock là thư mục `.mtm-notes/build-slots/slot-i` của main checkout (mkdir nguyên tử trên mọi OS), tự thu hồi slot của tiến trình đã chết, không bao giờ chờ quá 5 phút (quá thì chạy luôn). Production server không cần lease.
+- Cùng trận: 9/10 item nộp; mất mạng (DNS) 11:55–12:04 làm CR-02/TASK-04/CR-03 đã xong phải chờ push; CR-01 không kịp.
 
 ## Changelog — 2.9.0 (nhánh `codex/kit3_tran_v2`)
 Bản 2.8.9 giữ nguyên ở thư mục `Kit3-tran-v2-2.8.9` (tag `kit3-tran-v2-2.8.9`) để rollback.

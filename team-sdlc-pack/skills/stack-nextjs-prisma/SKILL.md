@@ -9,7 +9,7 @@ App root is `<matchRoot>/<app.path>` (usually `src/`). Run every command from th
 `pnpm install --frozen-lockfile` · `pnpm test` (vitest) · `pnpm typecheck` · `pnpm build` · `pnpm exec prisma migrate deploy` · `pnpm db:seed`
 
 ## Resource limits
-For brief.answerOnly, compute the answer and validate the shipped schema; skip servers, builds and suites. Before next build or production start, request build_slot acquire through the orchestrator's shared helper (parallel.maxBuilds defaults to 2). Wait for granted; hold the lease through production shutdown. Release on success/failure. Run one build or production server per lease. Start servers with absolute worktree entrypoint paths; stop dev/production servers before READY/PARKED.
+For brief.answerOnly, compute the answer and validate the shipped schema; skip servers, builds and suites. Run next build through the build lock in your task (node <pack>/src/build-lock.mjs -- pnpm build): it waits for one of parallel.maxBuilds slots (default 2) by itself, with no orchestrator round trip. Start servers with absolute worktree entrypoint paths; stop dev/production servers before READY/PARKED.
 
 ## Where things live (typical layout)
 - `src/app/**` — routes and pages (App Router). `src/app/(app)/...` authed pages, `src/app/api/**` route handlers.

@@ -455,6 +455,7 @@ test('dispatch_ready dispatches every open item in one call and respawns workers
   }
   assert.ok(first.spawn.every(sp => ['low', 'medium'].includes(sp.reasoningEffort)));
   assert.equal(first.spawn.find(sp => sp.id === 'BUG-31').reasoningEffort, 'medium');
+  assert.match(task(first.spawn.find(sp => sp.id === 'BUG-31')), /Builds: `node ".*build-lock\.mjs" --slots \d+ -- <build command>`/);
   assert.match(first.next, /reasoning_effort/);
   assert.match(first.next, /Spawn ALL 4 worker\(s\) NOW/);
   assert.equal(s.view().alerts.some(a => /DISPATCH NOW/.test(a)), false);

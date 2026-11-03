@@ -70,6 +70,18 @@ export function assertionFailure(r, kind) {
   return false;
 }
 
+/** Names of failing tests in a vitest/jest run ("FAIL  file > suite > name" / "● suite › name"). */
+export function failingTests(text = '') {
+  const out = new Set();
+  for (const line of String(text).split('\n')) {
+    const v = line.match(/^\s*FAIL\s+(\S.*?>.*?)\s*$/);
+    if (v) out.add(v[1].replace(/\s+\d+ms$/, '').replace(/\s+/g, ' ').trim());
+    const j = line.match(/^\s*●\s+(.+›.+?)\s*$/);
+    if (j) out.add(j[1].replace(/\s+/g, ' ').trim());
+  }
+  return out;
+}
+
 /** Summary line of a vitest/jest/node --test run. */
 export function testSummary(text = '') {
   const pick = (re) => (text.match(re) || [])[0];

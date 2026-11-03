@@ -6,7 +6,7 @@ import crypto from 'node:crypto';
 import os from 'node:os';
 import { answerOnly, dispatchPolicy, integrationGate, mapBounded, BuildQueue, availableMemory } from './dispatch.mjs';
 import { stopWorktreeProcesses } from './process-cleanup.mjs';
-import { PNPM_SAFE_ENV, itemTestFiles, gateCommands, runBounded, assertionFailure, testSummary } from './gate.mjs';
+import { PNPM_SAFE_ENV, itemTestFiles, gateCommands, runBounded, assertionFailure, testSummary, failingTests } from './gate.mjs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 const VALIDATE_ANSWER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'validate-answer.mjs');
@@ -1949,18 +1949,27 @@ export class RuntimeSession {
     ]);
     // Nothing runnable found is not a green gate: treat it like an environment problem.
     const green = !!(tr || ty) && (!tr || tr.exit === 0) && (!ty || ty.exit === 0);
-    const code = assertionFailure(tr, 'tests') || assertionFailure(ty, 'types');
-    const verdict = green ? 'GREEN' : code ? 'CODE_FAILURE' : 'ENVIRONMENT';
+    let code = assertionFailure(tr, 'tests') || assertionFailure(ty, 'types');
+    // A failure the preparation baseline already had is not this item's: in EFMN62ZO BUG-01's gate failed only on
+    // BUG-03's red accounting test, was rolled back as CODE_FAILURE and reached Game Master 5 minutes later.
+    let preExisting = null;
+    if (!green && code && !assertionFailure(ty, 'types') && (!ty || ty.exit === 0)) {
+      const fails = [...failingTests(tr?.text || '')];
+      let base = new Set();
+      try { base = failingTests(fs.readFileSync(path.join(notes, 'test.log'), 'utf8')); } catch { /* no baseline */ }
+      if (fails.length && fails.every((f) => base.has(f))) { preExisting = fails; code = false; }
+    }
+    const verdict = green || preExisting ? 'GREEN' : code ? 'CODE_FAILURE' : 'ENVIRONMENT';
     const leftNow = effectiveLeft(it, this.now(), this.match.endsAt).left;
     const part = (r, label) => r ? { command: label, exit: r.exit, timedOut: r.timedOut, seconds: Math.round(r.ms / 100) / 10, summary: testSummary(r.text), tail: r.tail.slice(-6) } : { command: null, note: 'no runner found' };
-    it.local.gate = { verdict, at: this.now(), scope };
+    it.local.gate = { verdict, at: this.now(), scope, ...(preExisting ? { preExisting } : {}) };
     this.saveState();
     const leftTxt = leftNow == null ? '' : ` (${leftNow.toFixed(1)}m left)`;
-    const next = verdict === 'GREEN' ? `Gate GREEN: push now, then submit_work ${id} immediately${leftTxt}.`
+    const next = verdict === 'GREEN' ? `Gate GREEN${preExisting ? ` (only pre-existing baseline failures: ${preExisting.join('; ').slice(0, 200)})` : ''}: push now, then submit_work ${id} immediately${leftTxt}.`
       : verdict === 'CODE_FAILURE' ? `Failing assertions/type errors: worktree rollback ${id}, send the worker .mtm-notes/gate-${id}-*.log and the main SHA for a fix-up.`
       : leftNow != null && leftNow <= 3 ? `ENVIRONMENT problem, not a code failure${leftTxt}: do NOT roll back. Push and submit_work ${id} NOW with the worker-verified commit.`
       : `ENVIRONMENT problem (timeout/hang/tool exit without a failing test), not a code failure: do NOT roll back. Call gate ${id} once more; if it repeats, push and submit_work (the worker already passed MVS + suite on its worktree).`;
-    return this.clean({ ok: verdict === 'GREEN', verdict, scope, files: scope === 'item' ? own : 'full suite', budgetSec, seconds: Math.round((Date.now() - t0) / 100) / 10, tests: part(tr, test?.label), types: part(ty, types?.label), next });
+    return this.clean({ ok: verdict === 'GREEN', verdict, scope, preExisting: preExisting || undefined, files: scope === 'item' ? own : 'full suite', budgetSec, seconds: Math.round((Date.now() - t0) / 100) / 10, tests: part(tr, test?.label), types: part(ty, types?.label), next });
   }
 
   /**
@@ -2020,9 +2029,9 @@ export class RuntimeSession {
     const c = g.verdict === 'GREEN' ? counts(g.tests?.summary) : null;
     let recorded = false;
     if (c && c.passed > 0 && !it.local.answerOnly) {
-      const executed = c.passed + c.failed + c.skipped;
+      const executed = c.passed + (g.preExisting ? 0 : c.failed) + c.skipped; // pre-existing baseline failures are reported in the summary, not as this item's
       const prevReq = Math.min(this.lastTests?.[id]?.required ?? 0, c.passed); // the Player requires executed >= required for PASSED
-      const rp = await this.report_progress({ event: { type: 'BACKLOG_TESTS', backlogId: id, status: 'PASSED', required: prevReq, executed, passed: c.passed, failed: 0, skipped: c.skipped, summary: oneLine(`Integration gate in main (${g.scope === 'item' ? "item's own tests" : 'full suite'}): ${g.tests.summary}; typecheck exit ${g.types?.exit ?? 'n/a'}.`) } });
+      const rp = await this.report_progress({ event: { type: 'BACKLOG_TESTS', backlogId: id, status: 'PASSED', required: prevReq, executed, passed: c.passed, failed: 0, skipped: c.skipped, summary: oneLine(`Integration gate in main (${g.scope === 'item' ? "item's own tests" : 'full suite'}): ${g.tests.summary}; typecheck exit ${g.types?.exit ?? 'n/a'}${g.preExisting ? `; excluded ${g.preExisting.length} pre-existing baseline failure(s) also red before this item: ${g.preExisting.join('; ')}` : ''}.`) } });
       recorded = rp?.ok !== false;
     }
     // A forced/late ENVIRONMENT gate, or a GREEN run whose output could not be counted, has no test record:

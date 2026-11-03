@@ -72,3 +72,11 @@ test('answer digest has item, template, KB once, and one UTC line per log entry'
   assert.match(md, /2026-10-27T00:00:00Z \(logged 2026-10-27T07:00:00\+07:00\) \| INFO \| deploy \| d-1 \| rel-1 deployed \| \{"flag":"x.y"\}/);
   assert.match(md, /Not complete for: api \(27\/37, over limit: INFO\)/);
 });
+
+test('failingTests reads vitest and jest failure names, so baseline-only failures can be told apart', async () => {
+  const { failingTests } = await import('../team-sdlc-pack/src/gate.mjs');
+  const vitest = ' FAIL  tests/accounting.test.ts > double-entry core > payment flips status\nAssertionError: expected PARTIAL\n      Tests  1 failed | 22 passed (23)';
+  assert.deepEqual([...failingTests(vitest)], ['tests/accounting.test.ts > double-entry core > payment flips status']);
+  assert.deepEqual([...failingTests('  ● invoices › rounds VND\n')], ['invoices › rounds VND']);
+  assert.equal(failingTests('Tests 3 passed').size, 0);
+});

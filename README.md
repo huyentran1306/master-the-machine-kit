@@ -57,6 +57,7 @@ Use MTM Player **0.9.44** or newer (from 0.9.44 the Game Master can refuse Init 
 - `finish-answer.mjs`: một lệnh kiểm schema + commit thư mục đáp án + in khối STATUS READY. Trước đây worker tốn ~45 s cho chạy lại validator, git add, kiểm evidence, commit lần hai và tin nhắn báo tiến độ.
 - Sửa lỗi `validate-answer.mjs`: khi không có `--required` nó bỏ mất tham số đầu, nên đem file schema ra kiểm như đáp án và **không hề kiểm schema** ("ANSWER OK (no schema given)").
 - Bài FAST PATH: không mở đầu dài dòng, không gửi tin báo tiến độ.
+- Gate: test đỏ mà bản chuẩn bị (baseline) cũng đã đỏ thì không còn tính là CODE_FAILURE (EFMN62ZO: BUG-01 bị rollback chỉ vì test của BUG-03, nộp trễ 5 phút).
 - BUG/CR: khi bộ test đỏ chỉ vì quy tắc của câu khác, worker không tự sửa mà báo `WAITS-FOR: <ID>`; orchestrator nộp câu đó trước rồi cho worker rebase, chạy lại test rồi mới nộp (EFMN62ZO: BUG-02 mất TC-04 = 20 điểm vì nộp lúc lỗi của BUG-03 còn trong main; grader chạy cả bộ test trên bản nộp).
 
 ## Changelog — 2.9.3 (nhánh `codex/kit3_tran_v2`)

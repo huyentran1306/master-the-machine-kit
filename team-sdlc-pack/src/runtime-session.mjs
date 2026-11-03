@@ -945,7 +945,7 @@ export class RuntimeSession {
     if (this.lastParse && !this.lastParse.structured) out.parse = `page structure unknown (${this.lastParse.warnings.join('; ')}): read pageText; pass matchUuid to start_work if needed`;
     if (pageText && this.lastPageText) out.pageText = truncate(this.lastPageText, 12000);
     out.maxCodeWorkers = this.adapter.parallel.maxCodeWorkers;
-    if (this.phase === 'GAME' && this.match.status !== 'FINISHED') out.keepAlive = 'Match running: when wait_for_update returns spawn entries, spawn them at once (it already dispatched); otherwise dispatch_ready whenever DISPATCH NOW shows; submit READY immediately. With workers: native agent wait <=20s, then wait_for_update timeoutMs:1000. Without workers: wait_for_update with no timeoutMs.';
+    if (this.phase === 'GAME' && this.match.status !== 'FINISHED') out.keepAlive = 'Match running: when wait_for_update returns spawn entries, spawn them at once (it already dispatched); otherwise dispatch_ready whenever DISPATCH NOW shows; submit READY immediately. With workers: wait_agent <=45s, shortened to the next cutoff or known wave. Service a completion immediately; only after a wait timeout call wait_for_update timeoutMs:1000. Near a known wave (<=15s), call wait_for_update through the wave instead. Never use generic wait. Without workers: wait_for_update with no timeoutMs.';
     return out;
   }
 
@@ -961,9 +961,16 @@ export class RuntimeSession {
     let d;
     try { d = await this.dispatch_ready(); } catch (e) { return { ...out, autoDispatchError: e.message }; }
     if (!d?.ok || !(d.spawn?.length || d.respawnCheck?.length)) return out;
-    this.recentSpawn = { at: this.now(), spawn: d.spawn || [] };
-    return { ...out, spawn: d.spawn, ...(d.respawnCheck?.length ? { respawnCheck: d.respawnCheck } : {}), waiting: d.waiting,
-      next: `SPAWN NOW (already dispatched by wait_for_update, do not call dispatch_ready for these): ${d.next}`, view: d.view || out.view };
+    const reoffer = d.alreadyReturned === true;
+    if (!reoffer && d.spawn?.length) this.recentSpawn = { at: this.now(), spawn: d.spawn };
+    const next = reoffer
+      ? `REOFFER ONLY (do not duplicate a live worker; this entry is not cached again): ${d.next}`
+      : d.spawn?.length
+        ? `SPAWN NOW (already dispatched by wait_for_update, do not call dispatch_ready for these): ${d.next}`
+        : `CHECK WORKERS: ${d.next}`;
+    return { ...out, spawn: d.spawn, ...(reoffer ? { alreadyReturned: true } : {}),
+      ...(d.respawnCheck?.length ? { respawnCheck: d.respawnCheck } : {}), waiting: d.waiting,
+      next, view: d.view || out.view };
   }
 
   async wait_for_update({ timeoutMs } = {}) {

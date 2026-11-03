@@ -11,26 +11,27 @@ import { fileURLToPath } from 'node:url';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
+const realPath = (value) => { try { return fs.realpathSync(value); } catch { return path.resolve(value); } };
 
 /** Main checkout root of a worktree (or of the checkout itself): its git common dir's parent. */
 export function slotDirFor(cwd) {
-  let dir = path.resolve(cwd);
+  let dir = realPath(cwd);
   for (;;) {
     const dotgit = path.join(dir, '.git');
     if (fs.existsSync(dotgit)) {
-      let common = dotgit;
+      let common = realPath(dotgit);
       if (fs.statSync(dotgit).isFile()) {
         const m = fs.readFileSync(dotgit, 'utf8').match(/^gitdir:\s*(.+)\s*$/m);
         if (m) {
-          const gitdir = path.resolve(dir, m[1].trim());
+          const gitdir = realPath(path.resolve(dir, m[1].trim()));
           const c = path.join(gitdir, 'commondir');
-          common = fs.existsSync(c) ? path.resolve(gitdir, fs.readFileSync(c, 'utf8').trim()) : gitdir;
+          common = fs.existsSync(c) ? realPath(path.resolve(gitdir, fs.readFileSync(c, 'utf8').trim())) : gitdir;
         }
       }
-      return path.join(path.dirname(common), '.mtm-notes', 'build-slots');
+      return path.join(realPath(path.dirname(common)), '.mtm-notes', 'build-slots');
     }
     const up = path.dirname(dir);
-    if (up === dir) return path.join(path.resolve(cwd), '.mtm-notes', 'build-slots');
+    if (up === dir) return path.join(realPath(cwd), '.mtm-notes', 'build-slots');
     dir = up;
   }
 }

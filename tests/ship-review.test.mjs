@@ -170,7 +170,7 @@ test('a node_modules symlink in the worker copy is not WORKER_DIRTY even when .g
   assert.equal(r.ok, true, JSON.stringify(r));
 });
 
-test('wait_for_update dispatches by itself; dispatch_ready re-offers those entries once within 30 s', async (t) => {
+test('wait_for_update auto-dispatch re-offers a missed spawn once without caching the re-offer', async (t) => {
   const { s } = shipFixture(t);
   s.start_work = async ({ backlogItemKey }) => { const it = s.items.get(backlogItemKey); it.local.startedAt = Date.now(); return { ok: true }; };
   s.doRefresh = async () => ({ ok: true, events: [] });
@@ -179,9 +179,13 @@ test('wait_for_update dispatches by itself; dispatch_ready re-offers those entri
   const w = await s.wait_for_update({ timeoutMs: 1000 });
   assert.equal(w.spawn?.[0]?.id, 'TASK-41', JSON.stringify(w).slice(0, 400));
   assert.match(w.next, /^SPAWN NOW/);
-  const again = await s.dispatch_ready();
+  s.pendingEvents.push({ kind: 'BACKLOG_UPDATED', id: 'TASK-41' });
+  const again = await s.wait_for_update({ timeoutMs: 1000 });
   assert.equal(again.alreadyReturned, true);
   assert.equal(again.spawn[0].id, 'TASK-41');
-  const third = await s.dispatch_ready();
-  assert.equal(third.spawn.length, 0, 'offered once only');
+  assert.match(again.next, /^REOFFER ONLY/);
+  assert.equal(s.recentSpawn, null, 'the cautious re-offer is not cached again');
+  s.pendingEvents.push({ kind: 'BACKLOG_UPDATED', id: 'TASK-41' });
+  const third = await s.wait_for_update({ timeoutMs: 1000 });
+  assert.equal(third.spawn?.length || 0, 0, 'offered once only');
 });

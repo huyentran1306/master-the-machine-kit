@@ -30,10 +30,9 @@ test('slot directory is shared by a checkout and its worktrees; the CLI runs the
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['-C', root, '-c', 'user.email=x@x', '-c', 'user.name=x', 'commit', '-q', '--allow-empty', '-m', 'b']);
   execFileSync('git', ['-C', root, 'worktree', 'add', '-q', path.join(root, '.mtm-wt', 'BUG-1')]);
-  const real = (p) => path.join(fs.realpathSync(path.dirname(path.dirname(p))), path.basename(path.dirname(p)), path.basename(p));
   const expect = path.join(fs.realpathSync(root), '.mtm-notes', 'build-slots');
-  assert.equal(slotDirFor(root).replace(root, fs.realpathSync(root)), expect);
-  assert.equal(slotDirFor(path.join(root, '.mtm-wt', 'BUG-1')).replace(root, fs.realpathSync(root)), expect, 'a worktree uses the main checkout\'s slots');
+  assert.equal(slotDirFor(root), expect);
+  assert.equal(slotDirFor(path.join(root, '.mtm-wt', 'BUG-1')), expect, 'a worktree uses the main checkout\'s slots');
   const r = spawnSync(process.execPath, [LOCK, '--', process.execPath, '-e', 'process.exit(3)'], { cwd: path.join(root, '.mtm-wt', 'BUG-1'), encoding: 'utf8' });
   assert.equal(r.status, 3, r.stderr);
   assert.match(r.stderr, /\[build-lock\] slot slot-0/);

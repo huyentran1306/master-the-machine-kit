@@ -24,7 +24,7 @@ export const TOOLS = [
   },
   {
     name: 'wait_for_update',
-    description: 'Wait for Game Master events. With active workers: native agent wait <=20s, then call this with timeoutMs:1000 to drain events/check the clock. Without workers omit timeoutMs. Never end the turn while the match runs.',
+    description: 'Wait for Game Master events. With active workers: wait_agent <=45s, shortened to the next cutoff or known wave. Service a completion immediately; only after a timeout call this with timeoutMs:1000. Near a known wave (<=15s), call this through the wave instead. Never use generic wait. Without workers omit timeoutMs. Never end the turn while the match runs.',
     inputSchema: obj({ timeoutMs: { type: 'integer', minimum: 1000, maximum: 55000 } }),
     handler: (s, a) => s.wait_for_update(a),
   },

@@ -94,7 +94,9 @@ export function buildRepoMap(matchRoot, recon = {}) {
 export function ensureRepoMap({ checkoutRoot, matchRoot, recon }) {
   try {
     const root = path.resolve(checkoutRoot);
-    const relative = path.relative(root, fs.realpathSync(matchRoot));
+    const canonicalRoot = fs.realpathSync(root);
+    const canonicalMatchRoot = fs.realpathSync(matchRoot);
+    const relative = path.relative(canonicalRoot, canonicalMatchRoot);
     if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('assigned folder must be inside checkoutRoot');
     const dir = path.join(root, '.mtm-notes');
     if (!ensureExcluded(root, '/.mtm-notes/')) throw new Error('cannot ignore local notes');

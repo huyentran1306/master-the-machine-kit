@@ -1,4 +1,4 @@
-# Master the Machine Kit3 — 2.9.2
+# Master the Machine Kit3 — 2.9.3
 
 Team pack **Codex**, protocol 4, cho MTM Player. Bản 2.8.0 trên nhánh `codex/kit3_bou_v11`, cập nhật từ nền 2.7.7.
 
@@ -50,6 +50,12 @@ Repo chỉ chứa runtime Codex, tài liệu và fixture giả. Không đưa cre
 Use MTM Player **0.9.44** or newer (from 0.9.44 the Game Master can refuse Init with PLAYER_VERSION_TOO_OLD; the team pack contract and progress schema are unchanged from 0.9.40; 0.9.44 also ships a Linux launcher `mtm-player.sh` + `install-team-pack.sh`). Install into a fresh workspace using the Node command above (or `team-sdlc-pack/install.ps1`), then run the checker and require **READY**. In Player Init, select Codex, set the Codex CLI path to the installed **codex.exe** (absolute path), and choose the match-authorized model in Init. Keep previous match workspaces separate.
 
 > Nhánh `codex/kit3_tran_v2` = dòng kit của Tran dựa trên `codex/kit3_bou_v4` (B, 2.8.0); thư mục `Kit3-tran-v2-<version>`, cùng format với `Kit3-bou-v4-<version>` của B.
+
+## Changelog — 2.9.3 (nhánh `codex/kit3_tran_v2`)
+
+- PI: kit tự quét toàn bộ log production trước khi giao việc (mọi service; service bị cắt 20 dòng thì tách theo ERROR/WARN/INFO), gộp thành một file `files/mcp/<tool>-merged-*.json` đã khử trùng lặp, xếp cũ→mới theo UTC, kèm danh sách `truncated`. Trước đây câu truy vấn là cả đề bài nên log trả 0 dòng, worker PI-01 (DZCZCBAT) phải nhờ orchestrator tra ~10 lần, mất 2,5 phút.
+- PI: tự tra KB "incident report rules" khi đề nhắc tới quy tắc báo cáo sự cố.
+- Skill backlog-pi và tin nhắn FAST PATH chỉ worker đọc file log gộp, chỉ NEED_INFO cho service trong `truncated`.
 
 ## Changelog — 2.9.2 (nhánh `codex/kit3_tran_v2`)
 Bản trước giữ ở `Kit3-tran-v2-2.9.1` (tag `kit3-tran-v2-2.9.1`) để rollback. Trận luyện tập DZCZCBAT (2/11, 2.9.1): BAK 910 (hạng 3/4; LAZ 986, AIK 984). Mất: PI-01 −40 (nộp thứ 3, phút 16,5), BUG-02 −20, CR-01/CR-02/CR-03 −10 mỗi item (test ẩn). TASK và effort low không mất điểm.

@@ -1,0 +1,55 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { collectMcpMaterial, logServices, parseLogResult } from '../team-sdlc-pack/src/mcp-material.mjs';
+
+const LOGS = [
+  ...Array.from({ length: 25 }, (_, i) => ({ timestamp: `2026-10-27T08:${String(i).padStart(2, '0')}:00Z`, level: i % 5 ? 'INFO' : 'WARN', service: 'reminder-worker', message: `Reminder sent INV-${i}` })),
+  { timestamp: '2026-10-27T07:00:00+07:00', level: 'INFO', service: 'deploy', message: 'rel-1 deployed' },
+  { timestamp: '2026-10-27T09:00:00Z', level: 'ERROR', service: 'status-cache', message: 'stale' },
+];
+const text = data => ({ ok: true, raw: { content: [{ type: 'text', text: JSON.stringify(data) }] } });
+const tools = [
+  { name: 'kb_search', description: 'Internal standards and knowledge base search, incident report rules.', inputSchema: { properties: { query: { type: 'string' } }, required: [] } },
+  { name: 'search_logs', description: 'Search production logs (services: deploy, reminder-worker, status-cache). Returns at most 20 per call.', inputSchema: { properties: { query: { type: 'string' }, service: { type: 'string' } }, required: [] } },
+];
+function server(calls) {
+  return async req => {
+    calls.push(req);
+    if (req.action === 'tools') return { ok: true, tools };
+    if (req.name === 'kb_search') return text({ articles: [{ id: 'KB-INC', q: req.args.query }] });
+    const words = String(req.args.query || '').split(/\s+/).filter(Boolean);
+    const hit = LOGS.filter(e => (!req.args.service || e.service === req.args.service) && words.every(w => JSON.stringify(e).includes(w)));
+    const out = hit.slice().reverse().slice(0, 20);
+    return text({ total: hit.length, returned: out.length, entries: out });
+  };
+}
+
+test('logServices reads the service list from the description', () => {
+  assert.deepEqual(logServices(tools[1]), ['deploy', 'reminder-worker', 'status-cache']);
+  assert.deepEqual(logServices({ description: 'no list here' }), []);
+});
+
+test('parseLogResult reads total/returned/entries', () => {
+  assert.deepEqual(parseLogResult(text({ total: 3, returned: 1, entries: [{ a: 1 }] })), { total: 3, returned: 1, entries: [{ a: 1 }] });
+  assert.equal(parseLogResult({ raw: { content: [{ type: 'text', text: 'nope' }] } }), null);
+});
+
+test('PI items get one merged, deduplicated, oldest-first log file covering every service', async () => {
+  const calls = [];
+  const item = { id: 'PI-01', type: 'PI', title: 'Clients receive reminders', description: 'Follow the incident report rules. Logs are in production.' };
+  const entries = await collectMcpMaterial(item, server(calls));
+  const merged = entries.find(e => e.tool === 'search_logs-merged');
+  assert.ok(merged?.ok);
+  assert.equal(merged.result.unique, LOGS.length);
+  assert.deepEqual(merged.result.truncated, []);
+  assert.equal(merged.result.entries[0].service, 'deploy', 'UTC-normalised oldest first (07:00+07:00 = 00:00Z)');
+  assert.ok(calls.some(c => c.name === 'kb_search' && c.args.query === 'incident report rules'));
+  assert.ok(calls.some(c => c.args?.service === 'reminder-worker' && c.args.query === 'INFO'), 'truncated service is split by level');
+  assert.equal(entries.filter(e => e.tool === 'search_logs').length <= 2, true, 'sweep calls are not one brief file each');
+});
+
+test('non-incident items do not sweep logs', async () => {
+  const calls = [];
+  await collectMcpMaterial({ id: 'CR-01', type: 'CR', title: 'Export', description: 'Add a CSV export.' }, server(calls));
+  assert.equal(calls.some(c => c.args?.service), false);
+});

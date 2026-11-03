@@ -1,4 +1,4 @@
-# Master the Machine Kit3 — 2.9.3
+# Master the Machine Kit3 — 2.9.4
 
 Team pack **Codex**, protocol 4, cho MTM Player. Bản 2.8.0 trên nhánh `codex/kit3_bou_v11`, cập nhật từ nền 2.7.7.
 
@@ -50,6 +50,14 @@ Repo chỉ chứa runtime Codex, tài liệu và fixture giả. Không đưa cre
 Use MTM Player **0.9.44** or newer (from 0.9.44 the Game Master can refuse Init with PLAYER_VERSION_TOO_OLD; the team pack contract and progress schema are unchanged from 0.9.40; 0.9.44 also ships a Linux launcher `mtm-player.sh` + `install-team-pack.sh`). Install into a fresh workspace using the Node command above (or `team-sdlc-pack/install.ps1`), then run the checker and require **READY**. In Player Init, select Codex, set the Codex CLI path to the installed **codex.exe** (absolute path), and choose the match-authorized model in Init. Keep previous match workspaces separate.
 
 > Nhánh `codex/kit3_tran_v2` = dòng kit của Tran dựa trên `codex/kit3_bou_v4` (B, 2.8.0); thư mục `Kit3-tran-v2-<version>`, cùng format với `Kit3-bou-v4-<version>` của B.
+
+## Changelog — 2.9.4 (nhánh `codex/kit3_tran_v2`)
+
+- Câu chỉ nộp đáp án (PI/TASK): kit viết sẵn `digest.md` (đề, mẫu đáp án, bài KB, test data, toàn bộ log một dòng/entry theo UTC). Worker chỉ đọc file này. Trận EFMN62ZO, worker PI-01 tốn 4 lượt (~20 s) mở brief.json, JSON thô (bị cắt ở 19.678 token) và tự viết python để đọc log.
+- `finish-answer.mjs`: một lệnh kiểm schema + commit thư mục đáp án + in khối STATUS READY. Trước đây worker tốn ~45 s cho chạy lại validator, git add, kiểm evidence, commit lần hai và tin nhắn báo tiến độ.
+- Sửa lỗi `validate-answer.mjs`: khi không có `--required` nó bỏ mất tham số đầu, nên đem file schema ra kiểm như đáp án và **không hề kiểm schema** ("ANSWER OK (no schema given)").
+- Bài FAST PATH: không mở đầu dài dòng, không gửi tin báo tiến độ.
+- BUG/CR: khi bộ test đỏ chỉ vì quy tắc của câu khác, worker không tự sửa mà báo `WAITS-FOR: <ID>`; orchestrator nộp câu đó trước rồi cho worker rebase, chạy lại test rồi mới nộp (EFMN62ZO: BUG-02 mất TC-04 = 20 điểm vì nộp lúc lỗi của BUG-03 còn trong main; grader chạy cả bộ test trên bản nộp).
 
 ## Changelog — 2.9.3 (nhánh `codex/kit3_tran_v2`)
 

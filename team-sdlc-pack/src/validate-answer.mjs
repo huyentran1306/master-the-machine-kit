@@ -41,7 +41,11 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const args = process.argv.slice(2);
   const ri = args.indexOf('--required');
   const required = ri >= 0 ? String(args[ri + 1] || '').split(',').filter(Boolean) : [];
-  const [answer, schema] = args.filter((a, i) => i !== ri && i !== ri + 1);
+  // ri is -1 without --required: the old filter (i !== ri + 1) then dropped argument 0, so the schema path was
+  // checked as the answer and the schema never ran (EFMN62ZO PI-01: "ANSWER OK (no schema given)", 3 retries).
+  const files = args.filter((a, i) => ri < 0 || (i !== ri && i !== ri + 1)).filter((a) => a !== '--schema');
+  if (files.length === 2 && /schema\.json$/i.test(files[0]) && !/schema\.json$/i.test(files[1])) files.reverse(); // --schema S A order
+  const [answer, schema] = files;
   if (!answer) { console.error('usage: validate-answer.mjs <submit.json> [schema.json] [--required a.log,b.png]'); process.exit(2); }
   const p = checkSubmit(answer, schema, { required });
   if (p.length) { console.log(`ANSWER INVALID (${p.length}):\n- ${p.join('\n- ')}`); process.exit(1); }

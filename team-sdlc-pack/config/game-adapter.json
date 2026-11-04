@@ -68,9 +68,10 @@
     "materialConcurrency": 4,
     "portBase": 3100,
     "workerModels": {
-      "answerOnly": ["gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol"],
-      "code": ["gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-luna"],
-      "retry": ["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"]
+      "pi": ["gpt-6.1-sol", "gpt-6.1-terra"],
+      "answerOnly": ["gpt-6.1-terra", "gpt-6.1-sol"],
+      "code": ["gpt-6.1-terra", "gpt-6.1-sol"],
+      "retry": ["gpt-6.1-sol", "gpt-6.1-terra"]
     }
   }
 }

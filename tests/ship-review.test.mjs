@@ -158,22 +158,23 @@ test('worker reasoning effort: low for answer-only, medium for code, high for a 
   assert.equal(s.workerEffort(it(), { answerOnly: true }), 'medium', 'adapter override');
 });
 
-test('worker model routing stays inside allowedModels and falls back safely', () => {
+test('worker model routing protects PI, avoids Luna by default, and falls back safely', () => {
   const shipped = JSON.parse(fs.readFileSync(new URL('../team-sdlc-pack/config/game-adapter.json', import.meta.url)));
   assert.deepEqual(shipped.parallel.workerModels, DEFAULT_ADAPTER.parallel.workerModels, 'shipped and runtime defaults stay aligned');
   const s = Object.create(RuntimeSession.prototype);
   s.adapter = DEFAULT_ADAPTER;
-  const it = (dispatches = 1) => ({ id: 'X-1', type: 'TASK', local: { dispatches } });
+  const it = (type = 'TASK', dispatches = 1) => ({ id: 'X-1', type, local: { dispatches } });
   s.modelPolicy = { orchestratorModel: 'gpt-6.1-sol', allowedModels: ['gpt-6-luna', 'gpt-6.1-terra', 'gpt-6.1-sol'] };
-  assert.equal(s.workerModel(it(), { answerOnly: true }), 'gpt-6-luna');
+  assert.equal(s.workerModel(it('PI'), { answerOnly: true }), 'gpt-6.1-sol');
+  assert.equal(s.workerModel(it(), { answerOnly: true }), 'gpt-6.1-terra');
   assert.equal(s.workerModel(it(), {}), 'gpt-6.1-terra');
-  assert.equal(s.workerModel(it(2), { answerOnly: true }), 'gpt-6.1-sol');
+  assert.equal(s.workerModel(it('TASK', 2), { answerOnly: true }), 'gpt-6.1-sol');
   s.modelPolicy = { orchestratorModel: 'gpt-6.1-sol', allowedModels: ['gpt-6.1-sol'] };
   assert.equal(s.workerModel(it(), { answerOnly: true }), 'gpt-6.1-sol', 'preferred unavailable: allowed orchestrator');
   s.modelPolicy = { orchestratorModel: 'not-allowed', allowedModels: ['custom-allowed'] };
   assert.equal(s.workerModel(it(), {}), 'custom-allowed', 'orchestrator unavailable: first allowed');
-  s.modelPolicy = { orchestratorModel: 'gpt-6-luna', allowedModels: ['gpt-6-luna-2026-10-01'] };
-  assert.equal(s.workerModel(it(), { answerOnly: true }), 'gpt-6-luna-2026-10-01', 'authorized snapshot matches preference');
+  s.modelPolicy = { orchestratorModel: 'gpt-6.1-terra', allowedModels: ['gpt-6.1-terra-2026-10-01'] };
+  assert.equal(s.workerModel(it(), { answerOnly: true }), 'gpt-6.1-terra-2026-10-01', 'authorized snapshot matches preference');
   s.modelPolicy = null;
   assert.equal(s.workerModel(it(), {}), undefined, 'no policy preserves inheritance');
 });

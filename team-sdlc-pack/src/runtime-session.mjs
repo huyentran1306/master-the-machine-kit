@@ -43,9 +43,10 @@ const PLAYBOOK = { PI: 'backlog-pi', BUG: 'backlog-bug', CR: 'backlog-cr', TASK:
 const IDLE_WORKER_MS = 4 * 60000;
 const MAX_RESPAWNS = 2;
 const DEFAULT_WORKER_MODELS = {
-  answerOnly: ['gpt-6-luna', 'gpt-6.1-terra', 'gpt-6.1-sol'],
-  code: ['gpt-6.1-terra', 'gpt-6.1-sol', 'gpt-6-luna'],
-  retry: ['gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-luna'],
+  pi: ['gpt-6.1-sol', 'gpt-6.1-terra'],
+  answerOnly: ['gpt-6.1-terra', 'gpt-6.1-sol'],
+  code: ['gpt-6.1-terra', 'gpt-6.1-sol'],
+  retry: ['gpt-6.1-sol', 'gpt-6.1-terra'],
 };
 
 export const DEFAULT_ADAPTER = {
@@ -1820,13 +1821,13 @@ export class RuntimeSession {
     return cfg.code;
   }
 
-  /** Explicit worker model by role, constrained to the organizer-provided allowedModels. */
+  /** Explicit worker model by risk lane, constrained to the organizer-provided allowedModels. */
   workerModel(it, c = {}) {
     const rawAllowed = Array.isArray(this.modelPolicy?.allowedModels) ? this.modelPolicy.allowedModels : [];
     const allowed = [...new Set(rawAllowed.filter((m) => typeof m === 'string' && m.trim()).map((m) => m.trim()))];
     if (!allowed.length) return undefined;
     const cfg = { ...DEFAULT_WORKER_MODELS, ...(this.adapter.parallel?.workerModels || {}) };
-    const lane = (it.local?.dispatches || 0) > 1 ? 'retry' : c.answerOnly ? 'answerOnly' : 'code';
+    const lane = (it.local?.dispatches || 0) > 1 ? 'retry' : it.type === 'PI' ? 'pi' : c.answerOnly ? 'answerOnly' : 'code';
     const preferred = Array.isArray(cfg[lane]) ? cfg[lane] : [cfg[lane]];
     for (const wanted of preferred.filter((m) => typeof m === 'string' && m)) {
       const match = allowed.find((m) => m === wanted || m.startsWith(`${wanted}-`));

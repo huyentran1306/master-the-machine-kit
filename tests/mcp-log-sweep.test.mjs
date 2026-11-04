@@ -53,3 +53,18 @@ test('non-incident items do not sweep logs', async () => {
   await collectMcpMaterial({ id: 'CR-01', type: 'CR', title: 'Export', description: 'Add a CSV export.' }, server(calls));
   assert.equal(calls.some(c => c.args?.service), false);
 });
+
+test('log sweep retries HTTP 429 and marks services that still fail as missing', async () => {
+  const advertised = [{ name: 'search_logs', description: 'Search production logs (services: payment-api, deploy).',
+    inputSchema: { properties: { service: { type: 'string' } }, required: [] } }];
+  let deployAttempts = 0;
+  const entries = await collectMcpMaterial({ id: 'PI-02', type: 'PI', description: 'Investigate production logs.' }, async req => {
+    if (req.action === 'tools') return { ok: true, tools: advertised };
+    if (req.args?.service === 'payment-api') return { ok: false, httpStatus: 503, error: 'temporary' };
+    if (req.args?.service === 'deploy' && ++deployAttempts === 1) return { ok: false, httpStatus: 429, error: 'rate limited' };
+    return text({ total: 1, returned: 1, entries: [{ timestamp: '2026-11-04T10:00:00Z', service: req.args?.service || 'deploy', message: 'ok' }] });
+  }, 10000);
+  const merged = entries.find(e => e.tool === 'search_logs-merged');
+  assert.ok(deployAttempts >= 2, `deploy attempts: ${deployAttempts}`);
+  assert.deepEqual(merged.result.truncated, [{ service: 'payment-api', reason: 'FAILED' }]);
+});

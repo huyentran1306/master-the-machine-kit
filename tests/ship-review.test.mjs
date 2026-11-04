@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { DEFAULT_ADAPTER, RuntimeSession } from '../team-sdlc-pack/src/runtime-session.mjs';
+import { DEFAULT_ADAPTER, RuntimeSession, retryablePushRace } from '../team-sdlc-pack/src/runtime-session.mjs';
 import { testSummary } from '../team-sdlc-pack/src/gate.mjs';
 import { evidenceArrayRefs } from '../team-sdlc-pack/src/required-evidence.mjs';
 
@@ -155,7 +155,7 @@ test('validate-answer requires required evidence inside an "evidence" array, lik
   assert.equal(evidenceArrayRefs({ evidence: ['evidence/before.log'] }).has('evidence/before.log'), true);
 });
 
-test('a dispatched worktree with no change for 4 min is re-offered once per check; any change marks it active', async (t) => {
+test('a dispatched worktree with no change for 7 min is re-offered once per check; any change marks it active', async (t) => {
   const { s } = shipFixture(t);
   const add = async (id) => {
     s.items.set(id, { id, type: 'BUG', deadlineAt: null, local: { startedAt: Date.now() } });
@@ -168,8 +168,8 @@ test('a dispatched worktree with no change for 4 min is re-offered once per chec
   const idle = await add('BUG-81');
   const busy = await add('BUG-82');
   fs.writeFileSync(path.join(busy.matchRoot, 'answers-note.txt'), 'worker was here');
-  assert.equal((await s.idleWorkers()).length, 0, 'nothing before 4 minutes');
-  const real = s.now.bind(s); s.now = () => real() + 4.5 * 60000;
+  assert.equal((await s.idleWorkers()).length, 0, 'nothing before 7 minutes');
+  const real = s.now.bind(s); s.now = () => real() + 7.5 * 60000;
   assert.equal(s.hasDispatchAction(), true, 'idle candidates wake the loop');
   const r = await s.idleWorkers();
   assert.deepEqual(r.map(e => e.id), ['BUG-81']);
@@ -180,8 +180,17 @@ test('a dispatched worktree with no change for 4 min is re-offered once per chec
   assert.equal(s.items.get('BUG-82').local.spawnEntry.active, true);
   assert.equal(await s.idleWorkers().then(x => x.length), 0, 'timer restarted after a re-offer');
   s.items.get('BUG-81').local.ready = true;
-  s.now = () => real() + 10 * 60000;
+  s.now = () => real() + 14 * 60000;
   assert.equal(await s.idleWorkers().then(x => x.length), 0, 'READY items are never re-offered');
+});
+
+test('server-side ref lock and remote rejection messages are retryable push races', () => {
+  for (const stderr of [
+    "remote rejected HEAD -> main (cannot lock ref 'refs/heads/main')",
+    'failed to update ref',
+    'Updates were rejected because the remote contains work that you do not have locally; fetch first',
+  ]) assert.equal(retryablePushRace({ stderr }), true, stderr);
+  assert.equal(retryablePushRace({ stderr: 'permission denied' }), false);
 });
 
 test('worker reasoning effort: low for answer-only, medium for code, high for a retry with time left', () => {
@@ -189,6 +198,7 @@ test('worker reasoning effort: low for answer-only, medium for code, high for a 
   s.adapter = { parallel: {} }; s.match = { endsAt: Date.now() + 30 * 60000 }; s.now = () => Date.now();
   const it = (over = {}) => ({ id: 'X-1', type: 'TASK', deadlineAt: null, local: { dispatches: 1 }, ...over });
   assert.equal(s.workerEffort(it(), { answerOnly: true }), 'low');
+  assert.equal(s.workerEffort(it({ local: { dispatches: 1, answerSource: true } }), { answerOnly: true }), 'medium');
   assert.equal(s.workerEffort(it({ type: 'BUG' }), {}), 'medium');
   assert.equal(s.workerEffort(it({ deadlineAt: Date.now() + 3 * 60000 }), { answerOnly: true }), 'medium', 'no time for a second try');
   assert.equal(s.workerEffort(it({ local: { dispatches: 2 } }), {}), 'high');
@@ -207,6 +217,7 @@ test('worker model routing protects PI, avoids Luna by default, and falls back s
   assert.equal(s.workerModel(it('PI'), { answerOnly: true }), 'gpt-6.1-sol');
   assert.equal(s.workerModel(it('CR'), {}), 'gpt-6.1-sol');
   assert.equal(s.workerModel(it(), { answerOnly: true }), 'gpt-6.1-terra');
+  assert.equal(s.workerModel({ ...it(), local: { dispatches: 1, answerSource: true } }, { answerOnly: true }), 'gpt-6.1-sol');
   assert.equal(s.workerModel(it(), {}), 'gpt-6.1-terra');
   assert.equal(s.workerModel(it('TASK', 2), { answerOnly: true }), 'gpt-6.1-sol');
   s.modelPolicy = { orchestratorModel: 'gpt-6.1-sol', allowedModels: ['gpt-6.1-sol'] };

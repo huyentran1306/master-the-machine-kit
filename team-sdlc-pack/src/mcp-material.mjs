@@ -1,5 +1,6 @@
 import { mapBounded } from './dispatch.mjs';
 import { until } from './deadline.mjs';
+import { sleep } from './util.mjs';
 
 const words = text => String(text || '').replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_-]/g, ' ').toLowerCase();
 export function purpose(tool) {
@@ -80,23 +81,30 @@ async function sweepLogs(tool, fetchOnly, cutoff) {
   const truncated = [];
   const run = async (service, query) => {
     const args = argsFor(service, query);
-    if (!args || Date.now() >= cutoff) return null;
+    if (!args) return { parsed: null, reason: 'FAILED' };
+    if (Date.now() >= cutoff) return { parsed: null, reason: 'TIMEOUT' };
     const entry = await fetchOnly({ action: 'call', name: tool.name, args }, cutoff);
     const parsed = entry.ok ? parseLogResult(entry.result) : null;
     for (const e of parsed?.entries || []) seen.set(JSON.stringify(e), e);
-    return parsed;
+    return { parsed, reason: parsed ? null : entry.reason || 'FAILED' };
   };
-  const top = await mapBounded([null, ...services], 6, service => run(service, null));
+  const top = await mapBounded([null, ...services], 4, service => run(service, null));
+  // A transiently missed service is more valuable than deeper level splits. Retry just those once,
+  // sequentially, while the same sweep deadline still has room.
+  for (let i = 0; i < services.length && Date.now() + 250 < cutoff; i += 1) {
+    if (!top[i + 1]?.parsed) top[i + 1] = await run(services[i], null);
+  }
   const levels = ['ERROR', 'WARN', 'INFO'];
-  const deeper = services.filter((_, i) => top[i + 1] && top[i + 1].total > top[i + 1].returned);
-  const split = await mapBounded(deeper.flatMap(service => levels.map(level => ({ service, level }))), 6, ({ service, level }) => run(service, level).then(r => ({ service, level, r })));
+  const deeper = services.filter((_, i) => top[i + 1]?.parsed && top[i + 1].parsed.total > top[i + 1].parsed.returned);
+  const split = await mapBounded(deeper.flatMap(service => levels.map(level => ({ service, level }))), 4, ({ service, level }) => run(service, level).then(r => ({ service, level, r: r.parsed })));
+  for (let i = 0; i < services.length; i += 1) if (!top[i + 1]?.parsed) truncated.push({ service: services[i], reason: top[i + 1]?.reason || (Date.now() >= cutoff ? 'TIMEOUT' : 'FAILED') });
   for (const service of deeper) {
-    const t = top[services.indexOf(service) + 1];
+    const t = top[services.indexOf(service) + 1].parsed;
     const parts = split.filter(x => x.service === service);
     const covered = parts.reduce((n, x) => n + (x.r?.returned || 0), 0);
     if (covered < t.total) truncated.push({ service, total: t.total, fetched: Math.min(t.total, covered || t.returned), levelsOverLimit: parts.filter(x => x.r && x.r.total > x.r.returned).map(x => x.level) });
   }
-  if (!serviceKey && top[0] && top[0].total > top[0].returned) truncated.push({ service: '*', total: top[0].total, fetched: top[0].returned });
+  if (!serviceKey && top[0]?.parsed && top[0].parsed.total > top[0].parsed.returned) truncated.push({ service: '*', total: top[0].parsed.total, fetched: top[0].parsed.returned });
   const entries = [...seen.values()].sort((a, b) => stamp(a) - stamp(b));
   return {
     purpose: 'logs', tool: `${tool.name}-merged`, args: { services }, ok: true,
@@ -129,8 +137,23 @@ export async function collectMcpMaterial(item, call, budgetMs = 90000) {
   };
   // Sweep reads are merged into one file instead of one brief file per call.
   const fetchOnly = async (request, cutoff) => {
-    try { const result = await until(call({ ...request, raw: true }), cutoff); return { ok: result?.ok === true, result }; }
-    catch (e) { return { ok: false, error: e.message }; }
+    let last;
+    for (let attempt = 0; attempt < 3 && Date.now() < cutoff; attempt += 1) {
+      try {
+        const result = await until(call({ ...request, raw: true }), cutoff);
+        last = { ok: result?.ok === true, result };
+        if (last.ok) return last;
+        const status = Number(result?.httpStatus || result?.status || result?.error?.httpStatus);
+        if (status !== 429 && status < 500) return { ...last, reason: 'FAILED' };
+      } catch (e) {
+        last = { ok: false, error: e.message };
+        if (/deadline|timeout/i.test(e.message) || Date.now() >= cutoff) return { ...last, reason: 'TIMEOUT' };
+      }
+      const delay = [300, 600, 1200][attempt] || 1200;
+      if (Date.now() + delay >= cutoff) break;
+      await sleep(delay);
+    }
+    return { ...(last || { ok: false }), reason: Date.now() >= cutoff ? 'TIMEOUT' : 'FAILED' };
   };
   const listing = await invoke({ action: 'tools' }, 'discovery');
   if (!listing.ok) return entries;

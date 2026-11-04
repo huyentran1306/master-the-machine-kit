@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { finishAnswer } from '../team-sdlc-pack/src/finish-answer.mjs';
-import { answerDigest } from '../team-sdlc-pack/src/item-brief.mjs';
+import { answerDigest, answerNeedsSource } from '../team-sdlc-pack/src/item-brief.mjs';
 
 const pack = path.resolve('team-sdlc-pack/src');
 const schema = { type: 'object', required: ['backlogId', 'status', 'rootCauseRelease'], properties: { backlogId: { type: 'string' }, status: { enum: ['DONE', 'PARTIAL', 'BLOCKED'] }, rootCauseRelease: { type: 'string', minLength: 1 } } };
@@ -71,6 +71,16 @@ test('answer digest has item, template, KB once, and one UTC line per log entry'
   assert.equal(md.match(/KB-INC-01/g).length, 1);
   assert.match(md, /2026-10-27T00:00:00Z \(logged 2026-10-27T07:00:00\+07:00\) \| INFO \| deploy \| d-1 \| rel-1 deployed \| \{"flag":"x.y"\}/);
   assert.match(md, /Not complete for: api \(27\/37, over limit: INFO\)/);
+});
+
+test('source-reading TASKs are separated from KB-only fast answers and receive issued source', () => {
+  const sourceItem = { id: 'TASK-04', type: 'TASK', description: 'Answer from the issued application source. Trace src/server/posting.ts.' };
+  assert.equal(answerNeedsSource(sourceItem), true);
+  assert.equal(answerNeedsSource({ id: 'TASK-03', type: 'TASK', description: 'Use the supplied KB and logs to calculate totals.' }), false);
+  const md = answerDigest({ item: sourceItem, material: {}, source: '### src/server/posting.ts\n```ts\nreturn twoLines;\n```' });
+  assert.match(md, /Issued application source/);
+  assert.match(md, /Answer from this source/);
+  assert.match(md, /return twoLines/);
 });
 
 test('failingTests reads vitest and jest failure names, so baseline-only failures can be told apart', async () => {

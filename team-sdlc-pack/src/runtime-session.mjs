@@ -26,7 +26,7 @@ import { guardBaseline } from './baseline-guard.mjs';
 import { validate, validateFinalResult } from './schema.mjs';
 import { McpHttpClient, resultText } from './mcp-http.mjs';
 import { buildChecklist, looksLikeTestOutput } from './checklist.mjs';
-import { writeItemBrief } from './item-brief.mjs';
+import { writeItemBrief, answerNeedsSource } from './item-brief.mjs';
 import { extractRequiredEvidence, evidenceArrayRefs, unscorableAnswer } from './required-evidence.mjs';
 import { collectMcpMaterial } from './mcp-material.mjs';
 import { until, SUBMIT_LIMITS } from './deadline.mjs';
@@ -40,15 +40,18 @@ const PLAYBOOK = { PI: 'backlog-pi', BUG: 'backlog-bug', CR: 'backlog-cr', TASK:
 // A dispatched worktree with no file change and no commit this long after its spawn message probably
 // has no worker (spawn failed and was not retried, or the list was lost): re-offer it. Workers write
 // evidence or edit code within ~0.5-3 min in every rehearsal so far.
-const IDLE_WORKER_MS = 4 * 60000;
+const IDLE_WORKER_MS = 7 * 60000;
 const MAX_RESPAWNS = 2;
 const DEFAULT_WORKER_MODELS = {
   pi: ['gpt-6.1-sol', 'gpt-6.1-terra'],
   cr: ['gpt-6.1-sol', 'gpt-6.1-terra'],
   answerOnly: ['gpt-6.1-terra', 'gpt-6.1-sol'],
+  answerOnlySource: ['gpt-6.1-sol', 'gpt-6.1-terra'],
   code: ['gpt-6.1-terra', 'gpt-6.1-sol'],
   retry: ['gpt-6.1-sol', 'gpt-6.1-terra'],
 };
+
+export const retryablePushRace = (r) => /cannot lock ref|remote rejected|failed to update ref|fetch first|non-fast-forward|stale info/i.test(`${r?.stderr || ''}\n${r?.stdout || ''}`);
 
 export const DEFAULT_ADAPTER = {
   login: { strategy: 'auto', strategies: ['nextauth', 'form', 'json'] },
@@ -60,7 +63,7 @@ export const DEFAULT_ADAPTER = {
   submit: { acceptedStatuses: ['ACCEPTED', 'RECEIVED'], retryBudgetMs: SUBMIT_LIMITS.retryMs },
   planner: {},
   heavyTask: { mode: 'last', startAfter: 'othersDone', minMinutesLeft: 15, minPoints: 200, minDescriptionChars: 6000, minCriteria: 12 },
-  parallel: { maxCodeWorkers: 5, maxBuilds: 2, materialConcurrency: 6, portBase: 3100, workerModels: DEFAULT_WORKER_MODELS },
+  parallel: { maxCodeWorkers: 5, maxBuilds: 2, materialConcurrency: 4, portBase: 3100, workerModels: DEFAULT_WORKER_MODELS },
 };
 
 function deepMerge(a, b) {
@@ -100,11 +103,28 @@ export class RuntimeSession {
     this.poller = null;
     this.lastPollError = null;
     this.lastWaitForUpdateAt = null;
+    this.materialMcpActive = 0;
+    this.materialMcpQueue = [];
   }
 
   // ---------- infrastructure ----------
   now() {
     return Date.now() + (this.match.serverOffsetMs || 0);
+  }
+
+  /** One session-wide MCP pool: prevents concurrent item collectors multiplying their own fan-out. */
+  limitedMaterialMcp(request, priority = 1) {
+    return new Promise((resolve, reject) => {
+      this.materialMcpQueue.push({ request, priority, resolve, reject });
+      this.materialMcpQueue.sort((a, b) => a.priority - b.priority);
+      const drain = () => {
+        while (this.materialMcpActive < 4 && this.materialMcpQueue.length) {
+          const job = this.materialMcpQueue.shift(); this.materialMcpActive += 1;
+          Promise.resolve(this.match_mcp(job.request)).then(job.resolve, job.reject).finally(() => { this.materialMcpActive -= 1; drain(); });
+        }
+      };
+      drain();
+    });
   }
 
   plannerOpts() { return { ...this.adapter.planner, heavyTask: heavyOptions(this.adapter.heavyTask) }; }
@@ -1168,6 +1188,7 @@ export class RuntimeSession {
       answer: answerPaths(matchRoot, it.id), checklistFile: path.join(matchRoot, 'answers', it.id, 'checklist.md'),
       deadlineAt: it.deadlineAt ?? null, workerStopAt: stopAt, deadlineMarginMinutes: left == null ? 5 : Math.round(Math.min(5, Math.max(1.5, left * 0.25)) * 10) / 10,
       answerOnly: it.local?.answerOnly ?? answerOnly(it, this.readMaterial(it.id) || {}),
+      answerSource: !!it.local?.answerSource,
       integrationGate: integrationGate(it), remainingStep: it.local?.resume?.remainingStep ?? null,
       ports: it.local?.worktree?.ports ?? null,
       baseSha: it.local?.worktree?.baseSha ?? this.environmentRevision ?? this.state.envReady?.revision ?? null,
@@ -1231,7 +1252,7 @@ export class RuntimeSession {
     // Optional company material must not hold the whole first dispatch for the old 90 s ceiling.
     // PI keeps the largest slice for production logs; answer-only and code get bounded discovery.
     const materialBudgetMs = it.type === 'PI' ? 30000 : it.type === 'CR' ? 25000 : it.local.answerOnly ? 15000 : 12000;
-    material.mcpMaterial = this.readMaterial(id)?.mcpMaterial ?? await collectMcpMaterial({ ...it, startInstruction: material.startInstruction }, request => this.match_mcp(request), materialBudgetMs);
+    material.mcpMaterial = this.readMaterial(id)?.mcpMaterial ?? await collectMcpMaterial({ ...it, startInstruction: material.startInstruction }, request => this.limitedMaterialMcp(request, it.type === 'PI' ? 0 : 1), materialBudgetMs);
     this.materialCache = { ...(this.materialCache || {}), [id]: material };
     if (this.stateDir) {
       writeJson(path.join(this.stateDir, 'items', id, 'start.json'), material);
@@ -1881,6 +1902,7 @@ export class RuntimeSession {
     const cfg = { answerOnly: 'low', code: 'medium', retry: 'high', ...(this.adapter.parallel?.workerEffort || {}) };
     const { left } = effectiveLeft(it, this.now(), this.match.endsAt);
     if (it.local?.heavy) return 'medium';
+    if (it.local?.answerSource) return 'medium';
     const retry = (it.local?.dispatches || 0) > 1;
     if (retry) return left != null && left < 10 ? cfg.code : cfg.retry;
     if (c.answerOnly) return left != null && left < 4 ? cfg.code : cfg.answerOnly;
@@ -1893,7 +1915,7 @@ export class RuntimeSession {
     const allowed = [...new Set(rawAllowed.filter((m) => typeof m === 'string' && m.trim()).map((m) => m.trim()))];
     if (!allowed.length) return undefined;
     const cfg = { ...DEFAULT_WORKER_MODELS, ...(this.adapter.parallel?.workerModels || {}) };
-    const lane = it.local?.heavy && cfg.heavy ? 'heavy' : (it.local?.dispatches || 0) > 1 ? 'retry' : it.type === 'PI' ? 'pi' : it.type === 'CR' ? 'cr' : c.answerOnly ? 'answerOnly' : 'code';
+    const lane = it.local?.heavy && cfg.heavy ? 'heavy' : (it.local?.dispatches || 0) > 1 ? 'retry' : it.type === 'PI' ? 'pi' : it.type === 'CR' ? 'cr' : c.answerOnly && it.local?.answerSource ? 'answerOnlySource' : c.answerOnly ? 'answerOnly' : 'code';
     const preferred = Array.isArray(cfg[lane]) ? cfg[lane] : [cfg[lane]];
     for (const wanted of preferred.filter((m) => typeof m === 'string' && m)) {
       const match = allowed.find((m) => m === wanted || m.startsWith(`${wanted}-`));
@@ -1975,10 +1997,13 @@ export class RuntimeSession {
       const heavyText = it.local.heavy ? 'HEAVY item: deliver the highest-value part first, commit working increments, and at workerStopAt return what passes with honest PARTIAL rows and real evidence; never start a broad refactor. ' : '';
       const resumeText = heavyText + (c.resume ? `RESUME: preserved commit ${c.resume.commit}; do only the remaining step: ${c.resume.remainingStep}. `
         : orphaned ? 'RESUME: the previous worker on this item stopped when the session restarted. Its commits and uncommitted files are in this worktree: check git status and git log first, keep that work and continue it; do not restart. ' : '');
+      const answerRead = it.local.answerSource
+        ? `Read ${c.brief?.digestPath || c.brief?.briefFile} first; it contains relevant issued source. Verify any missing function directly under ${c.appPath || c.matchRoot}; answer from code, never infer accounting or UI behavior.`
+        : `Read ONLY ${c.brief?.digestPath || `${c.brief?.briefFile} and files/`}${c.brief?.digestPath ? ' (item text, answer template, KB articles, test data and every production log line in UTC, oldest first); do not open brief.json, repo-map, baseline, skills, checklist or raw files/mcp/*.json unless the digest says a part is missing' : ''}.`;
       const entry = {
         id: r.id, type: it.type, answerOnly: !!c.answerOnly,
         taskName: `${r.id.toLowerCase().replace(/[^a-z0-9]/g, '')}${it.local.dispatches > 1 ? `r${it.local.dispatches}` : ''}`,
-        message: `${resumeText}Item ${r.id} (${it.type}${c.answerOnly ? ', answer-only: no dev server, build or full suite' : ''}).${c.answerOnly ? ` FAST PATH (points drop with every minute${it.type === 'PI' ? ', PI is ranked by submit order: every turn counts' : ''}). No preamble, no progress or send_message updates. 1) Read ONLY ${c.brief?.digestPath || `${c.brief?.briefFile} and files/`}${c.brief?.digestPath ? ' (item text, answer template, KB articles, test data and every production log line in UTC, oldest first); do not open brief.json, repo-map, baseline, skills, checklist or raw files/mcp/*.json unless the digest says a part is missing' : ''}. 2) Decide every field (UTC-normalise mixed offsets, dedupe retries, keep corrected entries, ignore decoys), then write ${c.answer?.submitJson || 'submit.json'} in one edit, keeping every template key. 3) Run \`${c.finishAnswer || c.validateAnswer}\`${c.finishAnswer ? ' (validates the schema and commits the answer folder); on ANSWER INVALID fix and rerun' : ', then commit'}. 4) Reply with exactly the STATUS block it printed. If a fact is truly missing reply NEED_INFO: <what> (logs: service + narrowing word). No extra evidence or test.log unless requiredEvidence lists it; never install validators.` : ` Check the answer with \`${c.validateAnswer}\` (no installs). Builds: \`node "${BUILD_LOCK}" --slots ${this.adapter.parallel.maxBuilds || 2} -- <build command>\` (takes a free build slot itself; never ask the orchestrator for build_slot).`} checkoutRoot = worktreeRoot = ${c.worktreeRoot}; folder ${c.folder}; matchRoot ${c.matchRoot}; briefFile ${c.brief?.briefFile}; filesDir ${c.brief?.filesDir}; answer ${c.answer?.submitJson || ''} (evidence in ${c.answer?.evidenceDir || ''}); ports dev=${c.ports?.dev} production=${c.ports?.production} (override fixed runner ports). ${c.answerOnly && c.brief?.digestPath ? 'The digest replaces briefFile for this item.' : 'Read briefFile first: it has the commands, playbook, checklist and organizer files.'} Work only in this worktree. Stop and return by ${stop} (Game Master clock). Commit the complete item (code, tests, evidence, answer) and reply STATUS READY or PARKED with COMMIT <sha>. Never push, submit, delegate or call Game APIs.`,
+        message: `${resumeText}Item ${r.id} (${it.type}${c.answerOnly ? ', answer-only: no dev server, build or full suite' : ''}).${c.answerOnly ? ` FAST PATH (points drop with every minute${it.type === 'PI' ? ', PI is ranked by submit order: every turn counts' : ''}). No preamble, no progress or send_message updates. 1) ${answerRead} 2) Decide every field (UTC-normalise mixed offsets, dedupe retries, keep corrected entries, ignore decoys), then write ${c.answer?.submitJson || 'submit.json'} in one edit, keeping every template key. 3) Run \`${c.finishAnswer || c.validateAnswer}\`${c.finishAnswer ? ' (validates the schema and commits the answer folder); on ANSWER INVALID fix and rerun' : ', then commit'}. 4) Reply with exactly the STATUS block it printed. If a fact is truly missing reply NEED_INFO: <what> (logs: service + narrowing word). No extra evidence or test.log unless requiredEvidence lists it; never install validators.` : ` Check the answer with \`${c.validateAnswer}\` (no installs). Builds: \`node "${BUILD_LOCK}" --slots ${this.adapter.parallel.maxBuilds || 2} -- <build command>\` (takes a free build slot itself; never ask the orchestrator for build_slot).`} checkoutRoot = worktreeRoot = ${c.worktreeRoot}; folder ${c.folder}; matchRoot ${c.matchRoot}; briefFile ${c.brief?.briefFile}; filesDir ${c.brief?.filesDir}; answer ${c.answer?.submitJson || ''} (evidence in ${c.answer?.evidenceDir || ''}); ports dev=${c.ports?.dev} production=${c.ports?.production} (override fixed runner ports). ${c.answerOnly && c.brief?.digestPath ? 'The digest replaces briefFile for this item.' : 'Read briefFile first: it has the commands, playbook, checklist and organizer files.'} Work only in this worktree. Stop and return by ${stop} (Game Master clock). Commit the complete item (code, tests, evidence, answer) and reply STATUS READY or PARKED with COMMIT <sha>. Never push, submit, delegate or call Game APIs.`,
       };
       entry.reasoningEffort = this.workerEffort(it, c);
       const model = this.workerModel(it, c);
@@ -2196,12 +2221,16 @@ export class RuntimeSession {
     for (; pushAttempts < 3; pushAttempts += 1) {
       p = await G.git(this.checkoutRoot, ['push', 'origin', `HEAD:refs/heads/${branch}`], { timeoutMs: 60000 });
       if (p.code === 0 || p.timedOut) break;
+      const race = retryablePushRace(p);
       const recovered = await syncRemote();
       if (!recovered.ok) {
         if (!recovered.fetchError) return this.clean({ ok: false, stage: 'push', ...recovered, steps });
         break;
       }
-      if (!recovered.changed) break;
+      // Git hosts may reject a concurrent ref update even when the next fetch already sees our
+      // parent as current. That server-side lock race is safe to retry without a rebase.
+      if (!recovered.changed && !race) break;
+      if (pushAttempts < 2) await sleep(150 * (pushAttempts + 1));
     }
     pushAttempts = Math.min(pushAttempts + 1, 3);
     steps.push({ step: 'push', ok: p?.code === 0, attempts: pushAttempts });
@@ -2262,6 +2291,7 @@ export class RuntimeSession {
     if (action === 'create') {
       if (!it.local?.startedAt || !this.readMaterial(id)) return { ok: false, error: 'NOT_STARTED', next: 'Call start_work before worktree create.' };
       it.local.answerOnly = answerOnly(it, this.readMaterial(id));
+      it.local.answerSource = it.local.answerOnly && answerNeedsSource(it);
       const policy = dispatchPolicy(it, [...this.items.values()].filter(i => !isSubmitted(i)), this.adapter.parallel, this.freeMemory());
       if ((!it.local.worktree || it.local.parked) && !policy.allowed) {
         it.local.queued = true; this.saveState();
@@ -2293,7 +2323,7 @@ export class RuntimeSession {
       const context = this.briefContext(it, wtRoot, wtMatchRoot);
       const material = this.readMaterial(id);
       material.requiredEvidence ??= extractRequiredEvidence(it, material);
-      material.mcpMaterial ??= await collectMcpMaterial({ ...it, startInstruction: material.startInstruction }, request => this.match_mcp(request));
+      material.mcpMaterial ??= await collectMcpMaterial({ ...it, startInstruction: material.startInstruction }, request => this.limitedMaterialMcp(request, it.type === 'PI' ? 0 : 1));
       this.saveMaterial(id, material);
       const brief = writeItemBrief({
         checkoutRoot: this.checkoutRoot, worktreeRoot: wtRoot, matchRoot: wtMatchRoot,

@@ -78,7 +78,7 @@
     "workerModels": {
       "pi": ["gpt-6.1-sol", "gpt-6.1-terra"],
       "cr": ["gpt-6.1-sol", "gpt-6.1-terra"],
-      "answerOnly": ["gpt-6.1-terra", "gpt-6.1-sol"],
+      "answerOnly": ["gpt-6.1-sol", "gpt-6.1-terra"],
       "answerOnlySource": ["gpt-6.1-sol", "gpt-6.1-terra"],
       "code": ["gpt-6.1-terra", "gpt-6.1-sol"],
       "retry": ["gpt-6.1-sol", "gpt-6.1-terra"]

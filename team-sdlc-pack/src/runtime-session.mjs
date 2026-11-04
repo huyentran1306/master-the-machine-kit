@@ -2,6 +2,7 @@
 // planner, answer/evidence contract and recovery state. Tool handlers live here; bin/runtime-server.mjs
 // only speaks JSON-RPC.
 import fs from 'node:fs';
+import { execFile } from 'node:child_process';
 import crypto from 'node:crypto';
 import os from 'node:os';
 import { answerOnly, dispatchPolicy, integrationGate, mapBounded, BuildQueue, availableMemory } from './dispatch.mjs';
@@ -45,7 +46,7 @@ const MAX_RESPAWNS = 2;
 const DEFAULT_WORKER_MODELS = {
   pi: ['gpt-6.1-sol', 'gpt-6.1-terra'],
   cr: ['gpt-6.1-sol', 'gpt-6.1-terra'],
-  answerOnly: ['gpt-6.1-terra', 'gpt-6.1-sol'],
+  answerOnly: ['gpt-6.1-sol', 'gpt-6.1-terra'],
   answerOnlySource: ['gpt-6.1-sol', 'gpt-6.1-terra'],
   code: ['gpt-6.1-terra', 'gpt-6.1-sol'],
   retry: ['gpt-6.1-sol', 'gpt-6.1-terra'],
@@ -982,6 +983,7 @@ export class RuntimeSession {
       const d = this.heavyDispatchDecision(this.items.get(r.id), items);
       return d.allowed ? null : { id: r.id, reason: d.reason, detail: d.detail };
     }).filter(Boolean);
+    const baselineDefects = this.state.baselineDefectsResolved ? [] : this.baselineDefects();
     const current = this.state.current;
     const undispatched = ranked.filter(r => r.action !== 'submit').map((r) => {
       const it = this.items.get(r.id);
@@ -994,6 +996,7 @@ export class RuntimeSession {
         ? [`!! CHECK WORKERS: ${this.idleCandidates(now).map(i => i.id).join(', ')} unchanged ${Math.round(IDLE_WORKER_MS / 60000)}+ min after dispatch. Call dispatch_ready and follow its respawnCheck (list_agents first; never start a second worker on a live one).`] : []),
       ...plannerAlerts(items, now, this.match.endsAt, { current, paused: this.phase === 'PAUSED', status: this.match.status }, this.adapter.planner),
       ...deferredHeavy.map(h => `note: HEAVY ${h.id} deferred (${h.detail}); helper starts it when eligible.`),
+      ...baselineDefects.filter(d => d.likelyOwner === 'BASELINE-FIX').map(d => `!! BASELINE DEFECT: ${d.test}. The first code worker must restore documented behavior with a new migration; never weaken the original test.`),
       ...[...(this.localAlerts?.values() || [])].map((t) => `!! ${t}`),
       ...this.logProblems.splice(0).map((t) => `!! progress log: ${t}`),
     ];
@@ -1024,6 +1027,7 @@ export class RuntimeSession {
       alerts: al,
       blockers: [...this.blockers.keys()],
       heavy: { mode: heavyOptions(this.adapter.heavyTask).mode, deferred: deferredHeavy },
+      baselineDefects,
     };
     if (includeEvents && this.pendingEvents.length) out.events = this.pendingEvents.splice(0, 30);
     if (this.lastPollError) out.pollError = this.lastPollError;
@@ -1776,12 +1780,50 @@ export class RuntimeSession {
     return `${id} has failed its tests ${failed} times in a row.${same} Stop patching: re-read the acceptance criteria and the failing assertion, and either take a different approach or park this item (worktree park / move to the next item) and come back only if time is left.`;
   }
 
+  baselineDefects() {
+    const logFile = this.checkoutRoot && path.join(this.checkoutRoot, '.mtm-notes', 'test.log');
+    let text = ''; try { text = fs.readFileSync(logFile, 'utf8'); } catch { return []; }
+    const decisionsFile = this.appPath && path.join(this.appPath, 'DECISIONS.md');
+    let decisions = ''; try { decisions = fs.readFileSync(decisionsFile, 'utf8'); } catch { /* optional */ }
+    const resolved = new Set(this.state.resolvedBaselineTests || []);
+    const items = [...this.items.values()].map(it => ({ id: it.id, text: `${it.title || ''}\n${String(it.description || '').slice(0, 1500)}` }));
+    const descriptions = items.map(i => i.text).join('\n');
+    return [...failingTests(text)].filter(test => !resolved.has(test)).map((test) => {
+      const rel = (String(test).match(/(?:^|\s)((?:tests|test)\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?)/i) || [])[1] || null;
+      let source = ''; try { if (rel && this.appPath) source = fs.readFileSync(path.join(this.appPath, rel), 'utf8'); } catch { /* missing */ }
+      return classifyBaselineDefect({ test, file: rel, source, decisions, descriptions, items });
+    });
+  }
+
+  /** Per-test resolution: a baseline defect is fixed once a fresh-DB full gate no longer lists it. */
+  resolveBaselineDefects(gateText) {
+    const fixed = resolvedBaselineTests(this.baselineDefects(), gateText);
+    if (!fixed.length) return [];
+    this.state.resolvedBaselineTests = [...new Set([...(this.state.resolvedBaselineTests || []), ...fixed])];
+    if (!this.baselineDefects().length) this.state.baselineDefectsResolved = true;
+    return fixed;
+  }
+
+  ensureMatchTestDatabase() {
+    const suffix = databaseSuffix(this.matchId);
+    const roots = [...new Set([this.appPath, this.matchRoot].filter(Boolean))];
+    let changed = false;
+    for (const root of roots) for (const name of ['.env.test.local', '.env.test', '.env.local', '.env']) {
+      const file = path.join(root, name);
+      if (fs.existsSync(file)) changed = isolateEnvFile(file, suffix) || changed;
+    }
+    return { changed, suffix };
+  }
+
   async report_ready({ summary } = {}) {
     if (this.phase !== 'PREPARATION') return { ok: false, error: 'NOT_PREPARING', message: `phase is ${this.phase}` };
     const missing = ['GIT_AUTH', 'REPOSITORY', 'ENVIRONMENT', 'BUILD'].filter((s) => this.prep[s] !== 'COMPLETED');
     if (missing.length) return { ok: false, error: 'STAGES_NOT_COMPLETED', missing, message: 'Report each stage COMPLETED (report_progress PREPARATION_STATUS) only after real success.' };
     if (this.prep.MATCH_LOGIN !== 'COMPLETED') return { ok: false, error: 'LOGIN_NOT_VERIFIED', next: 'call login_match' };
     if (!this.portalReady) return { ok: false, error: 'MATCH_DATA_UNAVAILABLE', next: 'Call login_match and verify match status and UUID before reporting readiness.' };
+    const db = this.ensureMatchTestDatabase();
+    if (db.changed) return { ok: false, error: 'MATCH_TEST_DB_ISOLATED', suffix: db.suffix,
+      next: 'The helper changed TEST_DATABASE_URL to a database unique to this match. Run migrate deploy and the full baseline suite again on this fresh DB, replace .mtm-notes/test.log, then call report_ready again.' };
     const head = await G.revParse(this.checkoutRoot, 'HEAD');
     if (!head) return { ok: false, error: 'NO_CHECKOUT', message: `no Git checkout at ${this.checkoutRoot}` };
     G.ensureExcluded(this.checkoutRoot, '/.mtm-notes/');
@@ -1995,6 +2037,9 @@ export class RuntimeSession {
       it.local.dispatchedAt = this.now();
       const stop = c.workerStopAt ? new Date(c.workerStopAt).toISOString() : 'match end minus 5 minutes';
       const heavyText = it.local.heavy ? 'HEAVY item: deliver the highest-value part first, commit working increments, and at workerStopAt return what passes with honest PARTIAL rows and real evidence; never start a broad refactor. ' : '';
+      const sharedDefects = !this.state.baselineDefectsResolved ? this.baselineDefects().filter(d => d.likelyOwner === 'BASELINE-FIX') : [];
+      const baselineFixText = !c.answerOnly && !this.state.baselineFixAssigned && sharedDefects.length
+        ? `BASELINE-FIX (ship with this first code item): fresh-DB original suite fails ${sharedDefects.map(d => d.test).join('; ')}. Read the original test and DECISIONS.md, restore documented behavior with a NEW migration, keep old migrations and the test untouched, add a focused regression, and record CONTRADICTION: in this item's engineering record. ` : '';
       const resumeText = heavyText + (c.resume ? `RESUME: preserved commit ${c.resume.commit}; do only the remaining step: ${c.resume.remainingStep}. `
         : orphaned ? 'RESUME: the previous worker on this item stopped when the session restarted. Its commits and uncommitted files are in this worktree: check git status and git log first, keep that work and continue it; do not restart. ' : '');
       const answerRead = it.local.answerSource
@@ -2003,7 +2048,7 @@ export class RuntimeSession {
       const entry = {
         id: r.id, type: it.type, answerOnly: !!c.answerOnly,
         taskName: `${r.id.toLowerCase().replace(/[^a-z0-9]/g, '')}${it.local.dispatches > 1 ? `r${it.local.dispatches}` : ''}`,
-        message: `${resumeText}Item ${r.id} (${it.type}${c.answerOnly ? ', answer-only: no dev server, build or full suite' : ''}).${c.answerOnly ? ` FAST PATH (points drop with every minute${it.type === 'PI' ? ', PI is ranked by submit order: every turn counts' : ''}). No preamble, no progress or send_message updates. 1) ${answerRead} 2) Decide every field (UTC-normalise mixed offsets, dedupe retries, keep corrected entries, ignore decoys), then write ${c.answer?.submitJson || 'submit.json'} in one edit, keeping every template key. 3) Run \`${c.finishAnswer || c.validateAnswer}\`${c.finishAnswer ? ' (validates the schema and commits the answer folder); on ANSWER INVALID fix and rerun' : ', then commit'}. 4) Reply with exactly the STATUS block it printed. If a fact is truly missing reply NEED_INFO: <what> (logs: service + narrowing word). No extra evidence or test.log unless requiredEvidence lists it; never install validators.` : ` Check the answer with \`${c.validateAnswer}\` (no installs). Builds: \`node "${BUILD_LOCK}" --slots ${this.adapter.parallel.maxBuilds || 2} -- <build command>\` (takes a free build slot itself; never ask the orchestrator for build_slot).`} checkoutRoot = worktreeRoot = ${c.worktreeRoot}; folder ${c.folder}; matchRoot ${c.matchRoot}; briefFile ${c.brief?.briefFile}; filesDir ${c.brief?.filesDir}; answer ${c.answer?.submitJson || ''} (evidence in ${c.answer?.evidenceDir || ''}); ports dev=${c.ports?.dev} production=${c.ports?.production} (override fixed runner ports). ${c.answerOnly && c.brief?.digestPath ? 'The digest replaces briefFile for this item.' : 'Read briefFile first: it has the commands, playbook, checklist and organizer files.'} Work only in this worktree. Stop and return by ${stop} (Game Master clock). Commit the complete item (code, tests, evidence, answer) and reply STATUS READY or PARKED with COMMIT <sha>. Never push, submit, delegate or call Game APIs.`,
+        message: `${resumeText}${baselineFixText}Item ${r.id} (${it.type}${c.answerOnly ? ', answer-only: no dev server, build or full suite' : ''}).${c.answerOnly ? ` FAST PATH (points drop with every minute${it.type === 'PI' ? ', PI is ranked by submit order: every turn counts' : ''}). No preamble, no progress or send_message updates. 1) ${answerRead} 2) Decide every field (UTC-normalise mixed offsets, dedupe retries, keep corrected entries, ignore decoys), then write ${c.answer?.submitJson || 'submit.json'} in one edit, keeping every template key. 3) Run \`${c.finishAnswer || c.validateAnswer}\`${c.finishAnswer ? ' (validates the schema and commits the answer folder); on ANSWER INVALID fix and rerun' : ', then commit'}. 4) Reply with exactly the STATUS block it printed. If a fact is truly missing reply NEED_INFO: <what> (logs: service + narrowing word). No extra evidence or test.log unless requiredEvidence lists it; never install validators.` : ` Check the answer with \`${c.validateAnswer}\` (no installs). Builds: \`node "${BUILD_LOCK}" --slots ${this.adapter.parallel.maxBuilds || 2} -- <build command>\` (takes a free build slot itself; never ask the orchestrator for build_slot).`} checkoutRoot = worktreeRoot = ${c.worktreeRoot}; folder ${c.folder}; matchRoot ${c.matchRoot}; briefFile ${c.brief?.briefFile}; filesDir ${c.brief?.filesDir}; answer ${c.answer?.submitJson || ''} (evidence in ${c.answer?.evidenceDir || ''}); ports dev=${c.ports?.dev} production=${c.ports?.production} (override fixed runner ports). ${c.answerOnly && c.brief?.digestPath ? 'The digest replaces briefFile for this item.' : 'Read briefFile first: it has the commands, playbook, checklist and organizer files.'} Work only in this worktree. Stop and return by ${stop} (Game Master clock). Commit the complete item (code, tests, evidence, answer) and reply STATUS READY or PARKED with COMMIT <sha>. Never push, submit, delegate or call Game APIs.`,
       };
       entry.reasoningEffort = this.workerEffort(it, c);
       const model = this.workerModel(it, c);
@@ -2021,6 +2066,7 @@ export class RuntimeSession {
         } catch { /* keep the full inline message */ }
       }
       spawn.push(entry);
+      if (baselineFixText) this.state.baselineFixAssigned = r.id;
       it.local.spawnEntry = { taskName: entry.taskName, message: entry.message, reasoningEffort: entry.reasoningEffort,
         ...(entry.model ? { model: entry.model } : {}), at: this.now(), respawns: 0, ...(await this.worktreeFingerprint(c.worktreeRoot)) };
     }
@@ -2076,7 +2122,9 @@ export class RuntimeSession {
     const notes = path.join(this.checkoutRoot, '.mtm-notes');
     fs.mkdirSync(notes, { recursive: true });
     G.ensureExcluded(this.checkoutRoot, '/.mtm-notes/');
-    const env = { ...process.env, ...PNPM_SAFE_ENV, FORCE_COLOR: '0', NO_COLOR: '1' };
+    this.state.gateDbCounter = (this.state.gateDbCounter || 0) + 1;
+    const gateDb = freshGateDatabaseEnv(appDir, `${databaseSuffix(this.matchId)}_gate_${String(id).toLowerCase().replace(/[^a-z0-9]+/g, '_')}_${this.state.gateDbCounter}`);
+    const env = { ...process.env, ...PNPM_SAFE_ENV, ...gateDb, FORCE_COLOR: '0', NO_COLOR: '1' };
     delete env.NODE_TEST_CONTEXT;
     const t0 = Date.now();
     const [tr, ty] = await Promise.all([
@@ -2096,6 +2144,9 @@ export class RuntimeSession {
       if (fails.length && fails.every((f) => base.has(f))) { preExisting = fails; code = false; }
     }
     const verdict = green || preExisting ? 'GREEN' : code ? 'CODE_FAILURE' : 'ENVIRONMENT';
+    if (scope === 'full' && green && this.baselineDefects().length) this.state.baselineDefectsResolved = true;
+    else if (scope === 'full' && Object.keys(gateDb).length && tr) this.resolveBaselineDefects(tr.text || '');
+    if (gateDb.TEST_DATABASE_URL) dropGateDatabase(appDir, gateDb.TEST_DATABASE_URL);
     const leftNow = effectiveLeft(it, this.now(), this.match.endsAt).left;
     const part = (r, label) => r ? { command: label, exit: r.exit, timedOut: r.timedOut, seconds: Math.round(r.ms / 100) / 10, summary: testSummary(r.text), tail: r.tail.slice(-6) } : { command: null, note: 'no runner found' };
     it.local.gate = { verdict, at: this.now(), scope, ...(preExisting ? { preExisting } : {}) };
@@ -2105,7 +2156,13 @@ export class RuntimeSession {
       : verdict === 'CODE_FAILURE' ? `Failing assertions/type errors: worktree rollback ${id}, send the worker .mtm-notes/gate-${id}-*.log and the main SHA for a fix-up.`
       : leftNow != null && leftNow <= 3 ? `ENVIRONMENT problem, not a code failure${leftTxt}: do NOT roll back. Push and submit_work ${id} NOW with the worker-verified commit.`
       : `ENVIRONMENT problem (timeout/hang/tool exit without a failing test), not a code failure: do NOT roll back. Call gate ${id} once more; if it repeats, push and submit_work (the worker already passed MVS + suite on its worktree).`;
-    return this.clean({ ok: verdict === 'GREEN', verdict, scope, preExisting: preExisting || undefined, files: scope === 'item' ? own : 'full suite', budgetSec, seconds: Math.round((Date.now() - t0) / 100) / 10, tests: part(tr, test?.label), types: part(ty, types?.label), next });
+    const baselineDefectOpen = !this.state.baselineDefectsResolved && this.baselineDefects().filter(d => d.likelyOwner === 'BASELINE-FIX');
+    this.saveState();
+    return this.clean({ ok: verdict === 'GREEN', verdict, scope, preExisting: preExisting || undefined,
+      baselineDefectOpen: baselineDefectOpen.length ? baselineDefectOpen : undefined,
+      testDatabase: Object.keys(gateDb).length ? 'fresh isolated database' : 'no TEST_DATABASE_URL discovered',
+      files: scope === 'item' ? own : 'full suite', budgetSec, seconds: Math.round((Date.now() - t0) / 100) / 10, tests: part(tr, test?.label), types: part(ty, types?.label),
+      next: baselineDefectOpen.length ? `BASELINE_DEFECT_OPEN: ${baselineDefectOpen.map(d => d.test).join('; ')}. Restore documented behavior with a new migration before submission; never weaken the original test. ${next}` : next });
   }
 
   /**
@@ -2457,6 +2514,77 @@ function isolateEnvFile(file, suffix) {
   } catch {
     return false;
   }
+}
+
+export function databaseSuffix(value) {
+  const clean = String(value || 'match').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 32) || 'match';
+  return `_${clean}`;
+}
+
+function envValue(text, key) {
+  const m = String(text || '').match(new RegExp(`^\\s*(?:export\\s+)?${key}\\s*=\\s*([^\\r\\n]+)`, 'm'));
+  return m ? m[1].trim().replace(/^["']|["']$/g, '') : null;
+}
+
+const DEFECT_STOP = new Set(['test', 'tests', 'with', 'that', 'this', 'from', 'when', 'into', 'only', 'should', 'does', 'have', 'after', 'before', 'their', 'there', 'which', 'every', 'item', 'items', 'stays', 'still']);
+const defectWords = (t) => new Set(String(t || '').toLowerCase().match(/[a-z][a-z0-9-]{3,}/g)?.filter(w => !DEFECT_STOP.has(w)) || []);
+
+/**
+ * Who owns a test that is red on the fresh-DB baseline.
+ * BASELINE-FIX: the organizers name the file as correctable ("the only original test you may correct"), or the test
+ * and DECISIONS.md both describe a schema rule (restrict/cascade/foreign key) that a seed migration broke, and no
+ * backlog item's title clearly owns it. Everything else is a backlog item's (WAITS-FOR), with a best-guess owner.
+ */
+export function classifyBaselineDefect({ test, file = null, source = '', decisions = '', descriptions = '', items = [] }) {
+  const words = defectWords(String(test).split('>').slice(1).join(' ') || test);
+  let owner = null; let best = 0;
+  for (const it of items) {
+    const title = defectWords(String(it.text || '').split('\n')[0]);
+    const n = [...words].filter(w => title.has(w) || title.has(w.replace(/s$/, '')) || title.has(`${w}s`)).length;
+    if (n > best) { best = n; owner = it.id; }
+  }
+  const base = file ? file.split('/').pop() : null;
+  const correctable = !!(base && new RegExp(`${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[^.\n]{0,40}only original test you may correct`, 'i').test(descriptions));
+  const schemaRule = !!(file && /restrict|cascade|foreign key|on delete/i.test(source) && /restrict|cascade|foreign key|on delete/i.test(decisions));
+  if ((correctable || schemaRule) && best < 2) return { test, file, likelyOwner: 'BASELINE-FIX', reason: correctable ? 'named correctable by the item text' : 'schema rule in test and DECISIONS.md' };
+  return { test, file, likelyOwner: 'BACKLOG_ITEM', owner: best >= 2 ? owner : null };
+}
+
+/** Baseline defects that a fresh-DB full test run no longer reports as failing (only when the run produced a summary). */
+export function resolvedBaselineTests(defects, gateText) {
+  const text = String(gateText || '');
+  if (!/Tests?\s+\d+|Test Files|# (?:pass|fail) \d+/.test(text)) return [];
+  const fails = failingTests(text);
+  return defects.map(d => d.test).filter(t => !fails.has(t));
+}
+
+/** Best-effort DROP of a per-gate database (never blocks the gate; only names containing _gate_). */
+export function dropGateDatabase(appDir, url, run = execFile) {
+  let name;
+  try { name = decodeURIComponent(new URL(url).pathname.replace(/^\//, '')); } catch { return false; }
+  if (!/_gate_/.test(name)) return false;
+  const script = "const {PrismaClient}=require('@prisma/client');const u=new URL(process.env.MTM_DROP_URL);const db=decodeURIComponent(u.pathname.slice(1));u.pathname='/postgres';const p=new PrismaClient({datasources:{db:{url:u.toString()}}});p.$executeRawUnsafe('DROP DATABASE IF EXISTS \"'+db.replace(/\"/g,'\"\"')+'\" WITH (FORCE)').catch(()=>{}).finally(()=>p.$disconnect());";
+  try { run(process.execPath, ['-e', script], { cwd: appDir, env: { ...process.env, MTM_DROP_URL: url }, timeout: 20000, windowsHide: true }, () => {}); } catch { return false; }
+  return true;
+}
+
+/** A gate gets a never-before-used test DB without mutating the checkout's .env. */
+export function freshGateDatabaseEnv(appDir, suffix) {
+  for (const name of ['.env.test.local', '.env.test', '.env.local', '.env']) {
+    let text; try { text = fs.readFileSync(path.join(appDir, name), 'utf8'); } catch { continue; }
+    const raw = envValue(text, 'TEST_DATABASE_URL');
+    if (raw) {
+      try {
+        const u = new URL(raw); const db = u.pathname.replace(/^\//, '');
+        if (!db) return {};
+        u.pathname = `/${db}${suffix}`;
+        return { TEST_DATABASE_URL: u.toString() };
+      } catch { return {}; }
+    }
+    const db = envValue(text, 'TEST_DB_NAME');
+    if (db) return { TEST_DB_NAME: `${db}${suffix}` };
+  }
+  return {};
 }
 
 /** Junction/symlink node_modules (ignored by Git) from the main checkout into a worktree. */

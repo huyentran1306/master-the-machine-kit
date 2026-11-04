@@ -8,7 +8,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { ProgressLog } from '../team-sdlc-pack/src/progress.mjs';
 import { writeItemBrief } from '../team-sdlc-pack/src/item-brief.mjs';
-import { RuntimeSession } from '../team-sdlc-pack/src/runtime-session.mjs';
+import { RuntimeSession, databaseSuffix, freshGateDatabaseEnv } from '../team-sdlc-pack/src/runtime-session.mjs';
 import { rank, alerts } from '../team-sdlc-pack/src/planner.mjs';
 import { TOOLS } from '../team-sdlc-pack/src/tools.mjs';
 
@@ -223,6 +223,56 @@ function worktreeSession(t, adapter) {
   };
   return { s, args, create };
 }
+
+test('successive matches and gates never share a test database name', t => {
+  const roots = ['MATCH-A1', 'MATCH-B2'].map(id => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kit3-match-db-'));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    fs.writeFileSync(path.join(root, '.env'), 'TEST_DATABASE_URL="postgresql://localhost/freelanceos_test"\n');
+    const s = new RuntimeSession(); s.matchId = id; s.appPath = root; s.matchRoot = root;
+    assert.equal(s.ensureMatchTestDatabase().changed, true);
+    assert.equal(s.ensureMatchTestDatabase().changed, false, 'isolation is idempotent within one match');
+    return { root, url: fs.readFileSync(path.join(root, '.env'), 'utf8') };
+  });
+  assert.notEqual(roots[0].url, roots[1].url);
+  assert.match(roots[0].url, new RegExp(databaseSuffix('MATCH-A1')));
+  const a = freshGateDatabaseEnv(roots[0].root, '_gate_bug_1');
+  const b = freshGateDatabaseEnv(roots[0].root, '_gate_bug_2');
+  assert.notEqual(a.TEST_DATABASE_URL, b.TEST_DATABASE_URL);
+});
+
+test('fresh baseline contradictions are exposed as a shared BASELINE-FIX defect', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kit3-baseline-defect-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const app = path.join(root, 'assigned', 'src'); fs.mkdirSync(path.join(app, 'tests'), { recursive: true });
+  fs.mkdirSync(path.join(root, '.mtm-notes'));
+  fs.writeFileSync(path.join(app, 'tests', 'cascade.test.ts'), "test('deleting company is RESTRICTED', () => {})\n");
+  fs.writeFileSync(path.join(app, 'DECISIONS.md'), 'Invoices and payments use RESTRICT on company deletion.\n');
+  fs.writeFileSync(path.join(root, '.mtm-notes', 'test.log'), ' FAIL  tests/cascade.test.ts > deleting a company with invoices is RESTRICTED\nTests 1 failed\n');
+  const s = new RuntimeSession(); s.checkoutRoot = root; s.appPath = app;
+  assert.deepEqual(s.baselineDefects(), [{ test: 'tests/cascade.test.ts > deleting a company with invoices is RESTRICTED', file: 'tests/cascade.test.ts', likelyOwner: 'BASELINE-FIX', reason: 'schema rule in test and DECISIONS.md' }]);
+});
+
+test('only the first code worker receives the shared BASELINE-FIX assignment', async t => {
+  const { s, args } = worktreeSession(t);
+  const app = path.join(args.matchRoot, 'src'); fs.mkdirSync(path.join(app, 'tests'), { recursive: true });
+  fs.mkdirSync(path.join(args.checkoutRoot, '.mtm-notes'), { recursive: true });
+  fs.writeFileSync(path.join(app, 'tests', 'cascade.test.ts'), "test('company delete is RESTRICTED', () => {})\n");
+  fs.writeFileSync(path.join(app, 'DECISIONS.md'), 'Financial history uses RESTRICT on delete.\n');
+  fs.writeFileSync(path.join(args.checkoutRoot, '.mtm-notes', 'test.log'), ' FAIL  tests/cascade.test.ts > company delete is RESTRICTED\nTests 1 failed\n');
+  git(args.checkoutRoot, 'add', 'assigned/src'); git(args.checkoutRoot, 'commit', '-qm', 'scenario source');
+  s.appPath = app; s.phase = 'GAME'; s.match.status = 'IN_PROGRESS'; s.match.endsAt = Date.now() + 30 * 60000;
+  for (const id of ['BUG-61', 'CR-62']) {
+    s.items.set(id, { id, type: id.startsWith('BUG') ? 'BUG' : 'CR', local: { startedAt: Date.now() } });
+    s.materialCache[id] = { files: {}, submitTemplate: { backlogId: id } };
+  }
+  assert.equal(s.view().baselineDefects[0].likelyOwner, 'BASELINE-FIX');
+  const out = await s.dispatch_ready();
+  assert.equal(out.spawn.length, 2);
+  const tasks = out.spawn.map(e => fs.readFileSync(e.taskFile, 'utf8'));
+  assert.equal(tasks.filter(text => text.includes('BASELINE-FIX (ship with this first code item)')).length, 1);
+  assert.ok(['BUG-61', 'CR-62'].includes(s.state.baselineFixAssigned));
+});
 
 test('five code workers and uncapped PI get distinct persistent ports, private test DBs and remapped paths', async t => {
   const { s, args, create } = worktreeSession(t);

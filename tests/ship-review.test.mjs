@@ -216,7 +216,7 @@ test('worker model routing protects PI, avoids Luna by default, and falls back s
   s.modelPolicy = { orchestratorModel: 'gpt-6.1-sol', allowedModels: ['gpt-6-luna', 'gpt-6.1-terra', 'gpt-6.1-sol'] };
   assert.equal(s.workerModel(it('PI'), { answerOnly: true }), 'gpt-6.1-sol');
   assert.equal(s.workerModel(it('CR'), {}), 'gpt-6.1-sol');
-  assert.equal(s.workerModel(it(), { answerOnly: true }), 'gpt-6.1-terra');
+  assert.equal(s.workerModel(it(), { answerOnly: true }), 'gpt-6.1-sol');
   assert.equal(s.workerModel({ ...it(), local: { dispatches: 1, answerSource: true } }, { answerOnly: true }), 'gpt-6.1-sol');
   assert.equal(s.workerModel(it(), {}), 'gpt-6.1-terra');
   assert.equal(s.workerModel(it('TASK', 2), { answerOnly: true }), 'gpt-6.1-sol');

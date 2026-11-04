@@ -13,6 +13,7 @@ const FAKE = `import fs from 'node:fs';
 const mode = fs.readFileSync(new URL('./mode', import.meta.url), 'utf8').trim();
 const args = process.argv.slice(2).join(' ');
 console.log('ran ' + args);
+console.log('db=' + (process.env.TEST_DATABASE_URL || 'none'));
 if (mode === 'green') { console.log(' Test Files  1 passed (1)\\n      Tests  3 passed (3)'); process.exit(0); }
 if (mode === 'fail') { console.log(' FAIL  tests/bug-91.test.ts > rounds\\n      Tests  1 failed | 2 passed (3)'); process.exit(1); }
 if (mode === 'noise') { console.log('      Tests  3 passed (3)\\n[ELIFECYCLE] Test failed. See above for more details.'); process.exit(1); }
@@ -25,6 +26,7 @@ function fixture(t) {
   const app = path.join(root, 'assigned', 'src');
   fs.mkdirSync(path.join(app, 'tests'), { recursive: true });
   fs.writeFileSync(path.join(app, 'tsconfig.json'), '{}');
+  fs.writeFileSync(path.join(app, '.env'), 'TEST_DATABASE_URL="postgresql://localhost/freelanceos_match_test"\n');
   fs.writeFileSync(path.join(root, '.gitignore'), 'node_modules\n');
   fs.writeFileSync(path.join(app, 'a.ts'), 'export const a = 1;\n');
   git(root, 'add', '-A'); git(root, 'commit', '-qm', 'base');
@@ -49,7 +51,10 @@ test('gate runs the item\'s own tests with direct binaries and tells code failur
   mode('green');
   const g = await s.gate({ backlogItemKey: 'BUG-91' });
   assert.equal(g.verdict, 'GREEN'); assert.equal(g.scope, 'item'); assert.deepEqual(g.files, ['tests/bug-91.test.ts']);
-  assert.match(fs.readFileSync(path.join(s.checkoutRoot, '.mtm-notes', 'gate-BUG-91-tests.log'), 'utf8'), /ran run tests\/bug-91\.test\.ts/);
+  const gateLog = fs.readFileSync(path.join(s.checkoutRoot, '.mtm-notes', 'gate-BUG-91-tests.log'), 'utf8');
+  assert.match(gateLog, /ran run tests\/bug-91\.test\.ts/);
+  assert.match(gateLog, /freelanceos_match_test_match_gate_bug_91_1/);
+  assert.equal(g.testDatabase, 'fresh isolated database');
   assert.match(g.tests.summary, /3 passed/); assert.match(g.next, /push now, then submit_work BUG-91/);
   mode('fail');
   const f = await s.gate({ backlogItemKey: 'BUG-91' });

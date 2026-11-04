@@ -44,6 +44,7 @@ const IDLE_WORKER_MS = 4 * 60000;
 const MAX_RESPAWNS = 2;
 const DEFAULT_WORKER_MODELS = {
   pi: ['gpt-6.1-sol', 'gpt-6.1-terra'],
+  cr: ['gpt-6.1-sol', 'gpt-6.1-terra'],
   answerOnly: ['gpt-6.1-terra', 'gpt-6.1-sol'],
   code: ['gpt-6.1-terra', 'gpt-6.1-sol'],
   retry: ['gpt-6.1-sol', 'gpt-6.1-terra'],
@@ -58,7 +59,7 @@ export const DEFAULT_ADAPTER = {
   polling: { successMs: 5000, errorMs: 10000, backgroundMs: 20000, maxWaitMs: 55000 },
   submit: { acceptedStatuses: ['ACCEPTED', 'RECEIVED'], retryBudgetMs: SUBMIT_LIMITS.retryMs },
   planner: {},
-  parallel: { maxCodeWorkers: 5, maxBuilds: 2, materialConcurrency: 4, portBase: 3100, workerModels: DEFAULT_WORKER_MODELS },
+  parallel: { maxCodeWorkers: 5, maxBuilds: 2, materialConcurrency: 6, portBase: 3100, workerModels: DEFAULT_WORKER_MODELS },
 };
 
 function deepMerge(a, b) {
@@ -97,6 +98,7 @@ export class RuntimeSession {
     this.shipChain = Promise.resolve(); // ship() calls run one at a time: main checkout, gate and push are shared
     this.poller = null;
     this.lastPollError = null;
+    this.lastWaitForUpdateAt = null;
   }
 
   // ---------- infrastructure ----------
@@ -522,7 +524,7 @@ export class RuntimeSession {
       if (out.sync?.startsWith('FAILED:')) out.next = 'Backlog data was NOT synchronized. Call login_match once to restore the contestant session, then refresh_match. Do not mark BACKLOG_SYNC complete or interpret the loading shell as an empty backlog.';
       if (resume) out.recovery = await this.recoveryReport();
       this.saveState();
-      return out;
+      return out.sync?.startsWith('FAILED:') ? out : this.clean(await this.withAutoDispatch(out));
     }
     return { message: `Unhandled descriptor type ${type}` };
   }
@@ -940,7 +942,8 @@ export class RuntimeSession {
       queue: [...ranked.slice(1), ...queued].map((r) => `${r.id}: ${r.action} — ${r.why}${queued.includes(r) ? ' (waiting for code slot/RAM)' : ''}`),
       parked: items.filter(i => i.local?.parked && !isSubmitted(i)).map(i => ({ id: i.id, action: 'resume', ...i.local.parked })),
       builds: { active: [...this.buildQueue.active], queue: [...this.buildQueue.waiting] },
-      dispatch: { maxCodeWorkers: this.adapter.parallel.maxCodeWorkers, maxBuilds: this.adapter.parallel.maxBuilds, freeRamGB: freeBytes / 1024 ** 3 },
+      dispatch: { maxCodeWorkers: this.adapter.parallel.maxCodeWorkers, maxBuilds: this.adapter.parallel.maxBuilds, freeRamGB: freeBytes / 1024 ** 3,
+        lastDrainSecAgo: this.lastWaitForUpdateAt ? Math.max(0, Math.round((now - this.lastWaitForUpdateAt) / 1000)) : null },
       skipped: skipped.slice(0, 5),
       current,
       alerts: al,
@@ -951,7 +954,7 @@ export class RuntimeSession {
     if (this.lastParse && !this.lastParse.structured) out.parse = `page structure unknown (${this.lastParse.warnings.join('; ')}): read pageText; pass matchUuid to start_work if needed`;
     if (pageText && this.lastPageText) out.pageText = truncate(this.lastPageText, 12000);
     out.maxCodeWorkers = this.adapter.parallel.maxCodeWorkers;
-    if (this.phase === 'GAME' && this.match.status !== 'FINISHED') out.keepAlive = 'Match running: when wait_for_update returns spawn entries, spawn them at once (it already dispatched); otherwise dispatch_ready whenever DISPATCH NOW shows; submit READY immediately. With workers: wait_agent <=45s, shortened to the next cutoff or known wave. Service a completion immediately; only after a wait timeout call wait_for_update timeoutMs:1000. Near a known wave (<=15s), call wait_for_update through the wave instead. Never use generic wait. Without workers: wait_for_update with no timeoutMs.';
+    if (this.phase === 'GAME' && this.match.status !== 'FINISHED') out.keepAlive = 'Match running: spawn returned entries immediately; submit READY immediately. With workers, service completions first. Before the next wait_agent, call wait_for_update timeoutMs:1000 only when dispatch.lastDrainSecAgo is null or >=20; otherwise wait_agent <=45s. Never guess reveal waves or use generic wait. Without workers: wait_for_update with no timeoutMs.';
     return out;
   }
 
@@ -972,14 +975,15 @@ export class RuntimeSession {
     const next = reoffer
       ? `REOFFER ONLY (do not duplicate a live worker; this entry is not cached again): ${d.next}`
       : d.spawn?.length
-        ? `SPAWN NOW (already dispatched by wait_for_update, do not call dispatch_ready for these): ${d.next}`
+        ? `SPAWN NOW (already dispatched by the helper, do not call dispatch_ready for these): ${d.next}`
         : `CHECK WORKERS: ${d.next}`;
-    return { ...out, spawn: d.spawn, ...(reoffer ? { alreadyReturned: true } : {}),
+    return { ...out, spawn: d.spawn, ...(reoffer ? { alreadyReturned: true } : {}), dispatchMs: d.dispatchMs,
       ...(d.respawnCheck?.length ? { respawnCheck: d.respawnCheck } : {}), waiting: d.waiting,
       next, view: d.view || out.view };
   }
 
   async wait_for_update({ timeoutMs } = {}) {
+    this.lastWaitForUpdateAt = this.now();
     const ceiling = this.adapter.polling.maxWaitMs || 55000;
     const max = Math.min(Number(timeoutMs) || ceiling, ceiling);
     const until = Date.now() + max;
@@ -1151,11 +1155,13 @@ export class RuntimeSession {
     const firstStart = !it.local.startedAt;
     if (firstStart) { it.local.startedAt = this.now(); it.local.queued = true; }
     if (it.local.notOpenRefused) delete it.local.notOpenRefused;
-    await this.fetchItemDetail(id);
     it.description = data.description ?? (it.description || textBlockFor(this.lastPageText || '', id) || '');
     // The item text is the only place some requirements live (BUG-01: "save as dashboard_before_fixing.png").
     // Without it the brief, the evidence extraction and the submit gate all work blind.
     if (!usableDescription(it.description)) {
+      // Start Work normally returns the full description. Avoid one detail request per ticket on the
+      // critical START_GAME path; use it only when the response/page really omitted the text.
+      await this.fetchItemDetail(id);
       await this.withLock(() => this.doRefresh({ reason: 'description' })).catch(() => {});
       const fresh = this.items.get(id)?.description;
       const block = textBlockFor(this.lastPageText || '', id);
@@ -1166,7 +1172,10 @@ export class RuntimeSession {
     const material = { backlogId: data.backlogId || id, backlogType: data.backlogType || it.type, startInstruction: data.startInstruction ?? '', submitTemplate: data.submitTemplate ?? null, minimumVerificationScenarios: data.minimumVerificationScenarios ?? null, files: data.files || {}, receivedAt: nowIso(), replay: !!data.replay };
     it.local.answerOnly = answerOnly(it, material);
     material.requiredEvidence = extractRequiredEvidence(it, material);
-    material.mcpMaterial = this.readMaterial(id)?.mcpMaterial ?? await collectMcpMaterial({ ...it, startInstruction: material.startInstruction }, request => this.match_mcp(request));
+    // Optional company material must not hold the whole first dispatch for the old 90 s ceiling.
+    // PI keeps the largest slice for production logs; answer-only and code get bounded discovery.
+    const materialBudgetMs = it.type === 'PI' ? 30000 : it.type === 'CR' ? 25000 : it.local.answerOnly ? 15000 : 12000;
+    material.mcpMaterial = this.readMaterial(id)?.mcpMaterial ?? await collectMcpMaterial({ ...it, startInstruction: material.startInstruction }, request => this.match_mcp(request), materialBudgetMs);
     this.materialCache = { ...(this.materialCache || {}), [id]: material };
     if (this.stateDir) {
       writeJson(path.join(this.stateDir, 'items', id, 'start.json'), material);
@@ -1827,7 +1836,7 @@ export class RuntimeSession {
     const allowed = [...new Set(rawAllowed.filter((m) => typeof m === 'string' && m.trim()).map((m) => m.trim()))];
     if (!allowed.length) return undefined;
     const cfg = { ...DEFAULT_WORKER_MODELS, ...(this.adapter.parallel?.workerModels || {}) };
-    const lane = (it.local?.dispatches || 0) > 1 ? 'retry' : it.type === 'PI' ? 'pi' : c.answerOnly ? 'answerOnly' : 'code';
+    const lane = (it.local?.dispatches || 0) > 1 ? 'retry' : it.type === 'PI' ? 'pi' : it.type === 'CR' ? 'cr' : c.answerOnly ? 'answerOnly' : 'code';
     const preferred = Array.isArray(cfg[lane]) ? cfg[lane] : [cfg[lane]];
     for (const wanted of preferred.filter((m) => typeof m === 'string' && m)) {
       const match = allowed.find((m) => m === wanted || m.startsWith(`${wanted}-`));
@@ -1873,6 +1882,7 @@ export class RuntimeSession {
   }
 
   async dispatch_ready() {
+    const dispatchStartedAt = Date.now();
     if (this.phase !== 'GAME') return { ok: false, error: 'NOT_IN_GAME', next: this.nextHint() };
     if (['PAUSED', 'FINISHED'].includes(this.match.status)) return this.clean({ ok: false, error: `MATCH_${this.match.status}`, next: this.nextHint() });
     const plan = rank([...this.items.values()], this.now(), this.match.endsAt, this.adapter.planner).ranked.filter(r => r.action !== 'submit');
@@ -1938,6 +1948,7 @@ export class RuntimeSession {
     this.saveState();
     return this.clean({
       ok: true, spawn, waiting, ...(respawnCheck.length ? { respawnCheck } : {}),
+      dispatchMs: Date.now() - dispatchStartedAt,
       next: (respawnCheck.length ? `respawnCheck: ${respawnCheck.map(e => e.id).join(', ')} show no file change or commit ${Math.round(IDLE_WORKER_MS / 60000)}+ min after dispatch. For each: list_agents; if NO live agent has a task path ending in its previous taskName (${respawnCheck.map(e => e.previousTaskName).join(', ')}), spawn_agent with the entry's taskName and message exactly (same worktree); if one is alive, ignore the entry. ` : '') + (spawn.length
         ? `Spawn ALL ${spawn.length} worker(s) NOW, in this same turn, before anything else: one spawn_agent per entry with agent_type "team_feature_worker", fork_turns "none", task_name = taskName, message exactly as given, reasoning_effort = the entry's reasoningEffort, and model = entry.model when present (pass returned settings exactly; omit model only when absent; never substitute another model). If a spawn fails (e.g. "agent thread limit reached"), keep its entry and retry that same spawn right after the next wait_agent; the worktree already exists. Then service READY items.`
         : waiting.length ? 'Nothing could be dispatched yet (see waiting); service READY, then wait.' : 'Every open item already has a worker; service READY, then wait.'),
@@ -2013,7 +2024,8 @@ export class RuntimeSession {
    * nothing is forced: on any refusal ship stops and returns the step and its next action.
    */
   async ship(args = {}) {
-    const run = this.shipChain.then(() => this.shipOne(args), () => this.shipOne(args));
+    const go = async () => this.clean(await this.withAutoDispatch(await this.shipOne(args)));
+    const run = this.shipChain.then(go, go);
     this.shipChain = run.catch(() => {});
     return run;
   }
@@ -2076,9 +2088,53 @@ export class RuntimeSession {
     const branch = this.repository.branch;
     const cur = (await G.git(this.checkoutRoot, ['rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim();
     if (cur !== branch) return this.clean({ ok: false, stage: 'push', error: 'NOT_ON_BRANCH', message: `main checkout is on ${cur}, expected ${branch}`, steps, next: 'Recovery flow: check out the assigned branch; never push another branch.' });
-    const p = await G.git(this.checkoutRoot, ['push', 'origin', `HEAD:refs/heads/${branch}`], { timeoutMs: 60000 });
-    steps.push({ step: 'push', ok: p.code === 0 });
-    if (p.code !== 0) return this.clean({ ok: false, stage: 'push', error: p.timedOut ? 'PUSH_TIMEOUT' : 'PUSH_REJECTED', message: (p.stderr || p.stdout).trim().slice(0, 400), steps, next: 'Recovery flow for a rejected push (pull --rebase, gate, push; never force), then ship again: it continues from the integrated commit.' });
+    // A different submission may advance the shared branch while this worker runs. Rebase remote
+    // commits only when they stay outside this match folder; competing match edits need a human.
+    // Run this before the first push and again after a non-fast-forward rejection to close the race
+    // where another team commit lands between our fetch and push.
+    const syncRemote = async () => {
+      const fetch = await G.git(this.checkoutRoot, ['fetch', '--quiet', 'origin', branch], { timeoutMs: 30000 });
+      if (fetch.code !== 0) return { ok: false, fetchError: true, message: (fetch.stderr || fetch.stdout).trim().slice(0, 400) };
+      const remote = `refs/remotes/origin/${branch}`;
+      const head = await G.revParse(this.checkoutRoot, 'HEAD');
+      const remoteHead = await G.revParse(this.checkoutRoot, remote);
+      if (head && remoteHead && head !== remoteHead && !await G.isAncestor(this.checkoutRoot, remoteHead, head)) {
+        const base = (await G.git(this.checkoutRoot, ['merge-base', head, remoteHead])).stdout.trim();
+        const changed = base ? (await G.git(this.checkoutRoot, ['diff', '--name-only', `${base}..${remoteHead}`])).stdout.split(/\r?\n/).filter(Boolean) : [];
+        const folder = String(this.repository.folder || '').replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/$/, '');
+        const overlap = changed.filter((p) => p === folder || p.startsWith(`${folder}/`));
+        if (overlap.length) return { ok: false, error: 'REMOTE_MATCH_CONFLICT', files: overlap.slice(0, 20),
+          next: 'Remote changed this match folder. Review and rebase manually; never force-push.' };
+        const rb = await G.git(this.checkoutRoot, ['rebase', remote], { timeoutMs: 120000 });
+        steps.push({ step: 'remote-rebase', ok: rb.code === 0, commits: changed.length });
+        if (rb.code !== 0) {
+          await G.git(this.checkoutRoot, ['rebase', '--abort']);
+          return { ok: false, error: 'REMOTE_REBASE_FAILED', message: (rb.stderr || rb.stdout).trim().slice(0, 400),
+            next: 'Remote changed outside this match but automatic rebase conflicted. Resolve manually; never force-push.' };
+        }
+        wt.integratedSha = await G.revParse(this.checkoutRoot, 'HEAD');
+        this.saveState();
+        return { ok: true, changed: true };
+      }
+      return { ok: true, changed: false };
+    };
+    const initialSync = await syncRemote();
+    if (!initialSync.ok && !initialSync.fetchError) return this.clean({ ok: false, stage: 'push', ...initialSync, steps });
+    let p;
+    let pushAttempts = 0;
+    for (; pushAttempts < 3; pushAttempts += 1) {
+      p = await G.git(this.checkoutRoot, ['push', 'origin', `HEAD:refs/heads/${branch}`], { timeoutMs: 60000 });
+      if (p.code === 0 || p.timedOut) break;
+      const recovered = await syncRemote();
+      if (!recovered.ok) {
+        if (!recovered.fetchError) return this.clean({ ok: false, stage: 'push', ...recovered, steps });
+        break;
+      }
+      if (!recovered.changed) break;
+    }
+    pushAttempts = Math.min(pushAttempts + 1, 3);
+    steps.push({ step: 'push', ok: p?.code === 0, attempts: pushAttempts });
+    if (p?.code !== 0) return this.clean({ ok: false, stage: 'push', error: p?.timedOut ? 'PUSH_TIMEOUT' : 'PUSH_REJECTED', message: (p?.stderr || p?.stdout || '').trim().slice(0, 400), steps, next: 'Automatic fetch/rebase retries were exhausted or remote fetch failed. Review manually; never force-push.' });
     await G.git(this.checkoutRoot, ['fetch', '--quiet', 'origin', branch], { timeoutMs: 30000 }); // refresh the tracking ref for the submit preflight
     const s = await this.submit_work({ backlogItemKey: id, gitRevision: wt.integratedSha, ...untested });
     steps.push({ step: 'submit', ok: !!s.ok, outcome: s.outcome || s.error || null });

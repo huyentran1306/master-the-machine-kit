@@ -137,14 +137,15 @@ test('ship goes READY -> integrate -> gate -> BACKLOG_TESTS -> push -> submit ->
   assert.equal(f.ok, false); assert.equal(f.stage, 'gate', JSON.stringify(f).slice(0, 600)); assert.equal(f.verdict, 'CODE_FAILURE');
   assert.equal(submits.length, 1, 'nothing submitted on a red gate');
   assert.notEqual(git(remote, 'rev-parse', 'main'), git(root, 'rev-parse', 'HEAD'), 'nothing pushed on a red gate');
-  // Remote moved by someone else: push is refused, never forced.
+  // Remote moved outside the assigned match: ship safely rebases it, never force-pushes.
   mode('green');
   const other = path.join(tmp, 'other'); execFileSync('git', ['clone', '-q', remote, other]);
   git(other, 'config', 'user.name', 'O'); git(other, 'config', 'user.email', 'o@example.invalid');
   fs.writeFileSync(path.join(other, 'x.txt'), 'x'); git(other, 'add', '-A'); git(other, 'commit', '-qm', 'other'); git(other, 'push', '-q', 'origin', 'HEAD:main');
   const pr = await s.ship({ backlogItemKey: 'BUG-72' });
-  assert.equal(pr.ok, false); assert.equal(pr.stage, 'push'); assert.equal(pr.error, 'PUSH_REJECTED');
-  assert.equal(submits.length, 1);
+  assert.equal(pr.ok, true, JSON.stringify(pr));
+  assert.equal(pr.steps.find((x) => x.step === 'remote-rebase')?.ok, true, JSON.stringify(pr.steps));
+  assert.equal(submits.length, 2);
 });
 
 test('validate-answer catches the preflight refusals seen in rehearsal set3 before READY', async (t) => {

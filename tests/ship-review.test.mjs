@@ -80,6 +80,45 @@ test('ship force:true after an ENVIRONMENT gate submits with allowUntested inste
   assert.ok(!(r.errors || []).some((e) => /no test run reported/.test(e)), JSON.stringify(r.errors));
 });
 
+test('ship rebases a remote commit outside the assigned match before pushing', async (t) => {
+  const { s, mode, mk, remote, root } = shipFixture(t);
+  s.submit_work = async (a) => { s.items.get(a.backlogItemKey).local.receiptId = 'r'; return { ok: true, outcome: 'SUBMITTED', gitRevision: a.gitRevision }; };
+  await mk('BUG-76'); mode('green');
+  const peer = path.join(path.dirname(root), 'peer');
+  execFileSync('git', ['clone', '-q', remote, peer]);
+  git(peer, 'config', 'user.name', 'Peer'); git(peer, 'config', 'user.email', 'peer@example.invalid');
+  fs.mkdirSync(path.join(peer, 'other-match'), { recursive: true });
+  fs.writeFileSync(path.join(peer, 'other-match', 'seed.txt'), 'peer\n');
+  git(peer, 'add', '-A'); git(peer, 'commit', '-qm', 'other match submission'); git(peer, 'push', '-q', 'origin', 'main');
+  const r = await s.ship({ backlogItemKey: 'BUG-76' });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.steps.find((x) => x.step === 'remote-rebase')?.ok, true, JSON.stringify(r.steps));
+  const files = git(remote, 'ls-tree', '-r', '--name-only', 'main');
+  assert.ok(files.includes('other-match/seed.txt') && files.includes('assigned/src/bug-76.ts'), files);
+});
+
+test('ship recovers when remote advances after fetch but before the first push', async (t) => {
+  const { s, mode, mk, remote, root } = shipFixture(t);
+  s.submit_work = async (a) => { s.items.get(a.backlogItemKey).local.receiptId = 'r'; return { ok: true, outcome: 'SUBMITTED', gitRevision: a.gitRevision }; };
+  await mk('BUG-77'); mode('green');
+  const peer = path.join(path.dirname(root), 'race-peer');
+  execFileSync('git', ['clone', '-q', remote, peer]);
+  git(peer, 'config', 'user.name', 'Peer'); git(peer, 'config', 'user.email', 'peer@example.invalid');
+  fs.mkdirSync(path.join(peer, 'seed-match'), { recursive: true });
+  fs.writeFileSync(path.join(peer, 'seed-match', 'seed.txt'), 'raced\n');
+  git(peer, 'add', '-A'); git(peer, 'commit', '-qm', 'racing seed commit');
+  const marker = path.join(path.dirname(root), 'push-race-once');
+  fs.writeFileSync(marker, '1');
+  const hook = path.join(root, '.git', 'hooks', 'pre-push');
+  fs.writeFileSync(hook, `#!/bin/sh\nif [ -f "${marker}" ]; then\n  rm "${marker}"\n  git -C "${peer}" push -q origin main\nfi\n`);
+  fs.chmodSync(hook, 0o755);
+  const r = await s.ship({ backlogItemKey: 'BUG-77' });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.steps.find((x) => x.step === 'push')?.attempts, 2, JSON.stringify(r.steps));
+  const files = git(remote, 'ls-tree', '-r', '--name-only', 'main');
+  assert.ok(files.includes('seed-match/seed.txt') && files.includes('assigned/src/bug-77.ts'), files);
+});
+
 test('a CODE_FAILURE gate rolls the item back so the next ship never pushes failing code', async (t) => {
   const { s, mode, mk, remote, root } = shipFixture(t);
   s.submit_work = async (a) => { s.items.get(a.backlogItemKey).local.receiptId = 'r'; return { ok: true, outcome: 'SUBMITTED' }; };
@@ -166,6 +205,7 @@ test('worker model routing protects PI, avoids Luna by default, and falls back s
   const it = (type = 'TASK', dispatches = 1) => ({ id: 'X-1', type, local: { dispatches } });
   s.modelPolicy = { orchestratorModel: 'gpt-6.1-sol', allowedModels: ['gpt-6-luna', 'gpt-6.1-terra', 'gpt-6.1-sol'] };
   assert.equal(s.workerModel(it('PI'), { answerOnly: true }), 'gpt-6.1-sol');
+  assert.equal(s.workerModel(it('CR'), {}), 'gpt-6.1-sol');
   assert.equal(s.workerModel(it(), { answerOnly: true }), 'gpt-6.1-terra');
   assert.equal(s.workerModel(it(), {}), 'gpt-6.1-terra');
   assert.equal(s.workerModel(it('TASK', 2), { answerOnly: true }), 'gpt-6.1-sol');

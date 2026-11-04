@@ -154,6 +154,21 @@ export async function collectMcpMaterial(item, call, budgetMs = 90000) {
   for (const candidate of selected.filter(x => x.kind === 'search' || x.kind === 'logs')) {
     if (item.title) await attempt(candidate, deadline, true);
   }
+  // Standards commonly reference other authoritative articles (for example an export format points
+  // at its money, date, status and access rules). Search APIs return only a few articles, so stopping
+  // at the first response made workers guess the missing rules and pass MVS while losing hidden tests.
+  // Follow one bounded layer of explicit KB IDs; exact-ID queries are deterministic and read-only.
+  const kb = selected.find(x => x.kind === 'search');
+  if (kb) {
+    const followed = new Set();
+    for (let depth = 0; depth < 2 && followed.size < 8 && Date.now() < deadline; depth += 1) {
+      const text = `${item.description || ''}\n${item.startInstruction || ''}\n${JSON.stringify(entries)}`;
+      const ids = [...new Set(text.match(/\bKB-[A-Z][A-Z0-9]*-\d+\b/g) || [])].filter(id => !followed.has(id)).slice(0, 8 - followed.size);
+      if (!ids.length) break;
+      ids.forEach(id => followed.add(id));
+      await mapBounded(ids, 3, id => attempt(kb, deadline, false, { query: id }));
+    }
+  }
   const incident = item.type === 'PI' || /\b(incident|production logs?|observability)\b/i.test(String(item.description || ''));
   if (incident) {
     const sweepCutoff = Math.min(deadline, Date.now() + 25000);

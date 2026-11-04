@@ -250,6 +250,20 @@ test('MCP first attempts precede title retries and optional discovery', async ()
   assert.equal(calls[3].args.query, 'X-9 Synthetic');
 });
 
+test('MCP discovery follows explicit KB article references instead of making workers guess', async () => {
+  const calls = [];
+  const tools = [{ name: 'search_docs', inputSchema: { properties: { query: { type: 'string' } } } }];
+  const result = (text) => ({ ok: true, raw: { content: [{ type: 'text', text }] } });
+  await collectMcpMaterial({ id: 'CR-1', description: 'Use KB-EXP-01' }, async req => {
+    if (req.action === 'tools') return { ok: true, tools };
+    calls.push(req.args.query);
+    if (req.args.query === 'KB-EXP-01') return result('KB-EXP-01 requires KB-FIN-04 and KB-INV-03.');
+    return result('article body');
+  }, 2000);
+  assert.ok(calls.includes('KB-EXP-01'), JSON.stringify(calls));
+  assert.ok(calls.includes('KB-FIN-04') && calls.includes('KB-INV-03'), JSON.stringify(calls));
+});
+
 test('slow first attempts leave time for logs; optional tools share a smaller budget', async () => {
   const calls = [];
   const tools = ['fetch_test_data', 'search_docs', 'get_logs'].map(name => ({ name }));

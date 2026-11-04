@@ -1,4 +1,4 @@
-model_auto_compact_token_limit = 45000
+model_auto_compact_token_limit = 100000
 
 # Every shell command the agents run: pnpm 10/11 must not run an implicit install before a script
 # (verify-deps-before-run). Without a TTY it aborts with ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY;

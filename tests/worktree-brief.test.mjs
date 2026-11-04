@@ -440,6 +440,7 @@ test('batch start_work overlaps MCP collection across newly revealed items with 
 test('dispatch_ready dispatches every open item in one call and respawns workers lost in a restart', async t => {
   const { s } = worktreeSession(t);
   s.phase = 'GAME'; s.match.status = 'IN_PROGRESS'; s.match.endsAt = Date.now() + 30 * 60000;
+  s.modelPolicy = { orchestratorModel: 'gpt-6.1-sol', allowedModels: ['gpt-6-luna', 'gpt-6.1-terra', 'gpt-6.1-sol'] };
   for (const [id, type] of [['BUG-31', 'BUG'], ['CR-32', 'CR'], ['PI-33', 'PI'], ['TASK-34', 'TASK']]) {
     s.items.set(id, { id, type, revealedAt: Date.now() - 2 * 60000, local: { startedAt: Date.now() } });
     s.materialCache[id] = { files: {}, submitTemplate: { backlogId: id } };
@@ -456,11 +457,13 @@ test('dispatch_ready dispatches every open item in one call and respawns workers
     assert.match(task(sp), /briefFile .*\.json/); assert.match(task(sp), /ports dev=\d+/);
     assert.doesNotMatch(task(sp), /RESUME/);
     assert.equal(sp.reasoningEffort, ['PI-33', 'TASK-34'].includes(sp.id) && s.items.get(sp.id).local.answerOnly !== false ? sp.reasoningEffort : 'medium');
+    assert.equal(sp.model, sp.answerOnly ? 'gpt-6-luna' : 'gpt-6.1-terra');
   }
   assert.ok(first.spawn.every(sp => ['low', 'medium'].includes(sp.reasoningEffort)));
   assert.equal(first.spawn.find(sp => sp.id === 'BUG-31').reasoningEffort, 'medium');
   assert.match(task(first.spawn.find(sp => sp.id === 'BUG-31')), /Builds: `node ".*build-lock\.mjs" --slots \d+ -- <build command>`/);
   assert.match(first.next, /reasoning_effort/);
+  assert.match(first.next, /model = entry\.model/);
   assert.match(first.next, /Spawn ALL 4 worker\(s\) NOW/);
   assert.equal(s.view().alerts.some(a => /DISPATCH NOW/.test(a)), false);
   assert.equal((await s.dispatch_ready()).spawn.length, 0, 'idempotent while workers are live');
@@ -473,6 +476,7 @@ test('dispatch_ready dispatches every open item in one call and respawns workers
   for (const sp of again.spawn) {
     assert.match(task(sp), /^RESUME: the previous worker/);
     assert.ok(['high', 'medium'].includes(sp.reasoningEffort), 'a re-dispatch never drops below medium');
+    assert.equal(sp.model, 'gpt-6.1-sol', 'a re-dispatch uses the retry model');
     assert.match(sp.taskName, /r2$/);
     assert.equal(s.items.get(sp.id).local.worktree.ports.dev, portsBefore[sp.id]);
     assert.equal(s.items.get(sp.id).local.orphaned, undefined);

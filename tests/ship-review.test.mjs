@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { RuntimeSession } from '../team-sdlc-pack/src/runtime-session.mjs';
+import { DEFAULT_ADAPTER, RuntimeSession } from '../team-sdlc-pack/src/runtime-session.mjs';
 import { testSummary } from '../team-sdlc-pack/src/gate.mjs';
 import { evidenceArrayRefs } from '../team-sdlc-pack/src/required-evidence.mjs';
 
@@ -123,7 +123,7 @@ test('a dispatched worktree with no change for 4 min is re-offered once per chec
     s.materialCache[id] = { files: {}, submitTemplate: { backlogId: id } };
     const c = await s.worktree({ action: 'create', backlogItemKey: id });
     assert.equal(c.ok, true, JSON.stringify(c));
-    s.items.get(id).local.spawnEntry = { taskName: id.toLowerCase().replace('-', ''), message: `Item ${id}`, at: s.now(), respawns: 0, ...(await s.worktreeFingerprint(c.worktreeRoot)) };
+    s.items.get(id).local.spawnEntry = { taskName: id.toLowerCase().replace('-', ''), message: `Item ${id}`, model: 'gpt-6.1-terra', at: s.now(), respawns: 0, ...(await s.worktreeFingerprint(c.worktreeRoot)) };
     return c;
   };
   const idle = await add('BUG-81');
@@ -136,6 +136,7 @@ test('a dispatched worktree with no change for 4 min is re-offered once per chec
   assert.deepEqual(r.map(e => e.id), ['BUG-81']);
   assert.equal(r[0].previousTaskName, 'bug81');
   assert.equal(r[0].taskName, 'bug81w1');
+  assert.equal(r[0].model, 'gpt-6.1-terra');
   assert.match(r[0].message, /^NO-WORKER RESPAWN/);
   assert.equal(s.items.get('BUG-82').local.spawnEntry.active, true);
   assert.equal(await s.idleWorkers().then(x => x.length), 0, 'timer restarted after a re-offer');
@@ -155,6 +156,26 @@ test('worker reasoning effort: low for answer-only, medium for code, high for a 
   assert.equal(s.workerEffort(it({ local: { dispatches: 2 }, deadlineAt: Date.now() + 6 * 60000 }), {}), 'medium');
   s.adapter = { parallel: { workerEffort: { answerOnly: 'medium' } } };
   assert.equal(s.workerEffort(it(), { answerOnly: true }), 'medium', 'adapter override');
+});
+
+test('worker model routing stays inside allowedModels and falls back safely', () => {
+  const shipped = JSON.parse(fs.readFileSync(new URL('../team-sdlc-pack/config/game-adapter.json', import.meta.url)));
+  assert.deepEqual(shipped.parallel.workerModels, DEFAULT_ADAPTER.parallel.workerModels, 'shipped and runtime defaults stay aligned');
+  const s = Object.create(RuntimeSession.prototype);
+  s.adapter = DEFAULT_ADAPTER;
+  const it = (dispatches = 1) => ({ id: 'X-1', type: 'TASK', local: { dispatches } });
+  s.modelPolicy = { orchestratorModel: 'gpt-6.1-sol', allowedModels: ['gpt-6-luna', 'gpt-6.1-terra', 'gpt-6.1-sol'] };
+  assert.equal(s.workerModel(it(), { answerOnly: true }), 'gpt-6-luna');
+  assert.equal(s.workerModel(it(), {}), 'gpt-6.1-terra');
+  assert.equal(s.workerModel(it(2), { answerOnly: true }), 'gpt-6.1-sol');
+  s.modelPolicy = { orchestratorModel: 'gpt-6.1-sol', allowedModels: ['gpt-6.1-sol'] };
+  assert.equal(s.workerModel(it(), { answerOnly: true }), 'gpt-6.1-sol', 'preferred unavailable: allowed orchestrator');
+  s.modelPolicy = { orchestratorModel: 'not-allowed', allowedModels: ['custom-allowed'] };
+  assert.equal(s.workerModel(it(), {}), 'custom-allowed', 'orchestrator unavailable: first allowed');
+  s.modelPolicy = { orchestratorModel: 'gpt-6-luna', allowedModels: ['gpt-6-luna-2026-10-01'] };
+  assert.equal(s.workerModel(it(), { answerOnly: true }), 'gpt-6-luna-2026-10-01', 'authorized snapshot matches preference');
+  s.modelPolicy = null;
+  assert.equal(s.workerModel(it(), {}), undefined, 'no policy preserves inheritance');
 });
 
 test('a node_modules symlink in the worker copy is not WORKER_DIRTY even when .gitignore says node_modules/', async (t) => {

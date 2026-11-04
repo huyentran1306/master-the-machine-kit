@@ -113,7 +113,7 @@ test('orchestrator dispatches every item with a bounded completion and event loo
     'compact:true', 'worktree create', 'answer-only items uncapped', 'parallel.maxCodeWorkers', 'parallel.maxBuilds',
     'deadline READY -> PARKED resume -> new PI -> nearest deadline -> points per minute', 'minus a quarter of the time left',
     'Never hold READY', 'target <=2 minutes', 'full suite + typecheck', 'build-relevant files',
-    'worktree rollback', 'trivial one-line conflict', 'wait_agent', '45,000 ms', 'timeoutMs:1000',
+    'worktree rollback', 'trivial one-line conflict', 'entry.model', 'wait_agent', '45,000 ms', 'timeoutMs:1000',
     'Never use generic', 'no assumed cross-tool wait-any', 'stop-and-return', 'Never view_image', 'git diff --stat', '-Tail 15']) assert.ok(text.includes(phrase), phrase);
   assert.doesNotMatch(text, /Parallel lane \(when it pays\)|Keep working on your own item|Max 2 workers|redo the (small )?change in main|stash push/);
   const profile = read('agents/team-orchestrator.toml');

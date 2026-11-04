@@ -482,3 +482,27 @@ test('dispatch_ready dispatches every open item in one call and respawns workers
     assert.equal(s.items.get(sp.id).local.orphaned, undefined);
   }
 });
+
+test('dispatch_ready leaves a labelled heavy item unstarted until ordinary items finish', async t => {
+  const { s } = worktreeSession(t);
+  s.phase = 'GAME'; s.match.status = 'IN_PROGRESS'; s.match.endsAt = Date.now() + 30 * 60000;
+  s.items.set('BUG-51', { id: 'BUG-51', type: 'BUG', title: 'Normal bug', maxPoints: 100, local: { startedAt: Date.now() } });
+  s.materialCache['BUG-51'] = { files: {}, submitTemplate: { backlogId: 'BUG-51' } };
+  s.items.set('CR-HEAVY', { id: 'CR-HEAVY', type: 'CR', title: '[Heavy Task] broad migration', maxPoints: 300, local: {} });
+  const started = [];
+  s.start_work = async ({ backlogItemKey }) => {
+    started.push(backlogItemKey); const it = s.items.get(backlogItemKey); it.local.startedAt = Date.now();
+    s.materialCache[backlogItemKey] = { files: {}, submitTemplate: { backlogId: backlogItemKey } }; return { ok: true };
+  };
+  const first = await s.dispatch_ready();
+  assert.deepEqual(first.spawn.map(x => x.id), ['BUG-51']);
+  assert.equal(first.waiting.find(x => x.id === 'CR-HEAVY')?.reason, 'HEAVY_DEFERRED');
+  assert.deepEqual(started, [], 'deferred heavy item does not call start_work');
+  s.items.get('BUG-51').local.receiptId = 'done';
+  assert.equal(s.hasDispatchAction(), true);
+  const second = await s.dispatch_ready();
+  assert.deepEqual(second.spawn.map(x => x.id), ['CR-HEAVY']);
+  assert.deepEqual(started, ['CR-HEAVY']);
+  assert.equal(second.spawn[0].reasoningEffort, 'medium');
+  assert.match(fs.readFileSync(second.spawn[0].taskFile, 'utf8'), /HEAVY item: deliver the highest-value part first/);
+});

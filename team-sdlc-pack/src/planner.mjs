@@ -11,6 +11,32 @@ export const PLANNER_DEFAULTS = {
   typeOrder: { PI: 0, BUG: 1, TASK: 2, CR: 3 },
 };
 
+export const HEAVY_DEFAULTS = { mode: 'last', startAfter: 'othersDone', minMinutesLeft: 15, minPoints: 200, minDescriptionChars: 6000, minCriteria: 12 };
+
+export function heavyOptions(o = {}) {
+  return { ...HEAVY_DEFAULTS, ...(o || {}) };
+}
+
+/** Conservative classifier: an explicit label is certain; otherwise require two strong signals. */
+export function detectHeavy(it, items = [], opts = {}) {
+  const o = heavyOptions(opts);
+  if (o.mode === 'normal' || it.type === 'PI') return { heavy: false, reason: null };
+  const title = String(it.title || '');
+  const description = String(it.description || '');
+  const first = description.split(/\r?\n/, 1)[0] || '';
+  if (/\[\s*heavy[\s-]*task\s*\]|^\s*heavy[\s-]*task\s*[:-]|\(heavy\)/i.test(`${title}\n${first}`)) return { heavy: true, reason: 'title prefix' };
+  if (it.type === 'TASK' && it.local?.answerOnly) return { heavy: false, reason: null };
+  const points = Number(it.maxPoints) || 0;
+  const peers = items.filter(x => x !== it && x.type !== 'PI' && Number(x.maxPoints) > 0).map(x => Number(x.maxPoints)).sort((a, b) => a - b);
+  const median = peers.length ? peers.length % 2 ? peers[(peers.length - 1) / 2] : (peers[peers.length / 2 - 1] + peers[peers.length / 2]) / 2 : 0;
+  const criteria = (description.match(/(?:^|\n)\s*(?:[-*]\s*)?(?:TC-|AC-|\d+[.)]\s+)/gi) || []).length;
+  const signals = [];
+  if (points >= o.minPoints || median > 0 && points >= 1.5 * median) signals.push(`high points ${points}`);
+  if (description.length > o.minDescriptionChars || criteria >= o.minCriteria) signals.push(description.length > o.minDescriptionChars ? `long description ${description.length}` : `many criteria ${criteria}`);
+  if (/\b(?:token[- ]heavy|heavy|large\s+(?:refactor|migration)|multiple\s+(?:screens|modules|pages)|end[- ]to[- ]end|full\s+(?:rewrite|module))\b/i.test(description)) signals.push('heavy wording');
+  return signals.length >= 2 ? { heavy: true, reason: signals.join('; ') } : { heavy: false, reason: null };
+}
+
 export function plannerOptions(o = {}) {
   return {
     ...PLANNER_DEFAULTS,
@@ -61,13 +87,16 @@ export function rank(items, now, endsAt, opts = {}) {
     if (l.parked?.remainingMinutes && left != null && l.parked.remainingMinutes > left) {
       skipped.push({ id: it.id, action: 'resume', why: 'parked remaining step cannot fit' }); continue;
     }
-    const action = l.ready ? 'submit' : l.parked || l.orphaned || l.startedAt && !l.worktree && !l.queued ? 'resume' : 'dispatch';
-    const tier = l.ready && it.deadlineAt != null ? -3 : action === 'resume' ? -2 : l.ready ? -1 : it.type === 'PI' ? 0 : it.deadlineAt != null ? 1 : 2;
+    // Preserve the established resume ordering for ordinary started items. For a heavy item,
+    // merely fetching material is not preserved worker work: keep it in the deferred dispatch tier.
+    const materialOnlyHeavy = l.heavy && l.startedAt && !l.worktree && !l.queued;
+    const action = l.ready ? 'submit' : l.parked || l.orphaned || !materialOnlyHeavy && l.startedAt && !l.worktree && !l.queued ? 'resume' : 'dispatch';
+    const tier = l.ready && it.deadlineAt != null ? -3 : action === 'resume' ? -2 : l.ready ? -1 : it.type === 'PI' ? 0 : it.deadlineAt != null ? 1 : l.heavy && o.heavyTask?.mode !== 'normal' ? 3 : 2;
     const why = action === 'submit' ? 'submit READY immediately' : l.orphaned ? 'worker lost in the restart: respawn on the same worktree' : action === 'resume' ? 'resume preserved work; remaining step only' : tier === 0 ? 'PI race: dispatch a new worker now'
       : tier === 1 ? 'nearest deadline; reserve 5 minutes to integrate and submit'
-      : String(it.maxPoints ?? '?') + ' pts / ~' + est(it) + 'm';
+      : tier === 3 ? 'heavy: deferred until other items are done' : String(it.maxPoints ?? '?') + ' pts / ~' + est(it) + 'm';
     ranked.push({ id: it.id, type: it.type, tier, action, why, left: left == null ? null : Math.round(left * 10) / 10,
-      deadline: it.deadlineAt ?? Infinity, value: (Number(it.maxPoints) || 0) / est(it), started: !!l.startedAt, maxPoints: it.maxPoints ?? null });
+      heavy: !!l.heavy, deadline: it.deadlineAt ?? Infinity, value: (Number(it.maxPoints) || 0) / est(it), started: !!l.startedAt, maxPoints: it.maxPoints ?? null });
   }
   ranked.sort((a, b) => a.tier - b.tier
     || ([1, -3].includes(a.tier) ? a.deadline - b.deadline : 0)

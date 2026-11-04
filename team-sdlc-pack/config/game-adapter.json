@@ -62,6 +62,14 @@
     "wrapUpMinutes": 5,
     "budgetFactor": 1.5
   },
+  "heavyTask": {
+    "mode": "last",
+    "startAfter": "othersDone",
+    "minMinutesLeft": 15,
+    "minPoints": 200,
+    "minDescriptionChars": 6000,
+    "minCriteria": 12
+  },
   "parallel": {
     "maxCodeWorkers": 5,
     "maxBuilds": 2,

@@ -19,7 +19,7 @@ import { login, parseMatchPage, looksLikeLogin, textBlockFor, loadMatchData, usa
 import { startWork, submit, operationUrl } from './game-api.mjs';
 import * as G from './git.mjs';
 import { materializeAnswer, answerPaths, countScenarios, checkAnswer } from './answers.mjs';
-import { rank, alerts as plannerAlerts, diffItems, isSubmitted, isClosed, effectiveLeft } from './planner.mjs';
+import { rank, alerts as plannerAlerts, diffItems, isSubmitted, isClosed, effectiveLeft, detectHeavy, heavyOptions } from './planner.mjs';
 import { recon } from './recon.mjs';
 import { ensureRepoMap } from './repo-map.mjs';
 import { guardBaseline } from './baseline-guard.mjs';
@@ -59,6 +59,7 @@ export const DEFAULT_ADAPTER = {
   polling: { successMs: 5000, errorMs: 10000, backgroundMs: 20000, maxWaitMs: 55000 },
   submit: { acceptedStatuses: ['ACCEPTED', 'RECEIVED'], retryBudgetMs: SUBMIT_LIMITS.retryMs },
   planner: {},
+  heavyTask: { mode: 'last', startAfter: 'othersDone', minMinutesLeft: 15, minPoints: 200, minDescriptionChars: 6000, minCriteria: 12 },
   parallel: { maxCodeWorkers: 5, maxBuilds: 2, materialConcurrency: 6, portBase: 3100, workerModels: DEFAULT_WORKER_MODELS },
 };
 
@@ -104,6 +105,51 @@ export class RuntimeSession {
   // ---------- infrastructure ----------
   now() {
     return Date.now() + (this.match.serverOffsetMs || 0);
+  }
+
+  plannerOpts() { return { ...this.adapter.planner, heavyTask: heavyOptions(this.adapter.heavyTask) }; }
+
+  refreshHeavyFlags() {
+    const items = [...this.items.values()];
+    for (const it of items) {
+      it.local ||= {};
+      const signature = `${it.specHash || ''}:${String(it.description || '').length}:${it.local.answerOnly ?? ''}:${this.adapter.heavyTask?.mode || 'last'}`;
+      if (it.local.heavySignature === signature) continue;
+      const before = !!it.local.heavy;
+      const result = detectHeavy(it, items, this.adapter.heavyTask);
+      it.local.heavy = result.heavy;
+      it.local.heavyReason = result.reason;
+      it.local.heavySignature = signature;
+      if (result.heavy && !before) this.pendingEvents.push({ kind: 'HEAVY_DETECTED', id: it.id, text: `HEAVY_DETECTED ${it.id}: ${result.reason}` });
+    }
+  }
+
+  heavyDispatchDecision(it, items = [...this.items.values()]) {
+    const cfg = heavyOptions(this.adapter.heavyTask);
+    if (!it?.local?.heavy || cfg.mode === 'normal') return { allowed: true };
+    if (cfg.mode === 'skip') return { allowed: false, reason: 'HEAVY_DEFERRED', detail: 'mode skip' };
+    if (it.local.heavyGaveUp) return { allowed: false, reason: 'HEAVY_GAVE_UP', detail: 'two red gates' };
+    const { left } = effectiveLeft(it, this.now(), this.match.endsAt);
+    if (left != null && left < cfg.minMinutesLeft) return { allowed: false, reason: 'HEAVY_DEFERRED', detail: `${left.toFixed(1)}m left < ${cfg.minMinutesLeft}m` };
+    const otherHeavy = items.some(x => x !== it && x.local?.heavy && x.local?.worktree && !x.local?.ready && !isSubmitted(x));
+    if (otherHeavy) return { allowed: false, reason: 'HEAVY_DEFERRED', detail: 'another heavy worker is active' };
+    const unavailable = (x) => ['LOCKED', 'HIDDEN', 'UPCOMING'].includes(x.availability) || x.local?.notOpenRefused;
+    const openPi = items.some(x => x.type === 'PI' && !unavailable(x) && !isSubmitted(x) && !isClosed(x, this.now()) && !x.local?.worktree && !x.local?.spawnEntry);
+    if (openPi) return { allowed: false, reason: 'HEAVY_DEFERRED', detail: 'PI is waiting for a worker' };
+    const now = this.now();
+    const plan = rank(items, now, this.match.endsAt, this.plannerOpts());
+    const rankedIds = new Set(plan.ranked.filter(r => r.id !== it.id && !items.find(x => x.id === r.id)?.local?.heavy && r.action !== 'submit').map(r => r.id));
+    const staleParked = (x) => x.local?.parked && (!x.local.parked.remainingStep || now - (x.local.dispatchedAt || 0) >= IDLE_WORKER_MS);
+    const blocks = items.filter(x => {
+      if (x === it || x.local?.heavy || unavailable(x) || isSubmitted(x) || isClosed(x, now) || x.local?.ready || staleParked(x)) return false;
+      if (cfg.startAfter === 'othersDispatched') return !x.local?.worktree && !x.local?.spawnEntry && rankedIds.has(x.id);
+      const activeWorker = x.local?.worktree && !x.local?.parked;
+      return activeWorker || rankedIds.has(x.id);
+    });
+    if (blocks.length) return { allowed: false, reason: 'HEAVY_DEFERRED', detail: `${cfg.startAfter}: ${blocks.map(x => x.id).join(', ')} not done` };
+    const deadlinePending = items.some(x => x !== it && !unavailable(x) && x.deadlineAt != null && !isSubmitted(x) && !isClosed(x, now) && !x.local?.ready && !x.local?.worktree && !staleParked(x));
+    if (deadlinePending) return { allowed: false, reason: 'HEAVY_DEFERRED', detail: 'deadline item is pending' };
+    return { allowed: true };
   }
 
   secrets() {
@@ -905,12 +951,17 @@ export class RuntimeSession {
   view({ includeEvents = false, pageText = false } = {}) {
     const now = this.now();
     const items = [...this.items.values()];
-    const plan = rank(items, now, this.match.endsAt, this.adapter.planner);
+    this.refreshHeavyFlags();
+    const plan = rank(items, now, this.match.endsAt, this.plannerOpts());
     const freeBytes = this.freeMemory();
-    const eligible = r => r.action === 'submit' || dispatchPolicy(this.items.get(r.id), items.filter(i => !isSubmitted(i)), this.adapter.parallel, freeBytes).allowed;
+    const eligible = r => r.action === 'submit' || this.heavyDispatchDecision(this.items.get(r.id), items).allowed && dispatchPolicy(this.items.get(r.id), items.filter(i => !isSubmitted(i)), this.adapter.parallel, freeBytes).allowed;
     const ranked = plan.ranked.filter(eligible);
     const queued = plan.ranked.filter(r => !eligible(r));
     const skipped = plan.skipped;
+    const deferredHeavy = plan.ranked.filter(r => r.action !== 'submit' && r.heavy).map(r => {
+      const d = this.heavyDispatchDecision(this.items.get(r.id), items);
+      return d.allowed ? null : { id: r.id, reason: d.reason, detail: d.detail };
+    }).filter(Boolean);
     const current = this.state.current;
     const undispatched = ranked.filter(r => r.action !== 'submit').map((r) => {
       const it = this.items.get(r.id);
@@ -922,6 +973,7 @@ export class RuntimeSession {
       ...(this.phase === 'GAME' && !['PAUSED', 'FINISHED'].includes(this.match.status) && this.idleCandidates(now).length
         ? [`!! CHECK WORKERS: ${this.idleCandidates(now).map(i => i.id).join(', ')} unchanged ${Math.round(IDLE_WORKER_MS / 60000)}+ min after dispatch. Call dispatch_ready and follow its respawnCheck (list_agents first; never start a second worker on a live one).`] : []),
       ...plannerAlerts(items, now, this.match.endsAt, { current, paused: this.phase === 'PAUSED', status: this.match.status }, this.adapter.planner),
+      ...deferredHeavy.map(h => `note: HEAVY ${h.id} deferred (${h.detail}); helper starts it when eligible.`),
       ...[...(this.localAlerts?.values() || [])].map((t) => `!! ${t}`),
       ...this.logProblems.splice(0).map((t) => `!! progress log: ${t}`),
     ];
@@ -939,7 +991,10 @@ export class RuntimeSession {
       match: { id: this.matchId, status: this.match.status, remainingMin: this.match.endsAt ? minutes(this.match.endsAt - now) : null, uuidKnown: !!this.match.uuid, lastRefreshSecAgo: this.match.lastRefreshAt ? Math.round((now - this.match.lastRefreshAt) / 1000) : null },
       items: table,
       next: ranked[0] ? `${ranked[0].id} (${ranked[0].why})` : (this.match.status === 'FINISHED' ? 'MATCH FINISHED: final_result end=true' : 'nothing actionable: call wait_for_update'),
-      queue: [...ranked.slice(1), ...queued].map((r) => `${r.id}: ${r.action} — ${r.why}${queued.includes(r) ? ' (waiting for code slot/RAM)' : ''}`),
+      queue: [...ranked.slice(1), ...queued].map((r) => {
+        const h = queued.includes(r) ? this.heavyDispatchDecision(this.items.get(r.id), items) : { allowed: true };
+        return `${r.id}: ${r.action} — ${r.why}${queued.includes(r) ? h.allowed ? ' (waiting for code slot/RAM)' : ` (${h.reason}: ${h.detail})` : ''}`;
+      }),
       parked: items.filter(i => i.local?.parked && !isSubmitted(i)).map(i => ({ id: i.id, action: 'resume', ...i.local.parked })),
       builds: { active: [...this.buildQueue.active], queue: [...this.buildQueue.waiting] },
       dispatch: { maxCodeWorkers: this.adapter.parallel.maxCodeWorkers, maxBuilds: this.adapter.parallel.maxBuilds, freeRamGB: freeBytes / 1024 ** 3,
@@ -948,6 +1003,7 @@ export class RuntimeSession {
       current,
       alerts: al,
       blockers: [...this.blockers.keys()],
+      heavy: { mode: heavyOptions(this.adapter.heavyTask).mode, deferred: deferredHeavy },
     };
     if (includeEvents && this.pendingEvents.length) out.events = this.pendingEvents.splice(0, 30);
     if (this.lastPollError) out.pollError = this.lastPollError;
@@ -1824,6 +1880,7 @@ export class RuntimeSession {
   workerEffort(it, c = {}) {
     const cfg = { answerOnly: 'low', code: 'medium', retry: 'high', ...(this.adapter.parallel?.workerEffort || {}) };
     const { left } = effectiveLeft(it, this.now(), this.match.endsAt);
+    if (it.local?.heavy) return 'medium';
     const retry = (it.local?.dispatches || 0) > 1;
     if (retry) return left != null && left < 10 ? cfg.code : cfg.retry;
     if (c.answerOnly) return left != null && left < 4 ? cfg.code : cfg.answerOnly;
@@ -1836,7 +1893,7 @@ export class RuntimeSession {
     const allowed = [...new Set(rawAllowed.filter((m) => typeof m === 'string' && m.trim()).map((m) => m.trim()))];
     if (!allowed.length) return undefined;
     const cfg = { ...DEFAULT_WORKER_MODELS, ...(this.adapter.parallel?.workerModels || {}) };
-    const lane = (it.local?.dispatches || 0) > 1 ? 'retry' : it.type === 'PI' ? 'pi' : it.type === 'CR' ? 'cr' : c.answerOnly ? 'answerOnly' : 'code';
+    const lane = it.local?.heavy && cfg.heavy ? 'heavy' : (it.local?.dispatches || 0) > 1 ? 'retry' : it.type === 'PI' ? 'pi' : it.type === 'CR' ? 'cr' : c.answerOnly ? 'answerOnly' : 'code';
     const preferred = Array.isArray(cfg[lane]) ? cfg[lane] : [cfg[lane]];
     for (const wanted of preferred.filter((m) => typeof m === 'string' && m)) {
       const match = allowed.find((m) => m === wanted || m.startsWith(`${wanted}-`));
@@ -1885,9 +1942,16 @@ export class RuntimeSession {
     const dispatchStartedAt = Date.now();
     if (this.phase !== 'GAME') return { ok: false, error: 'NOT_IN_GAME', next: this.nextHint() };
     if (['PAUSED', 'FINISHED'].includes(this.match.status)) return this.clean({ ok: false, error: `MATCH_${this.match.status}`, next: this.nextHint() });
-    const plan = rank([...this.items.values()], this.now(), this.match.endsAt, this.adapter.planner).ranked.filter(r => r.action !== 'submit');
+    this.refreshHeavyFlags();
+    const items = [...this.items.values()];
+    const plan = rank(items, this.now(), this.match.endsAt, this.plannerOpts()).ranked.filter(r => r.action !== 'submit');
     // Always every open item: the set2 rehearsal called it with max:1 and wave items waited 1-2.5 min each.
-    const picked = plan;
+    const waiting = [];
+    const picked = plan.filter(r => {
+      const d = this.heavyDispatchDecision(this.items.get(r.id), items);
+      if (!d.allowed) waiting.push({ id: r.id, reason: d.reason, detail: d.detail });
+      return d.allowed;
+    });
     const needStart = picked.filter(r => !this.items.get(r.id)?.local?.startedAt || !this.readMaterial(r.id)).map(r => r.id);
     const startErrors = {};
     if (needStart.length) {
@@ -1895,10 +1959,12 @@ export class RuntimeSession {
       res.forEach((r, i) => { if (!r?.ok) startErrors[needStart[i]] = r?.error || 'START_FAILED'; });
     }
     const spawn = [];
-    const waiting = [];
+    this.refreshHeavyFlags(); // start_work may have supplied the description needed for detection
     for (const r of picked) {
       if (startErrors[r.id]) { waiting.push({ id: r.id, reason: startErrors[r.id] }); continue; }
       const it = this.items.get(r.id);
+      const heavyDecision = this.heavyDispatchDecision(it, [...this.items.values()]);
+      if (!heavyDecision.allowed) { waiting.push({ id: r.id, reason: heavyDecision.reason, detail: heavyDecision.detail }); continue; }
       const orphaned = !!it.local?.orphaned;
       const c = await this.worktree({ action: 'create', backlogItemKey: r.id });
       if (!c.ok) { waiting.push({ id: r.id, reason: c.error, queued: !!c.queued }); continue; }
@@ -1906,8 +1972,9 @@ export class RuntimeSession {
       it.local.dispatches = (it.local.dispatches || 0) + 1;
       it.local.dispatchedAt = this.now();
       const stop = c.workerStopAt ? new Date(c.workerStopAt).toISOString() : 'match end minus 5 minutes';
-      const resumeText = c.resume ? `RESUME: preserved commit ${c.resume.commit}; do only the remaining step: ${c.resume.remainingStep}. `
-        : orphaned ? 'RESUME: the previous worker on this item stopped when the session restarted. Its commits and uncommitted files are in this worktree: check git status and git log first, keep that work and continue it; do not restart. ' : '';
+      const heavyText = it.local.heavy ? 'HEAVY item: deliver the highest-value part first, commit working increments, and at workerStopAt return what passes with honest PARTIAL rows and real evidence; never start a broad refactor. ' : '';
+      const resumeText = heavyText + (c.resume ? `RESUME: preserved commit ${c.resume.commit}; do only the remaining step: ${c.resume.remainingStep}. `
+        : orphaned ? 'RESUME: the previous worker on this item stopped when the session restarted. Its commits and uncommitted files are in this worktree: check git status and git log first, keep that work and continue it; do not restart. ' : '');
       const entry = {
         id: r.id, type: it.type, answerOnly: !!c.answerOnly,
         taskName: `${r.id.toLowerCase().replace(/[^a-z0-9]/g, '')}${it.local.dispatches > 1 ? `r${it.local.dispatches}` : ''}`,
@@ -2051,12 +2118,16 @@ export class RuntimeSession {
     steps.push({ step: 'gate', verdict: g.verdict, seconds: g.seconds ?? null });
     const leftNow = effectiveLeft(it, this.now(), this.match.endsAt).left;
     if (g.verdict === 'CODE_FAILURE') {
+      if (it.local.heavy) {
+        it.local.heavyGateFailures = (it.local.heavyGateFailures || 0) + 1;
+        if (it.local.heavyGateFailures >= 2) it.local.heavyGaveUp = true;
+      }
       // Roll back now (still inside the ship chain, before anything else is integrated): left in main,
       // the failing commits would be pushed by the next ship and could then never be rolled back.
       const rb = await this.worktree({ action: 'rollback', backlogItemKey: id }).catch((e) => ({ ok: false, error: e.message }));
       steps.push({ step: 'rollback', ok: !!rb.ok, error: rb.error || null });
       return this.clean({ ok: false, stage: 'gate', verdict: g.verdict, tests: g.tests, types: g.types, steps, rolledBack: !!rb.ok,
-        next: rb.ok ? `Main restored (revert commits). Send the worker .mtm-notes/gate-${id}-*.log and retryBaseSha ${rb.retryBaseSha} for a fix-up (rebase onto current main, verify, commit, READY), then ship ${id} again. Ship other READY items now.`
+        next: it.local.heavyGaveUp ? `Main restored. HEAVY_GAVE_UP after two red gates: preserve the worktree and do not dispatch it again; ship other READY items.` : rb.ok ? `Main restored (revert commits). Send the worker .mtm-notes/gate-${id}-*.log and retryBaseSha ${rb.retryBaseSha} for a fix-up (rebase onto current main, verify, commit, READY), then ship ${id} again. Ship other READY items now.`
           : `${g.next} Automatic rollback failed (${rb.error}): do not ship another item until main is restored.` });
     }
     if (g.verdict === 'ENVIRONMENT' && !force && !(leftNow != null && leftNow <= 3)) {
@@ -2147,8 +2218,10 @@ export class RuntimeSession {
   hasDispatchAction() {
     if (this.phase !== 'GAME' || ['PAUSED', 'FINISHED'].includes(this.match.status)) return false;
     if (this.idleCandidates().length) return true; // dispatch_ready checks them (and clears the active ones)
-    return rank([...this.items.values()], this.now(), this.match.endsAt, this.adapter.planner).ranked.some(r =>
-      r.action === 'submit' || dispatchPolicy(this.items.get(r.id), [...this.items.values()].filter(i => !isSubmitted(i)), this.adapter.parallel, this.freeMemory()).allowed);
+    this.refreshHeavyFlags();
+    const items = [...this.items.values()];
+    return rank(items, this.now(), this.match.endsAt, this.plannerOpts()).ranked.some(r =>
+      r.action === 'submit' || this.heavyDispatchDecision(this.items.get(r.id), items).allowed && dispatchPolicy(this.items.get(r.id), items.filter(i => !isSubmitted(i)), this.adapter.parallel, this.freeMemory()).allowed);
   }
 
   build_slot({ action, backlogItemKey } = {}) {
@@ -2257,7 +2330,7 @@ export class RuntimeSession {
       };
     }
     if (action === 'integrate') {
-      const urgent = rank([...this.items.values()], this.now(), this.match.endsAt, this.adapter.planner).ranked.find(r => r.tier === -3);
+      const urgent = rank([...this.items.values()], this.now(), this.match.endsAt, this.plannerOpts()).ranked.find(r => r.tier === -3);
       if (urgent && urgent.id !== id) return { ok: false, error: 'DEADLINE_READY_FIRST', next: `Integrate and submit ${urgent.id} first.` };
       const wt = it.local.worktree;
       if (!wt) return { ok: false, error: 'NO_WORKTREE' };

@@ -3,6 +3,19 @@ import assert from 'node:assert/strict';
 import { answerOnly, dispatchPolicy, integrationGate, BuildQueue, mapBounded } from '../team-sdlc-pack/src/dispatch.mjs';
 import { buildChecklist } from '../team-sdlc-pack/src/checklist.mjs';
 import { RuntimeSession } from '../team-sdlc-pack/src/runtime-session.mjs';
+import { detectHeavy } from '../team-sdlc-pack/src/planner.mjs';
+
+test('heavy classifier is certain on labels and conservative without them', () => {
+  const peers = [{ type: 'CR', maxPoints: 100 }, { type: 'BUG', maxPoints: 140 }];
+  assert.deepEqual(detectHeavy({ type: 'CR', title: '[Heavy Task] migrate reports', local: {} }, peers), { heavy: true, reason: 'title prefix' });
+  assert.equal(detectHeavy({ type: 'CR', title: 'Normal export', maxPoints: 140, description: 'Add one export.', local: {} }, peers).heavy, false);
+  const inferred = detectHeavy({ type: 'CR', title: 'Platform update', maxPoints: 300, description: 'large migration '.repeat(700), local: {} }, peers);
+  assert.equal(inferred.heavy, true); assert.match(inferred.reason, /high points.*long description/);
+  assert.equal(detectHeavy({ type: 'PI', title: '[Heavy Task] incident', maxPoints: 500, local: {} }, peers).heavy, false);
+  assert.equal(detectHeavy({ type: 'TASK', title: '[Heavy Task] analyse logs', local: { answerOnly: true } }, peers).heavy, true,
+    'an explicit organizer label overrides the answer-only fast-path exclusion');
+  assert.equal(detectHeavy({ type: 'CR', title: '[Heavy Task] x', local: {} }, peers, { mode: 'normal' }).heavy, false);
+});
 
 test('classify PI and answer TASKs without putting code or runnable MVS on the fast path', () => {
   assert.equal(answerOnly({ type: 'PI' }), true);
@@ -81,4 +94,59 @@ test('wait_for_update wakes immediately when a queued code item becomes dispatch
   assert.match(result.view.next, /BUG-91/);
   s.match.status = 'PAUSED';
   assert.equal(s.hasDispatchAction(), false, 'pause must not cause an immediate dispatch loop');
+});
+
+test('a deferred heavy item does not wake dispatch while ordinary work is active', () => {
+  const s = new RuntimeSession();
+  s.phase = 'GAME'; s.match.status = 'IN_PROGRESS'; s.match.endsAt = Date.now() + 30 * 60000; s.freeMemory = () => 8 * 1024 ** 3;
+  s.items.set('CR-HEAVY', { id: 'CR-HEAVY', type: 'CR', title: '[Heavy Task] rewrite module', maxPoints: 300, local: {} });
+  s.items.set('BUG-1', { id: 'BUG-1', type: 'BUG', title: 'Normal bug', maxPoints: 100, local: { startedAt: Date.now(), worktree: {} } });
+  assert.equal(s.hasDispatchAction(), false);
+  const view = s.view();
+  assert.equal(view.heavy.deferred[0].id, 'CR-HEAVY');
+  assert.ok(!view.alerts.some(a => /DISPATCH NOW.*CR-HEAVY/.test(a)), JSON.stringify(view.alerts));
+});
+
+test('heavy time, skip/normal modes and PI priority are enforced in code', () => {
+  const make = (minutes, heavyTask) => {
+    const s = new RuntimeSession({ adapter: { heavyTask } });
+    s.phase = 'GAME'; s.match.status = 'IN_PROGRESS'; s.match.endsAt = Date.now() + minutes * 60000; s.freeMemory = () => 8 * 1024 ** 3;
+    s.items.set('CR-H', { id: 'CR-H', type: 'CR', title: '[Heavy Task] migration', maxPoints: 300, local: {} });
+    return s;
+  };
+  assert.equal(make(14).hasDispatchAction(), false, 'less than 15 minutes never starts heavy');
+  assert.equal(make(30, { mode: 'skip' }).hasDispatchAction(), false);
+  assert.equal(make(30, { mode: 'normal' }).hasDispatchAction(), true);
+  const pi = make(30);
+  pi.items.set('PI-1', { id: 'PI-1', type: 'PI', title: 'Incident', local: {} });
+  pi.refreshHeavyFlags();
+  assert.equal(pi.heavyDispatchDecision(pi.items.get('CR-H')).allowed, false);
+  assert.equal(pi.hasDispatchAction(), true, 'the open PI still wakes dispatch immediately');
+});
+
+test('future-wave and unfittable ordinary items do not starve an eligible heavy item', () => {
+  const s = new RuntimeSession();
+  const now = Date.now();
+  s.phase = 'GAME'; s.match.status = 'IN_PROGRESS'; s.match.endsAt = now + 30 * 60000; s.now = () => now;
+  s.items.set('CR-H', { id: 'CR-H', type: 'CR', title: '[Heavy Task] migration', maxPoints: 300, local: {} });
+  s.items.set('CR-FUTURE', { id: 'CR-FUTURE', type: 'CR', availability: 'UPCOMING', local: {} });
+  s.items.set('BUG-LATE', { id: 'BUG-LATE', type: 'BUG', local: { parked: { remainingStep: 'finish', remainingMinutes: 45 }, dispatchedAt: now } });
+  s.refreshHeavyFlags();
+  assert.deepEqual(s.heavyDispatchDecision(s.items.get('CR-H')), { allowed: true });
+  s.items.set('PI-FUTURE', { id: 'PI-FUTURE', type: 'PI', availability: 'UPCOMING', local: {} });
+  assert.deepEqual(s.heavyDispatchDecision(s.items.get('CR-H')), { allowed: true }, 'an unrevealed PI is not open');
+});
+
+test('a heavy item gives up after two red gates and cannot dispatch a third time', async () => {
+  const s = new RuntimeSession();
+  const it = { id: 'CR-H', type: 'CR', maxPoints: 300, local: { heavy: true, worktree: { integratedSha: 'abc' } } };
+  s.items.set(it.id, it); s.match.endsAt = Date.now() + 30 * 60000;
+  s.worktree = async ({ action }) => action === 'rollback' ? { ok: true, retryBaseSha: 'base' } : { ok: true };
+  s.gate = async () => ({ ok: false, verdict: 'CODE_FAILURE', tests: {}, types: {} });
+  const first = await s.shipOne({ backlogItemKey: it.id });
+  assert.doesNotMatch(first.next, /HEAVY_GAVE_UP/);
+  const second = await s.shipOne({ backlogItemKey: it.id });
+  assert.match(second.next, /HEAVY_GAVE_UP after two red gates/);
+  assert.equal(it.local.heavyGaveUp, true);
+  assert.equal(s.heavyDispatchDecision(it).reason, 'HEAVY_GAVE_UP');
 });

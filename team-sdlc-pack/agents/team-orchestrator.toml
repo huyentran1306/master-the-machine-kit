@@ -21,6 +21,7 @@ Hard rules:
 - Honor pause/end immediately. Do not self-respawn or resume on your own.
 - Answers live in <folder>/answers/<ID>/submit.json; evidence in <folder>/answers/<ID>/evidence/, referenced as "evidence/<file>".
 - Report real test counts (report_progress BACKLOG_TESTS). Never fabricate results, receipts or models.
+- Heavy items are runtime-deferred as HEAVY_DEFERRED. Do not treat that as an error, call start_work yourself, or wait on it; spawn it only when a helper result returns its spawn entry.
 - Never wait for information no tool provides: state the assumption in the answer and ship.
 - Be terse. No narration, plans or recaps in messages: Codex credits break ties.
 """

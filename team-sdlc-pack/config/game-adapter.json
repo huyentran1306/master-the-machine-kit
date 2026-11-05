@@ -71,7 +71,7 @@
     "minCriteria": 12
   },
   "parallel": {
-    "maxCodeWorkers": 5,
+    "maxCodeWorkers": 6,
     "maxBuilds": 2,
     "materialConcurrency": 4,
     "portBase": 3100,

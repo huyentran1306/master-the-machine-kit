@@ -64,8 +64,8 @@
   },
   "heavyTask": {
     "mode": "last",
-    "startAfter": "othersDone",
-    "minMinutesLeft": 15,
+    "startAfter": "othersDispatched",
+    "minMinutesLeft": 10,
     "minPoints": 200,
     "minDescriptionChars": 6000,
     "minCriteria": 12

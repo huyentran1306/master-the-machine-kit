@@ -507,7 +507,7 @@ test('dispatch_ready dispatches every open item in one call and respawns workers
     assert.match(task(sp), /briefFile .*\.json/); assert.match(task(sp), /ports dev=\d+/);
     assert.doesNotMatch(task(sp), /RESUME/);
     assert.equal(sp.reasoningEffort, ['PI-33', 'TASK-34'].includes(sp.id) && s.items.get(sp.id).local.answerOnly !== false ? sp.reasoningEffort : 'medium');
-    assert.equal(sp.model, ['PI-33', 'CR-32'].includes(sp.id) ? 'gpt-6.1-sol' : 'gpt-6.1-terra');
+    assert.equal(sp.model, 'gpt-6.1-sol'); // final run: every lane uses sol
   }
   assert.ok(first.spawn.every(sp => ['low', 'medium'].includes(sp.reasoningEffort)));
   assert.equal(first.spawn.find(sp => sp.id === 'BUG-31').reasoningEffort, 'medium');

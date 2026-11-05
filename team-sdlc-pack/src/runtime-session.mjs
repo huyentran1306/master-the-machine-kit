@@ -44,12 +44,12 @@ const PLAYBOOK = { PI: 'backlog-pi', BUG: 'backlog-bug', CR: 'backlog-cr', TASK:
 const IDLE_WORKER_MS = 7 * 60000;
 const MAX_RESPAWNS = 2;
 const DEFAULT_WORKER_MODELS = {
-  pi: ['gpt-6.1-sol', 'gpt-6.1-terra'],
-  cr: ['gpt-6.1-sol', 'gpt-6.1-terra'],
-  answerOnly: ['gpt-6.1-sol', 'gpt-6.1-terra'],
-  answerOnlySource: ['gpt-6.1-sol', 'gpt-6.1-terra'],
-  code: ['gpt-6.1-terra', 'gpt-6.1-sol'],
-  retry: ['gpt-6.1-sol', 'gpt-6.1-terra'],
+  pi: ['gpt-6.1-sol'],
+  cr: ['gpt-6.1-sol'],
+  answerOnly: ['gpt-6.1-sol'],
+  answerOnlySource: ['gpt-6.1-sol'],
+  code: ['gpt-6.1-sol'],
+  retry: ['gpt-6.1-sol'],
 };
 
 export const retryablePushRace = (r) => /cannot lock ref|remote rejected|failed to update ref|fetch first|non-fast-forward|stale info/i.test(`${r?.stderr || ''}\n${r?.stdout || ''}`);

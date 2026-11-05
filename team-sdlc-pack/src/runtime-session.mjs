@@ -2326,6 +2326,29 @@ export class RuntimeSession {
 
   // ---------- worker worktrees ----------
   /** Moves an untracked draft answers/<ID>/ from the main checkout into the worktree. Returns true if moved. */
+  /** Untracked `answers/<OTHER-ID>/` drafts in main go to that item's worktree (or .mtm-notes/drafts). Returns true if any moved. */
+  async relocateDraftAnswers(dirtyLines, shippingId) {
+    const ids = new Set();
+    for (const line of dirtyLines) {
+      const m = String(line).match(/^\?\?\s+(?:.*\/)?answers\/([A-Z]+-\d+)(?:\/|$)/);
+      if (!m) return false; // anything else stays a real MAIN_DIRTY
+      if (m[1] === shippingId) return false;
+      ids.add(m[1]);
+    }
+    let moved = false;
+    for (const other of ids) {
+      const wt = this.items.get(other)?.local?.worktree;
+      if (wt?.matchRoot && fs.existsSync(wt.matchRoot) && await this.moveDraftAnswer(other, wt.matchRoot)) { moved = true; continue; }
+      const from = this.matchRoot && answerPaths(this.matchRoot, other).dir;
+      if (!from || !fs.existsSync(from)) continue;
+      const to = path.join(this.checkoutRoot, '.mtm-notes', 'drafts', `${other}-${Date.now()}`);
+      fs.mkdirSync(path.dirname(to), { recursive: true });
+      fs.renameSync(from, to);
+      moved = true;
+    }
+    return moved;
+  }
+
   async moveDraftAnswer(id, wtMatchRoot) {
     if (!this.matchRoot || !this.checkoutRoot) return false;
     const from = answerPaths(this.matchRoot, id).dir;
@@ -2440,7 +2463,12 @@ export class RuntimeSession {
       if (!baseSha || baseSha === sha) return { ok: false, error: 'NO_WORKER_COMMIT' };
       const merges = await G.git(this.checkoutRoot, ['rev-list', '--merges', `${baseSha}..${sha}`]);
       if (merges.code || merges.stdout.trim()) return { ok: false, error: 'NONLINEAR_WORKER_HISTORY', next: 'Ask the worker to rebase its item commits onto current main.' };
-      const mainDirty = (await G.statusPorcelain(this.checkoutRoot))?.filter((l) => !l.includes('.mtm-wt/')) || [];
+      let mainDirty = (await G.statusPorcelain(this.checkoutRoot))?.filter((l) => !l.includes('.mtm-wt/')) || [];
+      // IR0103KI: start_work of a just-revealed item wrote its untracked answer draft into main before its worktree
+      // existed, and BUG-02's ship (deadline item) failed MAIN_DIRTY. Such drafts belong to that item's worktree.
+      if (mainDirty.length && (await this.relocateDraftAnswers(mainDirty, id))) {
+        mainDirty = (await G.statusPorcelain(this.checkoutRoot))?.filter((l) => !l.includes('.mtm-wt/')) || [];
+      }
       if (mainDirty.length) return { ok: false, error: 'MAIN_DIRTY', message: `Preserve unexpected main changes and delegate their recovery: ${mainDirty.slice(0, 5).join(', ')}`, worktreeCommit: sha };
       const mainBefore = await G.revParse(this.checkoutRoot, 'HEAD');
       const p = await G.cherryPick(this.checkoutRoot, `${baseSha}..${sha}`);

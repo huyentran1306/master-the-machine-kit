@@ -25,10 +25,12 @@ test('a red test owned by a backlog item stays with that item', () => {
   assert.equal(d.owner, 'BUG-03');
 });
 
-test('an unrelated red test that is not correctable is not assigned as BASELINE-FIX', () => {
-  const d = classifyBaselineDefect({ test: STATUS, file: 'tests/accounting.test.ts', descriptions: RULE, items: [] });
-  assert.equal(d.likelyOwner, 'BACKLOG_ITEM');
+test('a red original test that no open item owns is fixed by the first code item (its BUG may come later)', () => {
+  const d = classifyBaselineDefect({ test: STATUS, file: 'tests/accounting.test.ts', descriptions: RULE,
+    items: [{ id: 'BUG-01', text: 'Desktop sidebar obscures the main content' }, { id: 'BUG-02', text: 'Amounts for VND clients are 100 times too large' }] });
+  assert.equal(d.likelyOwner, 'BASELINE-FIX');
   assert.equal(d.owner, null);
+  assert.match(d.reason, /no open backlog item/);
 });
 
 test('defects resolve per test, as soon as a fresh-DB gate no longer fails them', () => {

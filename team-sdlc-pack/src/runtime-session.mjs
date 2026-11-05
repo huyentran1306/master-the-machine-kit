@@ -996,7 +996,7 @@ export class RuntimeSession {
         ? [`!! CHECK WORKERS: ${this.idleCandidates(now).map(i => i.id).join(', ')} unchanged ${Math.round(IDLE_WORKER_MS / 60000)}+ min after dispatch. Call dispatch_ready and follow its respawnCheck (list_agents first; never start a second worker on a live one).`] : []),
       ...plannerAlerts(items, now, this.match.endsAt, { current, paused: this.phase === 'PAUSED', status: this.match.status }, this.adapter.planner),
       ...deferredHeavy.map(h => `note: HEAVY ${h.id} deferred (${h.detail}); helper starts it when eligible.`),
-      ...baselineDefects.filter(d => d.likelyOwner === 'BASELINE-FIX').map(d => `!! BASELINE DEFECT: ${d.test}. The first code worker must restore documented behavior with a new migration; never weaken the original test.`),
+      ...baselineDefects.filter(d => d.likelyOwner === 'BASELINE-FIX').map(d => `!! BASELINE DEFECT: ${d.test}. The first code worker fixes it in its item (code or a new migration); never weaken the original test.`),
       ...[...(this.localAlerts?.values() || [])].map((t) => `!! ${t}`),
       ...this.logProblems.splice(0).map((t) => `!! progress log: ${t}`),
     ];
@@ -1824,6 +1824,12 @@ export class RuntimeSession {
     const db = this.ensureMatchTestDatabase();
     if (db.changed) return { ok: false, error: 'MATCH_TEST_DB_ISOLATED', suffix: db.suffix,
       next: 'The helper changed TEST_DATABASE_URL to a database unique to this match. Run migrate deploy and the full baseline suite again on this fresh DB, replace .mtm-notes/test.log, then call report_ready again.' };
+    // 22CT54HJ: preparation wrote baseline.md but no .mtm-notes/test.log, so the runtime never saw the two red
+    // original tests, assigned no BASELINE-FIX and BUG-02 shipped with them still red (80/100).
+    const baselineLog = path.join(this.checkoutRoot, '.mtm-notes', 'test.log');
+    let baselineText = ''; try { baselineText = fs.readFileSync(baselineLog, 'utf8'); } catch { /* missing */ }
+    if (this.commands?.test && !/Tests?\s+\d+|Test Files|# (?:pass|fail) \d+/.test(baselineText)) return { ok: false, error: 'BASELINE_LOG_MISSING', file: baselineLog,
+      next: `Run the full original test suite on the isolated test DB and save its complete, unedited output to ${baselineLog} (e.g. \`pnpm test 2>&1 | tee ${baselineLog}\`), then call report_ready again. The runtime reads failing original tests from that file.` };
     const head = await G.revParse(this.checkoutRoot, 'HEAD');
     if (!head) return { ok: false, error: 'NO_CHECKOUT', message: `no Git checkout at ${this.checkoutRoot}` };
     G.ensureExcluded(this.checkoutRoot, '/.mtm-notes/');
@@ -2039,7 +2045,7 @@ export class RuntimeSession {
       const heavyText = it.local.heavy ? 'HEAVY item: deliver the highest-value part first, commit working increments, and at workerStopAt return what passes with honest PARTIAL rows and real evidence; never start a broad refactor. ' : '';
       const sharedDefects = !this.state.baselineDefectsResolved ? this.baselineDefects().filter(d => d.likelyOwner === 'BASELINE-FIX') : [];
       const baselineFixText = !c.answerOnly && !this.state.baselineFixAssigned && sharedDefects.length
-        ? `BASELINE-FIX (ship with this first code item): fresh-DB original suite fails ${sharedDefects.map(d => d.test).join('; ')}. Read the original test and DECISIONS.md, restore documented behavior with a NEW migration, keep old migrations and the test untouched, add a focused regression, and record CONTRADICTION: in this item's engineering record. ` : '';
+        ? `BASELINE-FIX (ship with this first code item): fresh-DB original suite fails ${sharedDefects.map(d => d.test).join('; ')}. The grader reruns the WHOLE original suite on this item's submitted revision, so make every listed test pass in this item even if a later BUG may be about it: read the test, DECISIONS.md and the KB, fix the code with the smallest change (a schema rule: a NEW migration; never edit old migrations), keep the original tests untouched, add a focused regression, run the full suite, and record CONTRADICTION: in this item's engineering record. ` : '';
       const resumeText = heavyText + (c.resume ? `RESUME: preserved commit ${c.resume.commit}; do only the remaining step: ${c.resume.remainingStep}. `
         : orphaned ? 'RESUME: the previous worker on this item stopped when the session restarted. Its commits and uncommitted files are in this worktree: check git status and git log first, keep that work and continue it; do not restart. ' : '');
       const answerRead = it.local.answerSource
@@ -2116,7 +2122,8 @@ export class RuntimeSession {
     const appRel = path.relative(this.checkoutRoot, appDir).split(path.sep).join('/');
     const diff = await G.git(this.checkoutRoot, ['diff', '--name-only', `${wt.mainBefore || wt.integrationBase}`, wt.integratedSha]);
     const own = itemTestFiles(diff.stdout.split('\n').filter(Boolean), appRel).filter((f) => fs.existsSync(path.join(appDir, f)));
-    const scope = !full && (it.deadlineAt != null || leftMin < 8) && own.length ? 'item' : 'full';
+    const openBaselineFix = !this.state.baselineDefectsResolved && this.baselineDefects().some(d => d.likelyOwner === 'BASELINE-FIX');
+    const scope = !full && !openBaselineFix && (it.deadlineAt != null || leftMin < 8) && own.length ? 'item' : 'full';
     const { test, types } = gateCommands(appDir, { files: scope === 'item' ? own : [], recon: this.commands || {} });
     const budgetSec = forcedBudget || Math.round(Math.max(20, Math.min(90, leftMin * 60 - 60))); // forcedBudget: tests only (not in the tool schema)
     const notes = path.join(this.checkoutRoot, '.mtm-notes');
@@ -2162,7 +2169,7 @@ export class RuntimeSession {
       baselineDefectOpen: baselineDefectOpen.length ? baselineDefectOpen : undefined,
       testDatabase: Object.keys(gateDb).length ? 'fresh isolated database' : 'no TEST_DATABASE_URL discovered',
       files: scope === 'item' ? own : 'full suite', budgetSec, seconds: Math.round((Date.now() - t0) / 100) / 10, tests: part(tr, test?.label), types: part(ty, types?.label),
-      next: baselineDefectOpen.length ? `BASELINE_DEFECT_OPEN: ${baselineDefectOpen.map(d => d.test).join('; ')}. Restore documented behavior with a new migration before submission; never weaken the original test. ${next}` : next });
+      next: baselineDefectOpen.length ? `BASELINE_DEFECT_OPEN: ${baselineDefectOpen.map(d => d.test).join('; ')}. Fix it in this item's revision (code or a new migration) before submission: the grader reruns the whole suite; never weaken the original test. ${next}` : next });
   }
 
   /**
@@ -2547,7 +2554,10 @@ export function classifyBaselineDefect({ test, file = null, source = '', decisio
   const correctable = !!(base && new RegExp(`${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[^.\n]{0,40}only original test you may correct`, 'i').test(descriptions));
   const schemaRule = !!(file && /restrict|cascade|foreign key|on delete/i.test(source) && /restrict|cascade|foreign key|on delete/i.test(decisions));
   if ((correctable || schemaRule) && best < 2) return { test, file, likelyOwner: 'BASELINE-FIX', reason: correctable ? 'named correctable by the item text' : 'schema rule in test and DECISIONS.md' };
-  return { test, file, likelyOwner: 'BACKLOG_ITEM', owner: best >= 2 ? owner : null };
+  if (best >= 2) return { test, file, likelyOwner: 'BACKLOG_ITEM', owner };
+  // No open item owns it (its BUG may arrive in a later wave): every item is graded on the whole suite, so the first
+  // code item fixes it (RBKTH8OM: BUG-02 fixed the exact-payment rule and the RESTRICT migration and scored 100).
+  return { test, file, likelyOwner: 'BASELINE-FIX', owner: null, reason: 'no open backlog item owns it' };
 }
 
 /** Baseline defects that a fresh-DB full test run no longer reports as failing (only when the run produced a summary). */

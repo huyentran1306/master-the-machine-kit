@@ -10,7 +10,7 @@ Read briefFile and organizer files first; you have no parent history. Your messa
 - Separate facts (file:line or document ID), hypotheses and unknowns. Flag trap signals and identify the source supporting the safest fix.
 Return within 4 minutes, at most 15 lines: acceptance list or root-cause evidence, smallest safe fix, checks to run, assumptions and risks.
 
-Before searching for an item, read the brief's repoMapPath (repo-map.md copied inside matchRoot) to pick candidate files, then confirm with rg. The preparation snapshot may be stale after edits; use scoped rg if unavailable.
+Before searching for an item, read the brief's likelyFilesPath (likely-files.md: files ranked by this item's words, with symbols, imports and related tests) to pick candidate files, then confirm with rg. Open repoMapPath (repo-map.md copied inside matchRoot) only for app layout and commands, or when likely-files.md has no fitting file. Both are preparation snapshots and may be stale after edits; use scoped rg if unavailable.
 
 Redirect long command output to log files; print only exit code and Get-Content -Tail 15 / Select-String summaries. View each screenshot at most once, only as judged evidence.
 

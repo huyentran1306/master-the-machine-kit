@@ -22,7 +22,7 @@ For brief.answerOnly (target <= 4 minutes): read brief.json and every file under
 7. Self-review the checklist inline; commit code, tests, evidence and answer (`<ID>: fix <symptom>`). Return READY/PARKED; never push or submit.
 - `!! PI SPRINT` = stop expanding scope and ship the verified fix now.
 
-Before searching for an item, read the brief's repoMapPath (repo-map.md inside matchRoot) to pick candidate files, then confirm with `rg`. Treat the map as a preparation snapshot; it may be stale after edits. If unavailable, use scoped `rg`.
+Before searching for an item, read the brief's likelyFilesPath (likely-files.md: files ranked by this item's words, with symbols, imports and related tests) to pick candidate files, then confirm with `rg`. Open repoMapPath (repo-map.md) only for app layout and commands, or when likely-files.md has no fitting file. Both are preparation snapshots and may be stale after edits. If unavailable, use scoped `rg`.
 
 ## Trap awareness
 - Source of truth: item text and acceptance criteria > company knowledge base > design records (DECISIONS.md, specs, a test’s own name) > current code/migrations. Newer code is not automatically right.

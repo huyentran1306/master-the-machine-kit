@@ -23,6 +23,9 @@ test('localization reads the preparation snapshot before confirming with rg', ()
     const text = read(file);
     for (const phrase of ['repo-map.md', 'candidate files', 'rg', 'stale after edits']) assert.ok(text.includes(phrase), `${file}: ${phrase}`);
   }
+  for (const file of [...skills.map(s => `skills/${s}/SKILL.md`), ...profiles.map(p => `agents/${p}.toml`)]) {
+    if (/likelyFilesPath|repoMapPath/.test(read(file))) assert.match(read(file), /likely-files\.md.*candidate files[\s\S]*repo-map\.md.*only for app layout/, `${file}: likely-files first`);
+  }
 });
 
 test('BUG evidence requires an actual unfixed run and a bounded folder-scoped introducing-commit search', () => {

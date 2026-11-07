@@ -20,7 +20,7 @@ For brief.answerOnly, read brief.json, every file under files/ including MCP mat
 5. Build/typecheck **and the full suite**, both green. Baseline failures still count; apply Trap awareness below, preserving supported tests. Return real test counts to the orchestrator. Self-review inline against every checklist criterion and evidence reference.
 6. Answer + evidence (evidence-and-answer skill). Commit `<ID>: <what>`; return READY/PARKED. Never push or submit.
 
-Before searching for an item, read the brief's repoMapPath (repo-map.md inside matchRoot) to pick candidate files, then confirm with `rg`. Treat the map as a preparation snapshot; it may be stale after edits. If unavailable, use scoped `rg`.
+Before searching for an item, read the brief's likelyFilesPath (likely-files.md: files ranked by this item's words, with symbols, imports and related tests) to pick candidate files, then confirm with `rg`. Open repoMapPath (repo-map.md) only for app layout and commands, or when likely-files.md has no fitting file. Both are preparation snapshots and may be stale after edits. If unavailable, use scoped `rg`.
 
 ## Trap awareness
 - The grader runs the whole original suite on a fresh database. If `tests/cascade.test.ts` (or any original test) fails on a fresh DB because a seed migration contradicts DECISIONS.md or the test name, fix it with a new migration that restores documented behaviour, record `CONTRADICTION:`, and keep the old migration and original test untouched.

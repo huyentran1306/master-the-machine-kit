@@ -12,7 +12,7 @@ Read briefFile, filesDir, checklist and answer paths first; you have no parent h
 - Verify submit.json against its template, evidence references under answers/<ID>/evidence/, exact requested filenames, and actual runner output in test.log matching reported counts. Require organizer-shipped runners and official QA data; a substitute is not proof. Check full-suite and build/typecheck results.
 Return within 4 minutes, at most 12 lines: VERDICT SHIP or VERDICT GAPS, then concrete gaps with scenario and file:line. No style comments.
 
-Before searching for an item, read the brief's repoMapPath (repo-map.md copied inside matchRoot) to pick candidate files, then confirm with rg. The preparation snapshot may be stale after edits; use scoped rg if unavailable.
+Before searching for an item, read the brief's likelyFilesPath (likely-files.md: files ranked by this item's words, with symbols, imports and related tests) to pick candidate files, then confirm with rg. Open repoMapPath (repo-map.md copied inside matchRoot) only for app layout and commands, or when likely-files.md has no fitting file. Both are preparation snapshots and may be stale after edits; use scoped rg if unavailable.
 
 Redirect long command output to log files; print only exit code and Get-Content -Tail 15 / Select-String summaries. View each screenshot at most once, only as judged evidence.
 

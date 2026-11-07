@@ -119,7 +119,10 @@ export function answerDigest({ item, material, source = '' }) {
   }
   if (kb.length) {
     out.push('## Company knowledge base articles', '');
-    for (const a of kb) out.push(`### ${a.id} ${a.title || ''}`.trim(), '', String(a.body || a.content || '').trim(), '');
+    for (const a of kb) {
+      const body = String(a.body || a.content || '').trim();
+      out.push(`### ${a.id} ${a.title || ''}`.trim(), '', body.length > 12000 ? `${body.slice(0, 12000)}\n…(article truncated; full response is in files/mcp/)` : body, '');
+    }
   }
   for (const o of other) out.push(`## ${o.tool} ${oneLine(o.args || {})}`, '', o.text.length > 6000 ? `${o.text.slice(0, 6000)}\n…(truncated, full file in files/mcp/)` : o.text, '');
   for (const l of logs) {
@@ -131,12 +134,21 @@ export function answerDigest({ item, material, source = '' }) {
       out.push(`Not complete for: ${l.truncated.map((t) => t.reason ? `${t.service} (${t.reason})` : `${t.service} (${t.fetched}/${t.total}${t.levelsOverLimit?.length ? `, over limit: ${t.levelsOverLimit.join('/')}` : ''})`).join('; ')}. Ask NEED_INFO with a narrowing word only if the answer depends on them.`, '');
     }
     out.push('Format: timestamp-UTC | level | service | requestId | message | other fields', '', '```text');
-    for (const e of l.entries || []) {
-      const { timestamp, time, ts, level, service, requestId, message, ...rest } = e || {};
-      const raw = timestamp ?? time ?? ts;
-      const shown = utc(raw) + (raw && !/Z$/.test(String(raw)) ? ` (logged ${raw})` : '');
-      out.push([shown, level ?? '', service ?? '', requestId ?? '', oneLine(message ?? ''), Object.keys(rest).length ? oneLine(rest) : ''].join(' | '));
+    const entries = l.entries || [];
+    const groups = entries.length > 160 ? [entries.slice(0, 80), entries.slice(-80)] : [entries];
+    let rendered = 0;
+    for (const group of groups) {
+      let groupChars = 0; const groupBudget = groups.length === 2 ? 16000 : 32000;
+      for (const e of group) {
+        const { timestamp, time, ts, level, service, requestId, message, ...rest } = e || {};
+        const raw = timestamp ?? time ?? ts;
+        const shown = utc(raw) + (raw && !/Z$/.test(String(raw)) ? ` (logged ${raw})` : '');
+        const line = [shown, level ?? '', service ?? '', requestId ?? '', oneLine(message ?? ''), Object.keys(rest).length ? oneLine(rest) : ''].join(' | ').slice(0, 2000);
+        if (groupChars + line.length > groupBudget) break;
+        out.push(line); groupChars += line.length + 1; rendered += 1;
+      }
     }
+    if (rendered < entries.length) out.push(`…(${entries.length - rendered} log entries omitted from the digest; read the full merged response under files/mcp/ only if needed)`);
     out.push('```', '');
   }
   if (source) out.push('## Issued application source', '', 'Answer from this source; read more files under src/ only if a needed function is missing here.', source, '');

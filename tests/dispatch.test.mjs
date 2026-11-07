@@ -55,7 +55,7 @@ test('dispatch gates code on current RAM and active code count; answer workers o
   running[2].local.ready = true;
   assert.equal(dispatchPolicy(code, running, { maxCodeWorkers: 4 }, 3 * gb).codeWorkers, 3);
   assert.equal(dispatchPolicy({ id: 'PI-91', type: 'PI' }, running, { maxCodeWorkers: 1 }, 0).allowed, true);
-  assert.equal(dispatchPolicy({ id: 'TASK-91', type: 'TASK', title: 'Question: answer values' }, running, { maxCodeWorkers: 1 }, 1.1 * gb).allowed, true, 'answer workers only need the 1 GB machine floor');
+  assert.equal(dispatchPolicy({ id: 'TASK-91', type: 'TASK', title: 'Question: answer values' }, running, { maxCodeWorkers: 1 }, 1.6 * gb).allowed, true, 'answer workers use the safer 1.5 GB machine floor');
 });
 
 test('answer workers are capped, PI bypasses caps, and urgent/resume code uses 1.5 GB floor', () => {
@@ -215,7 +215,7 @@ test('thread budget: ordinary items queue at maxWorkerThreads-2, PI/deadline/res
   assert.equal(dispatchPolicy(bug, live(7), { ...p, maxCodeWorkers: 20 }, 10 * gb).allowed, true, 'deadline item uses a reserved thread');
   const done = live(8).map(i => ({ ...i, local: { ...i.local, ready: true } }));
   assert.equal(dispatchPolicy(task, done, p, 10 * gb).allowed, true, 'READY workers have ended');
-  assert.equal(dispatchPolicy(task, live(3), {}, 10 * gb).maxWorkerThreads, 14);
+  assert.equal(dispatchPolicy(task, live(3), {}, 10 * gb).maxWorkerThreads, 10);
 });
 
 test('RAM floor: below 1 GB only PI starts, answer items included; running workers are not counted as stopped', () => {
@@ -223,7 +223,8 @@ test('RAM floor: below 1 GB only PI starts, answer items included; running worke
   const answer = { id: 'TASK-1', type: 'TASK', local: { answerOnly: true } };
   const pi = { id: 'PI-1', type: 'PI', local: {} };
   assert.equal(dispatchPolicy(answer, [], {}, 0.9 * gb).reason, 'LOW_RAM');
-  assert.equal(dispatchPolicy(answer, [], {}, 1.2 * gb).allowed, true, 'answer workers need only the floor');
+  assert.equal(dispatchPolicy(answer, [], {}, 1.2 * gb).reason, 'LOW_RAM');
+  assert.equal(dispatchPolicy(answer, [], {}, 1.6 * gb).allowed, true, 'answer workers need the 1.5 GB floor');
   assert.equal(dispatchPolicy(pi, [], {}, 0.3 * gb).allowed, true);
   assert.equal(dispatchPolicy(answer, [], { minFreeRamGBAll: 0.5 }, 0.9 * gb).allowed, true, 'configurable');
 });

@@ -38,3 +38,16 @@ test('slot directory is shared by a checkout and its worktrees; the CLI runs the
   assert.match(r.stderr, /\[build-lock\] slot slot-0/);
   assert.deepEqual(fs.readdirSync(slotDirFor(root)), [], 'slot freed after the command exits');
 });
+
+test('CLI fails closed when capacity stays full instead of starting an unbounded heavy command', async (t) => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'bl-full-'));
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  execFileSync('git', ['init', '-q', tmp]);
+  const dir = slotDirFor(tmp); const held = await acquire(dir, 1);
+  t.after(() => release(held));
+  const marker = path.join(tmp, 'should-not-run');
+  const r = spawnSync(process.execPath, [LOCK, '--slots', '1', '--max-wait-ms', '100', '--', process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'bad')`], { cwd: tmp, encoding: 'utf8' });
+  assert.equal(r.status, 75, r.stderr);
+  assert.match(r.stderr, /command not started/);
+  assert.equal(fs.existsSync(marker), false);
+});

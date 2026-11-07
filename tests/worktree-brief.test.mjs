@@ -326,6 +326,10 @@ test('worker query queue enforces item token/read-only tools and rebuilds digest
   const good = await ask('good', { item: 'PI-70', token: 'token-pi-70', tool: 'search_logs', args: { service: 'api' } });
   assert.equal(good.ok, true); assert.equal(calls.length, 1);
   assert.match(fs.readFileSync(good.digestPath, 'utf8'), /found/);
+  calls.length = 0;
+  fs.writeFileSync(path.join(dir, 'overlap.request.json'), JSON.stringify({ item: 'PI-70', token: 'token-pi-70', tool: 'search_logs', args: { service: 'api' } }));
+  await Promise.all([s.processQueryQueue(), s.processQueryQueue(), s.processQueryQueue()]);
+  assert.equal(calls.length, 1, 'overlapping poll ticks claim one request exactly once');
   const tokenFile = path.join(path.dirname(c.brief.briefFile), 'query-token.json');
   fs.writeFileSync(tokenFile, JSON.stringify({ item: 'PI-70', token: 'token-pi-70', queueDir: dir }));
   const cli = spawn(process.execPath, [path.resolve('team-sdlc-pack/bin/mtm-query.mjs'), '--token-file', tokenFile, '--item', 'PI-70', '--tool', 'search_logs', '--service', 'api'], { cwd: path.resolve('.') });
@@ -466,7 +470,7 @@ test('late worker cutoff is in the past and unknown cutoff stays null', t => {
   assert.equal(s.briefContext(args.item).workerStopAt, null);
 });
 
-test('RAM queues code worktrees but ten answer workers dispatch with unique ports', async t => {
+test('RAM queues code worktrees and the global thread cap holds even for PI workers', async t => {
   const { s, create } = worktreeSession(t);
   s.freeMemory = () => 1024 ** 3;
   assert.equal((await create('BUG-91', 'BUG')).error, 'LOW_RAM');
@@ -476,6 +480,8 @@ test('RAM queues code worktrees but ten answer workers dispatch with unique port
   assert.equal(new Set(outputs.flatMap(r => Object.values(r.ports))).size, 20);
   assert.ok(outputs.every(r => JSON.parse(fs.readFileSync(r.brief.briefFile)).answerOnly));
   s.freeMemory = () => 3 * 1024 ** 3;
+  assert.equal((await create('BUG-91', 'BUG')).error, 'THREAD_LIMIT');
+  for (const id of ['PI-90', 'PI-91', 'PI-92']) s.items.get(id).local.ready = true;
   assert.equal((await create('BUG-91', 'BUG')).ok, true);
 });
 
@@ -584,6 +590,27 @@ test('batch start_work overlaps MCP collection across newly revealed items with 
   for (const id of ids) assert.ok(s.readMaterial(id).mcpMaterial.some(e => e.tool === 'search_logs' && e.ok));
 });
 
+test('dispatch_ready starts one material wave and spawns it before collecting later items', async t => {
+  const { s } = worktreeSession(t);
+  s.phase = 'GAME'; s.match.status = 'IN_PROGRESS'; s.match.endsAt = Date.now() + 30 * 60000;
+  s.adapter.parallel.materialConcurrency = 2;
+  const started = [];
+  for (let n = 1; n <= 5; n += 1) s.items.set(`BUG-${n}`, { id: `BUG-${n}`, type: 'BUG', maxPoints: 100 - n, description: `Bug ${n} description`, local: {} });
+  s.start_work = async ({ backlogItemKey }) => {
+    started.push(backlogItemKey);
+    const it = s.items.get(backlogItemKey); it.local.startedAt = Date.now(); it.local.answerOnly = false;
+    s.materialCache[backlogItemKey] = { files: {}, submitTemplate: { backlogId: backlogItemKey } };
+    return { ok: true };
+  };
+  const first = await s.dispatch_ready();
+  assert.equal(started.length, 2);
+  assert.equal(first.spawn.length, 2);
+  assert.equal(first.waiting.filter(x => x.reason === 'MATERIAL_BATCH').length, 3);
+  const second = await s.dispatch_ready();
+  assert.equal(started.length, 4);
+  assert.equal(second.spawn.length, 2);
+});
+
 test('dispatch_ready dispatches every open item in one call and respawns workers lost in a restart', async t => {
   const { s } = worktreeSession(t);
   s.phase = 'GAME'; s.match.status = 'IN_PROGRESS'; s.match.endsAt = Date.now() + 30 * 60000;
@@ -613,7 +640,7 @@ test('dispatch_ready dispatches every open item in one call and respawns workers
   assert.equal(first.spawn.find(sp => sp.id === 'PI-33').answerOnly, true, 'PI wording is only a starting hint');
   assert.match(task(first.spawn.find(sp => sp.id === 'PI-33')), /Do everything the item's requirements ask\. If the item asks to change the application, make the change, run the relevant tests, and commit it with the answer\./);
   assert.match(task(first.spawn.find(sp => sp.id === 'PI-33')), /SCOPE: answer or SCOPE: answer\+code/);
-  assert.match(task(first.spawn.find(sp => sp.id === 'BUG-31')), /Builds, full test suites and browser\/e2e runs: `node ".*build-lock\.mjs" --slots 3 -- <command>`/);
+  assert.match(task(first.spawn.find(sp => sp.id === 'BUG-31')), /Builds, full test suites and browser\/e2e runs: `node ".*build-lock\.mjs" --slots 2 -- <command>`/);
   assert.match(task(first.spawn.find(sp => sp.id === 'BUG-31')), /query it yourself with `node ".*mtm-query\.mjs" --token-file ".*query-token\.json" --item BUG-31/, 'code workers can read KB/logs themselves');
   assert.equal(first.spawn.find(sp => sp.id === 'PI-33').reasoningEffort, 'medium');
   assert.match(task(first.spawn.find(sp => sp.id === 'BUG-31')), /Redirect long output .* print only its last 20 lines/);

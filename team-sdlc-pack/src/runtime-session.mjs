@@ -6,6 +6,7 @@ import { execFile } from 'node:child_process';
 import crypto from 'node:crypto';
 import os from 'node:os';
 import { answerOnly, answerClassification, dispatchPolicy, integrationGate, mapBounded, BuildQueue, availableMemory } from './dispatch.mjs';
+import { acquire as acquireHeavySlot, release as releaseHeavySlot, slotDirFor } from './build-lock.mjs';
 import { stopWorktreeProcesses } from './process-cleanup.mjs';
 import { PNPM_SAFE_ENV, itemTestFiles, gateCommands, runBounded, assertionFailure, testSummary, failingTests } from './gate.mjs';
 import path from 'node:path';
@@ -43,7 +44,7 @@ const PLAYBOOK = { PI: 'backlog-pi', BUG: 'backlog-bug', CR: 'backlog-cr', TASK:
 // A dispatched worktree with no file change and no commit this long after its spawn message probably
 // has no worker (spawn failed and was not retried, or the list was lost): re-offer it. Workers write
 // evidence or edit code within ~0.5-3 min in every rehearsal so far.
-const IDLE_WORKER_MS = 7 * 60000;
+const IDLE_WORKER_MS = 4 * 60000;
 const MAX_RESPAWNS = 2;
 const DEFAULT_WORKER_MODELS = {
   pi: ['gpt-6.1-sol'],
@@ -66,7 +67,7 @@ export const DEFAULT_ADAPTER = {
   submit: { acceptedStatuses: ['ACCEPTED', 'RECEIVED'], retryBudgetMs: SUBMIT_LIMITS.retryMs },
   planner: {},
   heavyTask: { mode: 'last', startAfter: 'othersDispatched', minMinutesLeft: 0, maxParallel: 2, minPoints: 200, minDescriptionChars: 6000, minCriteria: 12 },
-  parallel: { maxCodeWorkers: 6, maxAnswerWorkers: 6, maxBuilds: 2, materialConcurrency: 4, portBase: 3100, workerModels: DEFAULT_WORKER_MODELS },
+  parallel: { maxCodeWorkers: 6, maxAnswerWorkers: 6, maxWorkerThreads: 10, maxBuilds: 2, maxHeavySteps: 2, heavyStepWaitMs: 60000, minFreeRamGBAll: 1.5, materialConcurrency: 4, portBase: 3100, workerModels: DEFAULT_WORKER_MODELS },
 };
 
 function deepMerge(a, b) {
@@ -109,6 +110,7 @@ export class RuntimeSession {
     this.lastWaitForUpdateAt = null;
     this.materialMcpActive = 0;
     this.materialMcpQueue = [];
+    this.queryDrain = null;
   }
 
   // ---------- infrastructure ----------
@@ -136,12 +138,36 @@ export class RuntimeSession {
   }
 
   async processQueryQueue() {
+    if (this.queryDrain) return this.queryDrain;
+    this.queryDrain = this.drainQueryQueue();
+    try { return await this.queryDrain; }
+    finally { this.queryDrain = null; }
+  }
+
+  async drainQueryQueue() {
     const dir = this.queryQueueDir(); if (!dir) return;
     fs.mkdirSync(dir, { recursive: true });
+    let names = []; try { names = fs.readdirSync(dir); } catch { return; }
+    // A crashed runtime may leave a claimed request behind. Workers give up after 30 s, so a claim
+    // older than 60 s is safe to retry. Old responses contain raw company material; remove them.
+    for (const name of names) {
+      const file = path.join(dir, name); let age = 0;
+      try { age = Date.now() - fs.statSync(file).mtimeMs; } catch { continue; }
+      if (name.endsWith('.processing.json') && age > 60000) {
+        const response = file.replace(/\.processing\.json$/, '.response.json');
+        try { if (fs.existsSync(response)) fs.unlinkSync(file); else fs.renameSync(file, file.replace(/\.processing\.json$/, '.request.json')); } catch { /* another runtime won */ }
+      } else if (name.endsWith('.response.json') && age > 10 * 60000) {
+        try { fs.unlinkSync(file); } catch { /* already consumed */ }
+      }
+    }
     let files = []; try { files = fs.readdirSync(dir).filter(f => f.endsWith('.request.json')).slice(0, 8); } catch { return; }
     for (const name of files) {
-      const requestFile = path.join(dir, name); const responseFile = requestFile.replace(/\.request\.json$/, '.response.json');
-      let q; try { q = JSON.parse(fs.readFileSync(requestFile, 'utf8')); } catch { continue; }
+      const requestFile = path.join(dir, name);
+      const claimedFile = requestFile.replace(/\.request\.json$/, '.processing.json');
+      const responseFile = requestFile.replace(/\.request\.json$/, '.response.json');
+      try { fs.renameSync(requestFile, claimedFile); } catch { continue; } // atomic claim across pollers/processes
+      let q; try { q = JSON.parse(fs.readFileSync(claimedFile, 'utf8')); }
+      catch { writeJson(responseFile, { ok: false, error: 'QUERY_INVALID', message: 'Request JSON is invalid.' }); try { fs.unlinkSync(claimedFile); } catch { /* gone */ } continue; }
       try {
         const it = this.items.get(String(q.item || ''));
         if (!it || !it.local?.queryToken || q.token !== it.local.queryToken) throw Object.assign(new Error('Token does not belong to this item.'), { code: 'ITEM_FORBIDDEN' });
@@ -157,7 +183,7 @@ export class RuntimeSession {
         const brief = this.appendMcpMaterial(it.id, { purpose: 'follow-up', materialPurpose: kind, tool: q.tool, args: q.args || {}, ok: result?.ok === true, result });
         writeJson(responseFile, { ok: result?.ok === true, item: it.id, tool: q.tool, text: resultText(result?.raw), result, digestPath: brief.digestPath || null });
       } catch (e) { writeJson(responseFile, { ok: false, error: e.code || 'QUERY_FAILED', message: e.message }); }
-      try { fs.unlinkSync(requestFile); } catch { /* next poll */ }
+      try { fs.unlinkSync(claimedFile); } catch { /* next poll */ }
     }
   }
 
@@ -1054,7 +1080,7 @@ export class RuntimeSession {
       ...deferredHeavy.map(h => `note: HEAVY ${h.id} deferred (${h.detail}); helper starts it when eligible.`),
       ...baselineDefects.filter(d => d.likelyOwner === 'BASELINE-FIX').map(d => `!! BASELINE DEFECT: ${d.test}. The first code worker fixes it in its item (code or a new migration); never weaken the original test.`),
       ...(this.phase === 'GAME' && freeBytes / 1024 ** 3 < 1.5
-        ? [`!! LOW_RAM ${(freeBytes / 1024 ** 3).toFixed(1)} GB available: only PI/deadline items start until it recovers. Tell idle workers to stop their dev servers and browsers; never start a build or browser in main.`] : []),
+        ? [`!! LOW_RAM ${(freeBytes / 1024 ** 3).toFixed(1)} GB available: only PI starts until it recovers. Tell idle workers to stop their dev servers and browsers; never start a build or browser in main.`] : []),
       ...[...(this.localAlerts?.values() || [])].map((t) => `!! ${t}`),
       ...this.logProblems.splice(0).map((t) => `!! progress log: ${t}`),
     ];
@@ -2150,7 +2176,14 @@ export class RuntimeSession {
       if (!d.allowed) waiting.push({ id: r.id, reason: d.reason, detail: d.detail });
       return d.allowed;
     });
-    const needStart = picked.filter(r => !this.items.get(r.id)?.local?.startedAt || !this.readMaterial(r.id)).map(r => r.id);
+    // Do not make the first workers wait for every open item to finish optional MCP discovery. Start at
+    // most one material wave, spawn it, then the next wait_for_update immediately drains the next wave.
+    const needsMaterial = picked.filter(r => !this.items.get(r.id)?.local?.startedAt || !this.readMaterial(r.id));
+    const startLimit = Math.max(1, Math.floor(Number(this.adapter.parallel.materialConcurrency) || 4));
+    const starting = new Set(needsMaterial.slice(0, startLimit).map(r => r.id));
+    for (const r of needsMaterial.slice(startLimit)) waiting.push({ id: r.id, reason: 'MATERIAL_BATCH', queued: true });
+    const dispatchable = picked.filter(r => !needsMaterial.some(n => n.id === r.id) || starting.has(r.id));
+    const needStart = [...starting];
     const startErrors = {};
     if (needStart.length) {
       const res = await mapBounded(needStart, this.adapter.parallel.materialConcurrency, id => this.start_work({ backlogItemKey: id, compact: true }));
@@ -2162,7 +2195,7 @@ export class RuntimeSession {
     const sharedDefects = !this.state.baselineDefectsResolved ? this.baselineDefects().filter(d => d.likelyOwner === 'BASELINE-FIX') : [];
     let baselineFixTarget = this.state.baselineFixAssigned || null;
     if (!baselineFixTarget && sharedDefects.length) {
-      const code = picked.map(r => this.items.get(r.id)).filter(it => it && !startErrors[it.id] && !answerOnly(it, this.readMaterial(it.id) || {}));
+      const code = dispatchable.map(r => this.items.get(r.id)).filter(it => it && !startErrors[it.id] && !answerOnly(it, this.readMaterial(it.id) || {}));
       const first = code[0];
       const firstLeft = first ? effectiveLeft(first, this.now(), this.match.endsAt).left : null;
       baselineFixTarget = first && first.deadlineAt != null && firstLeft != null && firstLeft < 20
@@ -2171,13 +2204,13 @@ export class RuntimeSession {
       if (baselineFixTarget) this.state.baselineFixTarget = baselineFixTarget;
     }
     const preemptions = [];
-    for (const r of picked) {
+    for (const r of dispatchable) {
       const p = await this.preemptForDeadline(this.items.get(r.id), [...this.items.values()]);
       if (p) preemptions.push(p);
     }
     const spawn = [];
     this.refreshHeavyFlags(); // start_work may have supplied the description needed for detection
-    for (const r of picked) {
+    for (const r of dispatchable) {
       if (startErrors[r.id]) { waiting.push({ id: r.id, reason: startErrors[r.id] }); continue; }
       const it = this.items.get(r.id);
       const heavyDecision = this.heavyDispatchDecision(it, [...this.items.values()]);
@@ -2207,7 +2240,7 @@ export class RuntimeSession {
         : it.local.answerSource
         ? `Read ${c.brief?.digestPath || c.brief?.briefFile} first; it contains relevant issued source. Verify any missing function directly under ${c.appPath || c.matchRoot}; answer from code, never infer accounting or UI behavior.`
         : `Read ONLY ${c.brief?.digestPath || `${c.brief?.briefFile} and files/`}${c.brief?.digestPath ? ' (item text, answer template, KB articles, test data and every production log line in UTC, oldest first); do not open brief.json, repo-map, baseline, skills, checklist or raw files/mcp/*.json unless the digest says a part is missing' : ''}.${queryCmd ? ` If a fact is missing, query it yourself with \`${queryCmd}\`; NEED_INFO only if the read tool cannot answer.` : ''}`;
-      const doEverything = `Do everything the item's requirements ask. If the item asks to change the application, make the change, run the relevant tests, and commit it with the answer. If the item names source paths or images, open them. In the STATUS block state SCOPE: answer or SCOPE: answer+code. `;
+      const doEverything = `Do everything the item's requirements ask. If the item asks to change the application, make the change, run the relevant tests, and commit it with the answer. If the item names source paths or images, open them. A heavy command exiting 75 did not run: retry it later or return PARKED before workerStopAt. In the STATUS block state SCOPE: answer or SCOPE: answer+code. `;
       const entry = {
         id: r.id, type: it.type, answerOnly: !!c.answerOnly,
         taskName: `${r.id.toLowerCase().replace(/[^a-z0-9]/g, '')}${it.local.dispatches > 1 ? `r${it.local.dispatches}` : ''}`,
@@ -2289,6 +2322,18 @@ export class RuntimeSession {
     const notes = path.join(this.checkoutRoot, '.mtm-notes');
     fs.mkdirSync(notes, { recursive: true });
     G.ensureExcluded(this.checkoutRoot, '/.mtm-notes/');
+    // Main's integration gate shares the same machine-wide capacity as worker builds/full suites/e2e.
+    // Keep this wait short because ship() is serialized and a deadline item may be queued behind it.
+    const configuredWait = Math.max(0, Number(this.adapter.parallel.heavyStepWaitMs) || 60000);
+    const gateWaitMs = Math.min(15000, configuredWait, Math.max(0, Math.floor((leftMin * 60 - 60) * 1000)));
+    const heavySlot = await acquireHeavySlot(slotDirFor(this.checkoutRoot), this.adapter.parallel.maxHeavySteps || 2, { maxWaitMs: gateWaitMs });
+    if (!heavySlot) {
+      it.local.gate = { verdict: 'ENVIRONMENT', at: this.now(), scope, codeChanged: true, reason: 'HEAVY_CAPACITY' };
+      this.saveState();
+      return this.clean({ ok: false, verdict: 'ENVIRONMENT', scope, codeChanged: true, codeFiles: changeScope.codeFiles,
+        error: 'HEAVY_CAPACITY', seconds: Math.round(gateWaitMs / 100) / 10,
+        next: leftMin <= 3 ? 'No heavy slot is free. The deadline is near: submit the worker-verified commit now.' : 'No heavy slot is free; no gate command was started. Retry gate after a worker full-suite/build/e2e exits.' });
+    }
     this.state.gateDbCounter = (this.state.gateDbCounter || 0) + 1;
     const gateDb = freshGateDatabaseEnv(appDir, `${databaseSuffix(this.matchId)}_gate_${String(id).toLowerCase().replace(/[^a-z0-9]+/g, '_')}_${this.state.gateDbCounter}`);
     const env = { ...process.env, ...PNPM_SAFE_ENV, ...gateDb, FORCE_COLOR: '0', NO_COLOR: '1' };
@@ -2301,7 +2346,10 @@ export class RuntimeSession {
         test ? runBounded(test, { cwd: appDir, env, timeoutMs: budgetSec * 1000, logFile: path.join(notes, `gate-${id}-tests.log`), signal: controller.signal }) : null,
         types ? runBounded(types, { cwd: appDir, env, timeoutMs: budgetSec * 1000, logFile: path.join(notes, `gate-${id}-types.log`), signal: controller.signal }) : null,
       ]);
-    } finally { if (this.activeGate === active) this.activeGate = null; }
+    } finally {
+      releaseHeavySlot(heavySlot);
+      if (this.activeGate === active) this.activeGate = null;
+    }
     // Nothing runnable found is not a green gate: treat it like an environment problem.
     const green = !!(tr || ty) && (!tr || tr.exit === 0) && (!ty || ty.exit === 0);
     let code = assertionFailure(tr, 'tests') || assertionFailure(ty, 'types');

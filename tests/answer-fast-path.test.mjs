@@ -75,6 +75,11 @@ test('answer digest has item, template, KB once, and one UTC line per log entry'
   assert.equal(md.match(/KB-INC-01/g).length, 1);
   assert.match(md, /2026-10-27T00:00:00Z \(logged 2026-10-27T07:00:00\+07:00\) \| INFO \| deploy \| d-1 \| rel-1 deployed \| \{"flag":"x.y"\}/);
   assert.match(md, /Not complete for: api \(27\/37, over limit: INFO\)/);
+  const many = Array.from({ length: 1000 }, (_, n) => ({ timestamp: `2026-10-27T08:${String(n % 60).padStart(2, '0')}:00Z`, service: 'api', message: `entry-${n} ${'x'.repeat(150)}` }));
+  const bounded = answerDigest({ item: { id: 'PI-02' }, material: { mcpMaterial: [{ purpose: 'logs', tool: 'search_logs-merged', ok: true, result: { unique: many.length, entries: many } }] } });
+  assert.ok(bounded.length < 40000, `digest too large: ${bounded.length}`);
+  assert.match(bounded, /log entries omitted from the digest/);
+  assert.match(bounded, /entry-0/); assert.match(bounded, /entry-999/);
 });
 
 test('source-reading TASKs are separated from KB-only fast answers and receive issued source', () => {

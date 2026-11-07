@@ -37,7 +37,7 @@ export function slotDirFor(cwd) {
 }
 
 /** Takes a free slot, or frees one whose owner died. Returns the slot path. Never waits past maxWaitMs. */
-export async function acquire(dir, slots, { maxWaitMs = 5 * 60000, pollMs = 500, owner = process.pid } = {}) {
+export async function acquire(dir, slots, { maxWaitMs = 60000, pollMs = 500, owner = process.pid } = {}) {
   fs.mkdirSync(dir, { recursive: true });
   const until = Date.now() + maxWaitMs;
   for (;;) {
@@ -66,14 +66,19 @@ async function main() {
   const sep = argv.indexOf('--');
   const opts = sep >= 0 ? argv.slice(0, sep) : [];
   const cmd = sep >= 0 ? argv.slice(sep + 1) : argv;
-  if (!cmd.length) { console.error('usage: build-lock.mjs [--slots 2] [--dir D] -- <command...>'); process.exit(2); }
+  if (!cmd.length) { console.error('usage: build-lock.mjs [--slots 2] [--max-wait-ms 60000] [--dir D] -- <command...>'); process.exit(2); }
   const get = (k, d) => { const i = opts.indexOf(k); return i >= 0 ? opts[i + 1] : d; };
   const slots = Math.max(1, Number(get('--slots', process.env.MTM_MAX_BUILDS || 2)) || 2);
+  const maxWaitMs = Math.max(0, Number(get('--max-wait-ms', process.env.MTM_BUILD_LOCK_WAIT_MS || 60000)) || 60000);
   const dir = get('--dir', slotDirFor(process.cwd()));
   const t0 = Date.now();
-  const slot = await acquire(dir, slots);
+  const slot = await acquire(dir, slots, { maxWaitMs });
   const waited = Math.round((Date.now() - t0) / 100) / 10;
-  console.error(slot ? `[build-lock] slot ${path.basename(slot)} after ${waited}s` : `[build-lock] no free slot after ${waited}s: running anyway`);
+  if (!slot) {
+    console.error(`[build-lock] no free slot after ${waited}s: command not started (capacity exit 75; retry later)`);
+    process.exit(75);
+  }
+  console.error(`[build-lock] slot ${path.basename(slot)} after ${waited}s`);
   const child = spawn(cmd[0], cmd.slice(1), { stdio: 'inherit', shell: process.platform === 'win32' });
   const stop = (sig) => { try { child.kill(sig); } catch { /* gone */ } };
   process.on('SIGINT', () => stop('SIGINT')); process.on('SIGTERM', () => stop('SIGTERM'));

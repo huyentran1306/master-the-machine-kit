@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import { execFile } from 'node:child_process';
 import crypto from 'node:crypto';
 import os from 'node:os';
-import { answerOnly, dispatchPolicy, integrationGate, mapBounded, BuildQueue, availableMemory } from './dispatch.mjs';
+import { answerOnly, answerClassification, dispatchPolicy, integrationGate, mapBounded, BuildQueue, availableMemory } from './dispatch.mjs';
 import { stopWorktreeProcesses } from './process-cleanup.mjs';
 import { PNPM_SAFE_ENV, itemTestFiles, gateCommands, runBounded, assertionFailure, testSummary, failingTests } from './gate.mjs';
 import path from 'node:path';
@@ -166,14 +166,17 @@ export class RuntimeSession {
     const items = [...this.items.values()];
     for (const it of items) {
       it.local ||= {};
-      const signature = `${it.specHash || ''}:${String(it.description || '').length}:${it.local.answerOnly ?? ''}:${this.adapter.heavyTask?.mode || 'last'}`;
+      const signature = `${it.specHash || ''}:${it.maxPoints ?? ''}:${String(it.description || '').length}:${it.local.answerOnly ?? ''}:${this.adapter.heavyTask?.mode || 'last'}`;
       if (it.local.heavySignature === signature) continue;
       const before = !!it.local.heavy;
+      const beforeHint = it.local.heavyHint;
       const result = detectHeavy(it, items, this.adapter.heavyTask);
       it.local.heavy = result.heavy;
       it.local.heavyReason = result.reason;
+      it.local.heavyHint = result.hint || null;
       it.local.heavySignature = signature;
       if (result.heavy && !before) this.pendingEvents.push({ kind: 'HEAVY_DETECTED', id: it.id, text: `HEAVY_DETECTED ${it.id}: ${result.reason}` });
+      if (result.hint && result.hint !== beforeHint) this.pendingEvents.push({ kind: 'HEAVY_HINT', id: it.id, text: `HEAVY_HINT ${it.id}: ${result.hint}; not deferred without an explicit label` });
     }
   }
 
@@ -1227,12 +1230,27 @@ export class RuntimeSession {
       evidenceSkill: path.resolve(this.teamWorkspace || this.checkoutRoot, '.agents', 'skills', 'evidence-and-answer', 'SKILL.md'),
       answer: answerPaths(matchRoot, it.id), checklistFile: path.join(matchRoot, 'answers', it.id, 'checklist.md'),
       deadlineAt: it.deadlineAt ?? null, workerStopAt: stopAt, deadlineMarginMinutes: left == null ? 5 : Math.round(Math.min(5, Math.max(1.5, left * 0.25)) * 10) / 10,
-      answerOnly: it.local?.answerOnly ?? answerOnly(it, this.readMaterial(it.id) || {}),
+      answerOnly: it.local?.answerOnly ?? answerOnly(it, this.readMaterial(it.id) || {}), classifiedBy: it.local?.classifiedBy ?? null,
       answerSource: !!it.local?.answerSource,
       integrationGate: integrationGate(it), remainingStep: it.local?.resume?.remainingStep ?? null,
       ports: it.local?.worktree?.ports ?? null,
       baseSha: it.local?.worktree?.baseSha ?? this.environmentRevision ?? this.state.envReady?.revision ?? null,
     };
+  }
+
+  async integratedChangeScope(it, revision = it?.local?.worktree?.integratedSha) {
+    const wt = it?.local?.worktree; let base = wt?.mainBefore || wt?.integrationBase || this.environmentRevision || this.state.envReady?.revision;
+    if (!base && revision) base = (await G.git(this.checkoutRoot, ['rev-parse', `${revision}^`])).stdout.trim() || null;
+    if (!base || !revision) return { codeChanged: true, changed: [], codeFiles: [], reason: 'diff base unavailable' };
+    const result = await G.git(this.checkoutRoot, ['diff', '--name-only', base, revision]);
+    if (result.code) return { codeChanged: true, changed: [], codeFiles: [], reason: 'diff unavailable' };
+    const changed = result.stdout.split(/\r?\n/).filter(Boolean).map(f => f.replace(/\\/g, '/'));
+    const appDir = this.appPath || this.matchRoot; const appRel = path.relative(this.checkoutRoot, appDir).split(path.sep).join('/').replace(/^\.\/?$/, '');
+    const codeFiles = changed.filter(file => {
+      const rel = appRel ? file === appRel ? '' : file.startsWith(`${appRel}/`) ? file.slice(appRel.length + 1) : null : file;
+      return rel != null && rel !== '' && !/^answers(?:\/|$)/.test(rel);
+    });
+    return { codeChanged: codeFiles.length > 0, changed, codeFiles };
   }
 
   async start_work({ backlogItemKey, backlogItemKeys, matchUuid, compact = true } = {}) {
@@ -1287,8 +1305,9 @@ export class RuntimeSession {
     it.local.descriptionOk = usableDescription(it.description);
     it.acceptanceCriteria = data.acceptanceCriteria ?? it.acceptanceCriteria ?? null;
     const material = { backlogId: data.backlogId || id, backlogType: data.backlogType || it.type, startInstruction: data.startInstruction ?? '', submitTemplate: data.submitTemplate ?? null, minimumVerificationScenarios: data.minimumVerificationScenarios ?? null, files: data.files || {}, receivedAt: nowIso(), replay: !!data.replay };
-    it.local.answerOnly = answerOnly(it, material);
     material.requiredEvidence = extractRequiredEvidence(it, material);
+    const classification = answerClassification(it, material);
+    it.local.answerOnly = classification.answerOnly; it.local.classifiedBy = classification.classifiedBy; it.local.classificationReason = classification.reason;
     // Optional company material must not hold the whole first dispatch for the old 90 s ceiling.
     // PI keeps the largest slice for production logs; answer-only and code get bounded discovery.
     const materialBudgetMs = it.type === 'PI' ? 30000 : it.type === 'CR' ? 25000 : it.local.answerOnly ? 15000 : 12000;
@@ -1348,7 +1367,7 @@ export class RuntimeSession {
     }) : null;
     if (compact) return this.clean({
       ok: !!brief, ...(brief ? {} : { error: 'MATCH_ROOT_MISSING' }), id, type: it.type,
-      answerOnly: it.local.answerOnly, dispatch: dispatchPolicy(it, [...this.items.values()], this.adapter.parallel, this.freeMemory()),
+      answerOnly: it.local.answerOnly, classifiedBy: it.local.classifiedBy, dispatch: dispatchPolicy(it, [...this.items.values()], this.adapter.parallel, this.freeMemory()),
       points: it.maxPoints ?? null, deadlineAt: it.deadlineAt ?? null, workerStopAt: context?.workerStopAt ?? null,
       briefFile: brief?.briefFile ?? null, filesDir: brief?.filesDir ?? null,
       answer: context?.answer ?? null, checklistFile, playbook: context?.playbook ?? null,
@@ -1458,6 +1477,7 @@ export class RuntimeSession {
     }
     const cwd = this.checkoutRoot;
     const sha = (gitRevision && gitRevision !== 'HEAD' ? String(gitRevision).trim().toLowerCase() : await G.revParse(cwd, 'HEAD')) || '';
+    let codeChanged = false;
     if (!SHA_RE.test(sha)) errors.push(`gitRevision must be a full 40/64-hex SHA (got "${sha}")`);
     let answer = null;
     let check = { errors: [], warnings: [], evidenceRefs: [] };
@@ -1554,6 +1574,7 @@ export class RuntimeSession {
         if (dirty?.length) warnings.push(`uncommitted changes under answers/${id}: they will NOT be submitted (${dirty.slice(0, 3).join(', ')})`);
       }
     }
+    if (it && SHA_RE.test(sha)) codeChanged = (await this.integratedChangeScope(it, sha)).codeChanged;
     // Verification gate. Across agentic coding work the bottleneck is not writing the change, it is
     // proving it; an item submitted without the suite having run is the single cheapest way to lose
     // points. So "tests ran and passed" is a refusal, not a warning. opts.allowUntested is the escape
@@ -1561,7 +1582,7 @@ export class RuntimeSession {
     // warning and the reason is recorded in the log.
     const tests = this.lastTests?.[id];
     const testErrors = [];
-    if (it && !it.local?.answerOnly && !answerOnly(it, this.readMaterial(id) || {}) && SHA_RE.test(sha)) {
+    if (it && codeChanged && SHA_RE.test(sha)) {
       if (!tests || tests.status === 'NOT_RUN') testErrors.push(`no test run reported for ${id}: run the suite and report BACKLOG_TESTS before submitting`);
       else if (tests.status === 'RUNNING') testErrors.push(`the last BACKLOG_TESTS for ${id} is still RUNNING: report the final counts first`);
       else if (tests.status === 'FAILED') testErrors.push(`the last BACKLOG_TESTS for ${id} is FAILED (${tests.failed} failing): fix it or submit a different item`);
@@ -2157,10 +2178,11 @@ export class RuntimeSession {
         : it.local.answerSource
         ? `Read ${c.brief?.digestPath || c.brief?.briefFile} first; it contains relevant issued source. Verify any missing function directly under ${c.appPath || c.matchRoot}; answer from code, never infer accounting or UI behavior.`
         : `Read ONLY ${c.brief?.digestPath || `${c.brief?.briefFile} and files/`}${c.brief?.digestPath ? ' (item text, answer template, KB articles, test data and every production log line in UTC, oldest first); do not open brief.json, repo-map, baseline, skills, checklist or raw files/mcp/*.json unless the digest says a part is missing' : ''}.${queryCmd ? ` If a fact is missing, query it yourself with \`${queryCmd}\`; NEED_INFO only if the read tool cannot answer.` : ''}`;
+      const doEverything = `Do everything the item's requirements ask. If the item asks to change the application, make the change, run the relevant tests, and commit it with the answer. If the item names source paths or images, open them. In the STATUS block state SCOPE: answer or SCOPE: answer+code. `;
       const entry = {
         id: r.id, type: it.type, answerOnly: !!c.answerOnly,
         taskName: `${r.id.toLowerCase().replace(/[^a-z0-9]/g, '')}${it.local.dispatches > 1 ? `r${it.local.dispatches}` : ''}`,
-        message: `${resumeText}${baselineFixText}${baselineWaitText}Item ${r.id} (${it.type}${c.answerOnly ? ', answer-only: no dev server, build or full suite' : ''}).${c.answerOnly ? ` FAST PATH (points drop with every minute${it.type === 'PI' ? ', PI is ranked by submit order: every turn counts' : ''}). No preamble, no progress or send_message updates. 1) ${answerRead} 2) Decide every field (UTC-normalise mixed offsets, dedupe retries, keep corrected entries, ignore decoys), then write ${c.answer?.submitJson || 'submit.json'} in one edit, keeping every template key. 3) Run \`${c.finishAnswer || c.validateAnswer}\`${c.finishAnswer ? ' (validates the schema and commits the answer folder); on ANSWER INVALID fix and rerun' : ', then commit'}. 4) Reply with exactly the STATUS block it printed. If a fact is truly missing reply NEED_INFO: <what> (logs: service + narrowing word). No extra evidence or test.log unless requiredEvidence lists it; never install validators.` : `${it.type === 'PI' && queryCmd ? ` If a fact is missing, query it yourself with \`${queryCmd}\`; NEED_INFO only if the read tool cannot answer.` : ''} Check the answer with \`${c.validateAnswer}\` (no installs). Builds: \`node "${BUILD_LOCK}" --slots ${this.adapter.parallel.maxBuilds || 2} -- <build command>\` (takes a free build slot itself; never ask the orchestrator for build_slot).`} checkoutRoot = worktreeRoot = ${c.worktreeRoot}; folder ${c.folder}; matchRoot ${c.matchRoot}; briefFile ${c.brief?.briefFile}; filesDir ${c.brief?.filesDir}; answer ${c.answer?.submitJson || ''} (evidence in ${c.answer?.evidenceDir || ''}); ports dev=${c.ports?.dev} production=${c.ports?.production} (override fixed runner ports). ${c.answerOnly && c.brief?.digestPath ? 'The digest replaces briefFile for this item.' : 'Read briefFile first: it has the commands, playbook, checklist and organizer files.'} Work only in this worktree. Stop and return by ${stop} (Game Master clock). Commit the complete item (code, tests, evidence, answer) and reply STATUS READY or PARKED with COMMIT <sha>. Never push, submit, delegate or call Game APIs.`,
+        message: `${resumeText}${baselineFixText}${baselineWaitText}${doEverything}Item ${r.id} (${it.type}${c.answerOnly ? ', answer-first hint' : ''}).${c.answerOnly ? ` FAST PATH (points drop with every minute${it.type === 'PI' ? ', PI is ranked by submit order: every turn counts' : ''}). No preamble, no progress or send_message updates. 1) ${answerRead} 2) Decide every field (UTC-normalise mixed offsets, dedupe retries, keep corrected entries, ignore decoys), then write ${c.answer?.submitJson || 'submit.json'} in one edit, keeping every template key. 3) For SCOPE: answer run \`${c.finishAnswer || c.validateAnswer}\`${c.finishAnswer ? ' (validates the schema and commits the answer folder); on ANSWER INVALID fix and rerun' : ', then commit'}; for SCOPE: answer+code run the relevant tests and commit code, tests and answer together instead. 4) Reply with the STATUS block including SCOPE. If a fact is truly missing reply NEED_INFO: <what> (logs: service + narrowing word). No extra evidence or test.log unless requiredEvidence lists it; never install validators.` : `${it.type === 'PI' && queryCmd ? ` If a fact is missing, query it yourself with \`${queryCmd}\`; NEED_INFO only if the read tool cannot answer.` : ''} Check the answer with \`${c.validateAnswer}\` (no installs). Builds: \`node "${BUILD_LOCK}" --slots ${this.adapter.parallel.maxBuilds || 2} -- <build command>\` (takes a free build slot itself; never ask the orchestrator for build_slot).`} checkoutRoot = worktreeRoot = ${c.worktreeRoot}; folder ${c.folder}; matchRoot ${c.matchRoot}; briefFile ${c.brief?.briefFile}; filesDir ${c.brief?.filesDir}; answer ${c.answer?.submitJson || ''} (evidence in ${c.answer?.evidenceDir || ''}); ports dev=${c.ports?.dev} production=${c.ports?.production} (override fixed runner ports). ${c.answerOnly && c.brief?.digestPath ? 'Start with digestPath; if the requirements need app changes, then read briefFile and its code-lifecycle material.' : 'Read briefFile first: it has the commands, playbook, checklist and organizer files.'} Work only in this worktree. Stop and return by ${stop} (Game Master clock). Commit the complete item (code, tests, evidence, answer) and reply STATUS READY or PARKED with COMMIT <sha> and SCOPE. Never push, submit, delegate or call Game APIs.`,
       };
       entry.reasoningEffort = this.workerEffort(it, c);
       const model = this.workerModel(it, c);
@@ -2173,7 +2195,7 @@ export class RuntimeSession {
       if (taskFile) {
         try {
           fs.writeFileSync(taskFile, `${full}\n`);
-          entry.message = `Item ${r.id}${c.answerOnly ? ' (answer-only FAST PATH)' : ''}: read ${taskFile} first and follow it exactly; it is your complete task. Work only in ${c.worktreeRoot}.`;
+          entry.message = `Item ${r.id}${c.answerOnly ? ' (answer-first FAST PATH)' : ''}: read ${taskFile} first and follow it exactly; it is your complete task. Work only in ${c.worktreeRoot}.`;
           entry.taskFile = taskFile;
         } catch { /* keep the full inline message */ }
       }
@@ -2221,14 +2243,16 @@ export class RuntimeSession {
     if (!wt?.integratedSha) return { ok: false, error: 'NOT_INTEGRATED', next: `Call worktree integrate ${id} first.` };
     const { left } = effectiveLeft(it, this.now(), this.match.endsAt);
     const leftMin = left == null ? 40 : left;
-    if (it.local.answerOnly ?? answerOnly(it, this.readMaterial(id) || {})) {
-      it.local.gate = { verdict: 'GREEN', at: this.now(), note: 'answer-only' };
-      return this.clean({ ok: true, verdict: 'GREEN', note: 'Answer-only: no code gate. submit_work validates the shipped schema.', next: `Push now, then submit_work ${id}.` });
+    const changeScope = await this.integratedChangeScope(it, wt.integratedSha);
+    if (!changeScope.codeChanged) {
+      it.local.gate = { verdict: 'GREEN', at: this.now(), scope: 'schema', codeChanged: false };
+      this.saveState();
+      return this.clean({ ok: true, verdict: 'GREEN', scope: 'schema', codeChanged: false, changed: changeScope.changed,
+        note: 'Worker diff changes only the answer contract; no code gate.', next: `Push now, then submit_work ${id}.` });
     }
     const appDir = this.appPath || this.matchRoot;
     const appRel = path.relative(this.checkoutRoot, appDir).split(path.sep).join('/');
-    const diff = await G.git(this.checkoutRoot, ['diff', '--name-only', `${wt.mainBefore || wt.integrationBase}`, wt.integratedSha]);
-    const own = itemTestFiles(diff.stdout.split('\n').filter(Boolean), appRel).filter((f) => fs.existsSync(path.join(appDir, f)));
+    const own = itemTestFiles(changeScope.changed, appRel).filter((f) => fs.existsSync(path.join(appDir, f)));
     const openBaselineFix = !this.state.baselineDefectsResolved && this.baselineDefects().some(d => d.likelyOwner === 'BASELINE-FIX');
     const scope = !full && !openBaselineFix && (it.deadlineAt != null || leftMin < 8) && own.length ? 'item' : 'full';
     const { test, types } = gateCommands(appDir, { files: scope === 'item' ? own : [], recon: this.commands || {} });
@@ -2268,7 +2292,7 @@ export class RuntimeSession {
     if (gateDb.TEST_DATABASE_URL) dropGateDatabase(appDir, gateDb.TEST_DATABASE_URL);
     const leftNow = effectiveLeft(it, this.now(), this.match.endsAt).left;
     const part = (r, label) => r ? { command: label, exit: r.exit, timedOut: r.timedOut, seconds: Math.round(r.ms / 100) / 10, summary: testSummary(r.text), tail: r.tail.slice(-6) } : { command: null, note: 'no runner found' };
-    it.local.gate = { verdict, at: this.now(), scope, ...(preExisting ? { preExisting } : {}) };
+    it.local.gate = { verdict, at: this.now(), scope, codeChanged: true, ...(preExisting ? { preExisting } : {}) };
     this.saveState();
     const leftTxt = leftNow == null ? '' : ` (${leftNow.toFixed(1)}m left)`;
     const next = verdict === 'GREEN' ? `Gate GREEN${preExisting ? ` (only pre-existing baseline failures: ${preExisting.join('; ').slice(0, 200)})` : ''}: push now, then submit_work ${id} immediately${leftTxt}.`
@@ -2278,7 +2302,7 @@ export class RuntimeSession {
       : `ENVIRONMENT problem (timeout/hang/tool exit without a failing test), not a code failure: do NOT roll back. Call gate ${id} once more; if it repeats, push and submit_work (the worker already passed MVS + suite on its worktree).`;
     const baselineDefectOpen = !this.state.baselineDefectsResolved && this.baselineDefects().filter(d => d.likelyOwner === 'BASELINE-FIX');
     this.saveState();
-    return this.clean({ ok: verdict === 'GREEN', verdict, scope, preExisting: preExisting || undefined,
+    return this.clean({ ok: verdict === 'GREEN', verdict, scope, codeChanged: true, codeFiles: changeScope.codeFiles, preExisting: preExisting || undefined,
       baselineDefectOpen: baselineDefectOpen.length ? baselineDefectOpen : undefined,
       testDatabase: Object.keys(gateDb).length ? 'fresh isolated database' : 'no TEST_DATABASE_URL discovered',
       files: scope === 'item' ? own : 'full suite', budgetSec, seconds: Math.round((Date.now() - t0) / 100) / 10, tests: part(tr, test?.label), types: part(ty, types?.label),
@@ -2342,7 +2366,7 @@ export class RuntimeSession {
     if (g.verdict === 'ENVIRONMENT' && !force && !(leftNow != null && leftNow <= 3)) {
       return this.clean({ ok: false, stage: 'gate', verdict: g.verdict, tests: g.tests, types: g.types, steps, next: `${g.next} To submit the worker-verified commit now, call ship ${id} with force:true.` });
     }
-    // Truthful test record from the gate run itself (code items; answer-only items have none).
+    // Truthful test record from the gate run itself (app-changing diffs; answer-only diffs have none).
     // vitest "Tests  1 failed | 2 passed (3)" and jest "Tests:  1 failed, 2 passed, 3 total".
     const counts = (text) => {
       const line = (String(text || '').match(/Tests:?\s+[^\u00b7]*/) || [])[0];
@@ -2353,7 +2377,7 @@ export class RuntimeSession {
     };
     const c = g.verdict === 'GREEN' ? counts(g.tests?.summary) : null;
     let recorded = false;
-    if (c && c.passed > 0 && !it.local.answerOnly) {
+    if (c && c.passed > 0 && g.codeChanged) {
       const executed = c.passed + (g.preExisting ? 0 : c.failed) + c.skipped; // pre-existing baseline failures are reported in the summary, not as this item's
       const prevReq = Math.min(this.lastTests?.[id]?.required ?? 0, c.passed); // the Player requires executed >= required for PASSED
       const rp = await this.report_progress({ event: { type: 'BACKLOG_TESTS', backlogId: id, status: 'PASSED', required: prevReq, executed, passed: c.passed, failed: 0, skipped: c.skipped, summary: oneLine(`Integration gate in main (${g.scope === 'item' ? "item's own tests" : 'full suite'}): ${g.tests.summary}; typecheck exit ${g.types?.exit ?? 'n/a'}${g.preExisting ? `; excluded ${g.preExisting.length} pre-existing baseline failure(s) also red before this item: ${g.preExisting.join('; ')}` : ''}.`) } });
@@ -2361,7 +2385,7 @@ export class RuntimeSession {
     }
     // A forced/late ENVIRONMENT gate, or a GREEN run whose output could not be counted, has no test record:
     // without this the submit preflight refused AFTER the push ("no test run reported").
-    const untested = !recorded && !it.local.answerOnly
+    const untested = !recorded && g.codeChanged
       ? { allowUntested: true, reason: g.verdict === 'GREEN' ? `integration gate GREEN (exit 0) but its output had no countable test summary: ${g.tests?.summary || 'none'}` : `integration gate ${g.verdict} (tooling/timeout, no failing assertion); the worker verified MVS and suite in its worktree; ${force ? 'forced' : 'last 3 minutes'}` }
       : {};
     // Push the assigned branch (fast-forward only; never forced).
@@ -2497,9 +2521,10 @@ export class RuntimeSession {
     if (!it) return { ok: false, error: 'UNKNOWN_ITEM' };
     if (action === 'create') {
       if (!it.local?.startedAt || !this.readMaterial(id)) return { ok: false, error: 'NOT_STARTED', next: 'Call start_work before worktree create.' };
-      it.local.answerOnly = answerOnly(it, this.readMaterial(id));
-      it.local.answerSource = it.local.answerOnly && answerNeedsSource(it);
-      it.local.answerImage = it.local.answerOnly && answerNeedsImage(it);
+      const classification = answerClassification(it, this.readMaterial(id));
+      it.local.answerOnly = classification.answerOnly; it.local.classifiedBy = classification.classifiedBy; it.local.classificationReason = classification.reason;
+      it.local.answerSource = answerNeedsSource(it);
+      it.local.answerImage = answerNeedsImage(it);
       const policy = dispatchPolicy(it, [...this.items.values()].filter(i => !isSubmitted(i)), this.adapter.parallel, this.freeMemory());
       if ((!it.local.worktree || it.local.parked) && !policy.allowed) {
         it.local.queued = true; this.saveState();
@@ -2561,7 +2586,7 @@ export class RuntimeSession {
       this.saveState();
       return {
         validateAnswer, finishAnswer,
-        ok: true, resume: resume || null, answerOnly: it.local.answerOnly, worktreeRoot: wtRoot, checkoutRoot: wtRoot, folder: this.repository.folder, matchRoot: wtMatchRoot, linked, movedDraftAnswer, brief, ports, workerStopAt: context.workerStopAt,
+        ok: true, resume: resume || null, answerOnly: it.local.answerOnly, classifiedBy: it.local.classifiedBy, worktreeRoot: wtRoot, checkoutRoot: wtRoot, folder: this.repository.folder, matchRoot: wtMatchRoot, linked, movedDraftAnswer, brief, ports, workerStopAt: context.workerStopAt,
         answer: it.local.startedAt ? answerPaths(wtMatchRoot, id) : undefined,
         note: linked.some((l) => l.includes('TEST_DATABASE_URL')) ? 'This copy got its own TEST_DATABASE_URL (tests truncate between cases, so copies must not share one).' : undefined,
         next: `Spawn team_feature_worker with fork_turns:"none". Pass paths, not pasted material: item ${id}, checkoutRoot/worktreeRoot ${wtRoot}, folder ${this.repository.folder}, matchRoot ${wtMatchRoot}, briefFile ${brief.briefFile}, filesDir ${brief.filesDir}, and the returned answer paths. Add scope and a time box ending by workerStopAt. ${resume ? `RESUME preserved commit ${resume.commit}; do only: ${resume.remainingStep}.` : ""} Use brief ports dev=${ports.dev}, production=${ports.production}; override fixed runner ports. The worker commits its complete item, returns READY/PARKED, and never delegates, pushes or calls Game APIs.`,

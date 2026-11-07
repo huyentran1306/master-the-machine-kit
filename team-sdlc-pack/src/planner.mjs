@@ -17,7 +17,7 @@ export function heavyOptions(o = {}) {
   return { ...HEAVY_DEFAULTS, ...(o || {}) };
 }
 
-/** Conservative classifier: an explicit label is certain; otherwise require two strong signals. */
+/** Only an explicit organizer label defers work; other size signals are scheduling hints. */
 export function detectHeavy(it, items = [], opts = {}) {
   const o = heavyOptions(opts);
   if (o.mode === 'normal' || it.type === 'PI') return { heavy: false, reason: null };
@@ -25,7 +25,6 @@ export function detectHeavy(it, items = [], opts = {}) {
   const description = String(it.description || '');
   const first = description.split(/\r?\n/, 1)[0] || '';
   if (/\[\s*heavy[\s-]*task\s*\]|^\s*heavy[\s-]*task\s*[:-]|\(heavy\)/i.test(`${title}\n${first}`)) return { heavy: true, reason: 'title prefix' };
-  if (it.type === 'TASK' && it.local?.answerOnly) return { heavy: false, reason: null };
   const points = Number(it.maxPoints) || 0;
   const peers = items.filter(x => x !== it && x.type !== 'PI' && Number(x.maxPoints) > 0).map(x => Number(x.maxPoints)).sort((a, b) => a - b);
   const median = peers.length ? peers.length % 2 ? peers[(peers.length - 1) / 2] : (peers[peers.length / 2 - 1] + peers[peers.length / 2]) / 2 : 0;
@@ -34,7 +33,7 @@ export function detectHeavy(it, items = [], opts = {}) {
   if (points >= o.minPoints || median > 0 && points >= 1.5 * median) signals.push(`high points ${points}`);
   if (description.length > o.minDescriptionChars || criteria >= o.minCriteria) signals.push(description.length > o.minDescriptionChars ? `long description ${description.length}` : `many criteria ${criteria}`);
   if (/\b(?:token[- ]heavy|heavy|large\s+(?:refactor|migration)|multiple\s+(?:screens|modules|pages)|end[- ]to[- ]end|full\s+(?:rewrite|module))\b/i.test(description)) signals.push('heavy wording');
-  return signals.length >= 2 ? { heavy: true, reason: signals.join('; ') } : { heavy: false, reason: null };
+  return signals.length >= 2 ? { heavy: false, reason: null, hint: signals.join('; ') } : { heavy: false, reason: null };
 }
 
 export function plannerOptions(o = {}) {

@@ -48,9 +48,10 @@ function fixture(t) {
 
 test('gate runs the item\'s own tests with direct binaries and tells code failures from environment trouble', async (t) => {
   const { s, app, mode } = fixture(t);
+  s.items.get('BUG-91').type = 'PI'; s.items.get('BUG-91').local.answerOnly = true;
   mode('green');
   const g = await s.gate({ backlogItemKey: 'BUG-91' });
-  assert.equal(g.verdict, 'GREEN'); assert.equal(g.scope, 'item'); assert.deepEqual(g.files, ['tests/bug-91.test.ts']);
+  assert.equal(g.verdict, 'GREEN'); assert.equal(g.scope, 'item'); assert.equal(g.codeChanged, true); assert.deepEqual(g.files, ['tests/bug-91.test.ts']);
   const gateLog = fs.readFileSync(path.join(s.checkoutRoot, '.mtm-notes', 'gate-BUG-91-tests.log'), 'utf8');
   assert.match(gateLog, /ran run tests\/bug-91\.test\.ts/);
   assert.match(gateLog, /freelanceos_match_test_match_gate_bug_91_1/);
@@ -69,6 +70,19 @@ test('gate runs the item\'s own tests with direct binaries and tells code failur
   const late = await s.gate({ backlogItemKey: 'BUG-91', budgetSec: 2 });
   assert.match(late.next, /Push and submit_work BUG-91 NOW/);
   assert.equal((await s.gate({ backlogItemKey: 'NOPE-1' })).error, 'UNKNOWN_ITEM');
+});
+
+test('an answer-first PI uses schema gate when its integrated diff changes only answers', async t => {
+  const { s, mode } = fixture(t); mode('green');
+  const base = git(s.checkoutRoot, 'rev-parse', 'HEAD');
+  const dir = path.join(s.matchRoot, 'answers', 'PI-01'); fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'submit.json'), '{"backlogId":"PI-01","status":"DONE"}\n');
+  git(s.checkoutRoot, 'add', '-A'); git(s.checkoutRoot, 'commit', '-qm', 'PI-01: answer');
+  s.items.set('PI-01', { id: 'PI-01', type: 'PI', description: 'Then fix the fault in the application source.', local: { startedAt: Date.now(), answerOnly: true,
+    worktree: { mainBefore: base, integrationBase: base, integratedSha: git(s.checkoutRoot, 'rev-parse', 'HEAD') } } });
+  const out = await s.gate({ backlogItemKey: 'PI-01' });
+  assert.equal(out.verdict, 'GREEN'); assert.equal(out.scope, 'schema'); assert.equal(out.codeChanged, false);
+  assert.match(out.note, /only the answer contract/);
 });
 
 test('an urgent deadline ship interrupts a running non-deadline gate without a code-failure rollback', async t => {
@@ -143,9 +157,11 @@ test('ship goes READY -> integrate -> gate -> BACKLOG_TESTS -> push -> submit ->
     return c;
   };
   await mk('BUG-71');
+  s.items.get('BUG-71').local.answerOnly = true; // starting hint must not suppress reporting for a code diff
   mode('green');
   const r = await s.ship({ backlogItemKey: 'BUG-71' });
   assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.gate.scope, 'item');
   assert.deepEqual(r.steps.map((x) => x.step), ['integrate', 'gate', 'push', 'submit', 'remove']);
   assert.equal(git(remote, 'rev-parse', 'main'), s.items.get('BUG-71').local.worktree?.integratedSha ?? git(root, 'rev-parse', 'HEAD'));
   assert.equal(submits[0].gitRevision, git(root, 'rev-parse', 'HEAD'));

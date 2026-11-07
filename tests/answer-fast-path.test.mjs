@@ -6,6 +6,8 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { finishAnswer } from '../team-sdlc-pack/src/finish-answer.mjs';
 import { answerDigest, answerNeedsSource, answerNeedsImage } from '../team-sdlc-pack/src/item-brief.mjs';
+import { answerOnly } from '../team-sdlc-pack/src/dispatch.mjs';
+import { RuntimeSession } from '../team-sdlc-pack/src/runtime-session.mjs';
 
 const pack = path.resolve('team-sdlc-pack/src');
 const schema = { type: 'object', required: ['backlogId', 'status', 'rootCauseRelease'], properties: { backlogId: { type: 'string' }, status: { enum: ['DONE', 'PARTIAL', 'BLOCKED'] }, rootCauseRelease: { type: 'string', minLength: 1 } } };
@@ -43,7 +45,7 @@ test('finish-answer refuses an invalid answer and commits a valid one', () => {
   fs.writeFileSync(r.file, JSON.stringify({ backlogId: 'PI-01', status: 'DONE', rootCauseRelease: 'rel-1' }));
   const ok = finishAnswer(r.file, r.schemaFile, { message: 'PI-01: answer' });
   assert.equal(ok.ok, true);
-  assert.match(ok.block, /^STATUS: READY\nCOMMIT: [0-9a-f]{40}/);
+  assert.match(ok.block, /^STATUS: READY\nSCOPE: answer\nCOMMIT: [0-9a-f]{40}/);
   assert.equal(execFileSync('git', ['log', '-1', '--format=%s'], { cwd: r.root, encoding: 'utf8' }).trim(), 'PI-01: answer');
   assert.deepEqual(ok.dirty, []);
 });
@@ -51,7 +53,7 @@ test('finish-answer refuses an invalid answer and commits a valid one', () => {
 test('answer digest has item, template, KB once, and one UTC line per log entry', () => {
   const kbText = { ok: true, raw: { content: [{ type: 'text', text: JSON.stringify({ articles: [{ id: 'KB-INC-01', title: 'Incident report rules', body: 'Use names exactly as logged.' }] }) }] } };
   const md = answerDigest({
-    item: { id: 'PI-01', description: 'Clients receive reminders.' },
+    item: { id: 'PI-01', title: 'Reminder incident', description: 'Clients receive reminders.', acceptanceCriteria: ['Find the cause', 'Correct it if required'] },
     material: {
       submitTemplate: { backlogId: 'PI-01', status: 'NOT_STARTED' },
       mcpMaterial: [
@@ -67,6 +69,8 @@ test('answer digest has item, template, KB once, and one UTC line per log entry'
     },
   });
   assert.match(md, /Clients receive reminders/);
+  assert.match(md, /Requirements \/ acceptance criteria/);
+  assert.match(md, /Correct it if required/);
   assert.match(md, /"status": "NOT_STARTED"/);
   assert.equal(md.match(/KB-INC-01/g).length, 1);
   assert.match(md, /2026-10-27T00:00:00Z \(logged 2026-10-27T07:00:00\+07:00\) \| INFO \| deploy \| d-1 \| rel-1 deployed \| \{"flag":"x.y"\}/);
@@ -91,6 +95,19 @@ test('issued source directories and image-only answers are detected generically'
   assert.equal(answerNeedsSource({ type: 'PI', description: 'Incident in src/server/payments/' }), false);
   assert.equal(answerNeedsImage({ type: 'PI', description: 'Production image shows an outage.' }), false);
   assert.equal(answerNeedsSource({ type: 'TASK', description: 'Inspect https://example.test/app/dashboard for values.' }), false);
+});
+
+test('source and image detectors raise effort but leave answer classification unchanged', () => {
+  const s = new RuntimeSession(); s.match.endsAt = Date.now() + 30 * 60000;
+  for (const [item, flag, detect] of [
+    [{ id: 'TASK-S', type: 'TASK', description: 'Answer the question from the issued source under src/rules.ts.' }, 'answerSource', answerNeedsSource],
+    [{ id: 'TASK-I', type: 'TASK', description: 'Answer the question shown in the image data/audit.png.' }, 'answerImage', answerNeedsImage],
+  ]) {
+    const initial = answerOnly(item); assert.equal(initial, true); assert.equal(detect(item), true);
+    item.local = { answerOnly: initial, [flag]: true };
+    assert.equal(s.workerEffort(item, { answerOnly: initial }), 'medium');
+    assert.equal(item.local.answerOnly, initial);
+  }
 });
 
 test('failingTests reads vitest and jest failure names, so baseline-only failures can be told apart', async () => {

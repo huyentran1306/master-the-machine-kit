@@ -31,7 +31,7 @@ const oneLine = (v) => (typeof v === 'string' ? v : JSON.stringify(v)).replace(/
 const textOf = (result) => (result?.raw?.content || []).filter((c) => c?.type === 'text').map((c) => c.text).join('\n');
 const utc = (ts) => { const t = Date.parse(ts ?? ''); return Number.isNaN(t) ? String(ts ?? '?') : new Date(t).toISOString().replace('.000Z', 'Z'); };
 
-/** Answer-only questions that explicitly require repository truth must not use the digest-only fast path. */
+/** Starting-effort hint: repository truth needs a source digest even when the item begins answer-first. */
 export function answerNeedsSource(item = {}) {
   if (item.type === 'PI') return false;
   const text = `${item.title || ''}\n${item.description || ''}`.replace(/https?:\/\/\S+/gi, '');
@@ -81,13 +81,14 @@ function sourceDigest(root, item, cap = 12000) {
 }
 
 /**
- * One file with everything an answer-only item needs, in reading order: item text, answer template, every KB
+ * One file with the full item and answer material in reading order: item text, answer template, every KB
  * article fetched, test data and every production log line (UTC, oldest first, one per line). In EFMN62ZO the
  * PI-01 worker spent 4 tool turns (~20 s) opening brief.json, the raw MCP JSON (truncated at 19,678 tokens) and a
  * python dump before it could reason.
  */
 export function answerDigest({ item, material, source = '' }) {
-  const out = [`# ${item.id} digest: everything needed for the answer`, '', '## Item', '', String(item.description || item.title || '').trim(), ''];
+  const out = [`# ${item.id} digest: everything needed for the answer`, '', '## Item', '', String(item.title || '').trim(), '', String(item.description || '').trim(), ''];
+  if (item.acceptanceCriteria != null) out.push('### Requirements / acceptance criteria', '', typeof item.acceptanceCriteria === 'string' ? item.acceptanceCriteria : JSON.stringify(item.acceptanceCriteria, null, 2), '');
   if (material.startInstruction) out.push(`Start instruction: ${oneLine(material.startInstruction)}`, '');
   if (material.submitTemplate) out.push('## Answer template (keep every key; set status DONE)', '', '```json', JSON.stringify(material.submitTemplate, null, 2), '```', '');
   const seenKb = new Set();

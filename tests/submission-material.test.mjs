@@ -339,3 +339,13 @@ test('answer-only submission validates shipped schema without a suite or test lo
   assert.ok(invalid.errors.some(e => e.includes('submit.schema.json')));
   assert.ok(invalid.errors.every(e => !e.includes('test run')));
 });
+
+test('answer-first classification cannot waive test evidence when the submitted diff changes app code', async t => {
+  const f = fixture(t); const item = f.s.items.get('TASK-91');
+  item.description = 'Question first; correct the repository if required.'; item.local.answerOnly = true;
+  f.s.lastTests = {}; f.s.materialCache['TASK-91'] = { requiredEvidence: [], files: {} };
+  f.write('src/change.ts', 'export const changed = true;\n'); f.commit();
+  const out = await f.submit();
+  assert.equal(out.refused, true);
+  assert.ok(out.errors.some(e => /no test run reported/.test(e)), out.errors.join('\n'));
+});

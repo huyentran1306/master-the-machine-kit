@@ -532,8 +532,7 @@ test('deadline READY preempts parked and newly revealed items and gates other in
   assert.equal((await s.worktree({ action: 'integrate', backlogItemKey: 'TASK-92' })).error, 'DEADLINE_READY_FIRST');
   const integrated = await s.worktree({ action: 'integrate', backlogItemKey: 'BUG-91' });
   assert.equal(integrated.ok, true, JSON.stringify(integrated));
-  assert.match(integrated.next, /item's own tests \+ typecheck/);
-  assert.doesNotMatch(integrated.next, /full suite/);
+  assert.match(integrated.next, /schema only unless the worker diff changes the app/);
 });
 
 test('READY cannot keep waiting for an unshipped dependency inside the last five minutes', async t => {
@@ -590,9 +589,10 @@ test('dispatch_ready dispatches every open item in one call and respawns workers
   s.phase = 'GAME'; s.match.status = 'IN_PROGRESS'; s.match.endsAt = Date.now() + 30 * 60000;
   s.modelPolicy = { orchestratorModel: 'gpt-6.1-sol', allowedModels: ['gpt-6-luna', 'gpt-6.1-terra', 'gpt-6.1-sol'] };
   for (const [id, type] of [['BUG-31', 'BUG'], ['CR-32', 'CR'], ['PI-33', 'PI'], ['TASK-34', 'TASK']]) {
-    s.items.set(id, { id, type, revealedAt: Date.now() - 2 * 60000, local: { startedAt: Date.now() } });
+    s.items.set(id, { id, type, ...(id === 'PI-33' ? { description: 'Then fix the fault in the application source.' } : {}), revealedAt: Date.now() - 2 * 60000, local: { startedAt: Date.now() } });
     s.materialCache[id] = { files: {}, submitTemplate: { backlogId: id } };
   }
+  assert.equal(rank([{ id: 'PI-33', type: 'PI', description: 'Then fix the fault in the application source.', local: {} }], Date.now(), s.match.endsAt).ranked[0].tier, 0);
   assert.match(s.view().alerts[0], /^!! DISPATCH NOW: .*BUG-31 \(open 2\.0m\).*CR-32.*PI-33.*TASK-34/);
   const first = await s.dispatch_ready();
   assert.equal(first.ok, true);
@@ -610,6 +610,9 @@ test('dispatch_ready dispatches every open item in one call and respawns workers
   }
   assert.ok(first.spawn.every(sp => ['low', 'medium'].includes(sp.reasoningEffort)));
   assert.equal(first.spawn.find(sp => sp.id === 'BUG-31').reasoningEffort, 'medium');
+  assert.equal(first.spawn.find(sp => sp.id === 'PI-33').answerOnly, true, 'PI wording is only a starting hint');
+  assert.match(task(first.spawn.find(sp => sp.id === 'PI-33')), /Do everything the item's requirements ask\. If the item asks to change the application, make the change, run the relevant tests, and commit it with the answer\./);
+  assert.match(task(first.spawn.find(sp => sp.id === 'PI-33')), /SCOPE: answer or SCOPE: answer\+code/);
   assert.match(task(first.spawn.find(sp => sp.id === 'BUG-31')), /Builds: `node ".*build-lock\.mjs" --slots \d+ -- <build command>`/);
   assert.match(first.next, /reasoning_effort/);
   assert.match(first.next, /model = entry\.model/);

@@ -124,11 +124,12 @@ test('orchestrator dispatches every item with a bounded completion and event loo
 test('worker owns the complete lifecycle and compact committed result', () => {
   const text = read('agents/team-feature-worker.toml');
   for (const phrase of ['playbook', 'reproduce', 'fix', 'full suite', 'typecheck', 'build', 'QA data',
-    'engineering record', 'Self-review inline', 'final commit', 'STATUS: READY | PARKED', 'COMMIT:',
+    'engineering record', 'Self-review inline', 'final commit', 'STATUS: READY | PARKED', 'SCOPE: answer | answer+code', 'COMMIT:',
     'TESTS:', 'CHECKS:', 'EVIDENCE:', 'REVIEW:', 'RISKS:', 'CONTRADICTION:', 'TEST-CHANGE',
     'Never call Game APIs', 'Never push', 'brief.ports.dev', 'brief.ports.production', 'TEST_DATABASE_URL',
     'workerStopAt', '-Tail 15', 'View each screenshot at most once']) assert.ok(text.includes(phrase), phrase);
   assert.doesNotMatch(text, /Never commit/);
+  assert.doesNotMatch(text, /Skip code changes/);
   for (const kind of ['bug', 'cr', 'pi', 'task']) {
     const playbook = read(`skills/backlog-${kind}/SKILL.md`);
     assert.match(playbook, /READY\/PARKED/);

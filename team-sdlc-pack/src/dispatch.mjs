@@ -24,22 +24,39 @@ export function availableMemory({ platform = process.platform, readVmStat = () =
   return os.freemem();
 }
 
-export function answerOnly(item, material = {}) {
-  if (item.type === 'PI') {
-    const text = [item.title, item.description, item.acceptanceCriteria, material.startInstruction].map(v => typeof v === 'string' ? v : JSON.stringify(v || '')).join(' ');
-    const mvs = material.minimumVerificationScenarios;
-    const hasMvs = mvs != null && !['', '[]', '{}', 'null', '""'].includes(JSON.stringify(mvs));
-    return !hasMvs && !/\b(?:fix|hotfix|patch|repair|implement|change|update|modify)\b.{0,80}\b(?:application|app|code|source|function|endpoint|component|service)\b/i.test(text);
+const meaningfulMvs = value => value != null && !['', '[]', '{}', 'null', '""'].includes(JSON.stringify(value))
+  && !/^(?:none|n\/a|no (?:runnable )?(?:mvs|tests|scenarios)(?: to run)?)[.!]?$/i.test(String(value).trim());
+const objectKeys = value => {
+  const out = [];
+  const walk = v => { if (!v || typeof v !== 'object') return; for (const [k, child] of Object.entries(v)) { out.push(k.toLowerCase().replace(/[^a-z0-9]/g, '')); walk(child); } };
+  walk(value); return out;
+};
+
+/** Starting-lane hint only. The worker reads the full item; the integration gate later trusts the diff. */
+export function answerClassification(item, material = {}) {
+  if (meaningfulMvs(material.minimumVerificationScenarios)) return { answerOnly: false, classifiedBy: 'structure', reason: 'minimumVerificationScenarios' };
+  const contractKeys = objectKeys(material.submitTemplate);
+  for (const [name, raw] of Object.entries(material.files || {})) {
+    if (!/submit.*schema\.json$/i.test(name)) continue;
+    try { contractKeys.push(...objectKeys(typeof raw === 'string' ? JSON.parse(raw) : raw)); } catch { /* malformed schema is handled elsewhere */ }
   }
-  if (item.type !== 'TASK') return false;
+  if (contractKeys.some(k => ['testresults', 'evidence', 'evidencerows'].includes(k))) return { answerOnly: false, classifiedBy: 'structure', reason: 'submit contract carries verification rows' };
+  const required = material.requiredEvidence || [];
+  if (required.some(e => e?.strict !== false && /\.(?:log|png|jpe?g|webp|gif)$/i.test(String(e?.name || e)))) return { answerOnly: false, classifiedBy: 'structure', reason: 'required verification artifact' };
+  if (Object.entries(material.files || {}).some(([name, body]) => /\.(?:mjs|cjs|sh|ps1)$/i.test(name) && (typeof body === 'string' && (/^#!/.test(body) || /\b(?:process\.exit|assert\s*\()/i.test(body))))) {
+    return { answerOnly: false, classifiedBy: 'structure', reason: 'shipped runner script' };
+  }
+  if (item.type === 'PI') return { answerOnly: true, classifiedBy: 'hint', reason: 'PI starts in answer lane; worker and diff decide scope' };
+  if (item.type !== 'TASK') return { answerOnly: false, classifiedBy: 'hint', reason: 'code-item type' };
   const text = [item.title, item.description, item.acceptanceCriteria, material.startInstruction].map(v => typeof v === 'string' ? v : JSON.stringify(v || '')).join(' ');
   const prose = text.replace(/\b(?:no|without|do not|don't)\s+(?:source\s+|code\s+)?(?:changes?|edits?|modifications?|implementation)(?:\s+(?:needed|required))?/gi, '');
-  if (/\b(?:implement|fix|refactor|repair|debug)\b/i.test(prose)) return false;
-  if (/\b(?:build|add|modify|change|update)\b.{0,50}\b(?:code|component|endpoint|function|feature|route|page|schema|test|app)\b/i.test(prose)) return false;
-  const mvs = material.minimumVerificationScenarios;
-  const hasMvs = mvs != null && !['', '[]', '{}', 'null', '""'].includes(JSON.stringify(mvs)) && !/^(?:none|n\/a|no (?:runnable )?(?:mvs|tests|scenarios)(?: to run)?)[.!]?$/i.test(String(mvs).trim());
-  return !hasMvs && /\b(?:question|answer|values?|report[ -]only|calculate|compute|identify)\b/i.test(text);
+  const answerHint = /\b(?:question|answer|values?|report[ -]only|calculate|compute|identify)\b/i.test(text);
+  const codeHint = /\b(?:implement|fix|refactor|repair|debug)\b/i.test(prose)
+    || /\b(?:build|add|modify|change|update)\b.{0,50}\b(?:code|component|endpoint|function|feature|route|page|schema|test|app)\b/i.test(prose);
+  return { answerOnly: answerHint || !codeHint && /\bno code changes required\b/i.test(text), classifiedBy: 'hint', reason: answerHint ? 'answer wording' : codeHint ? 'code wording' : 'no answer hint' };
 }
+
+export function answerOnly(item, material = {}) { return answerClassification(item, material).answerOnly; }
 
 export function dispatchPolicy(item, items, parallel = {}, freeBytes = availableMemory()) {
   const codeWorkers = items.filter(i => i.id !== item.id && i.local?.worktree && !(i.local?.answerOnly ?? answerOnly(i)) && !i.local?.parked && !i.local?.ready && !i.local?.submittedAt && !i.local?.receiptId).length;
@@ -53,8 +70,10 @@ export function dispatchPolicy(item, items, parallel = {}, freeBytes = available
   return { allowed: !reason, reason, codeWorkers, maxCodeWorkers, answerWorkers, maxAnswerWorkers, freeRamGB, minFreeRamGB };
 }
 
-export function integrationGate(item) {
-  return (item.local?.answerOnly ?? answerOnly(item)) ? 'schema only' : item.deadlineAt != null ? "item's own tests + typecheck" : 'full suite + typecheck; build if needed';
+export function integrationGate(item, { codeChanged } = {}) {
+  if (codeChanged === false) return 'schema only';
+  if (codeChanged === true) return item.deadlineAt != null ? "item's own tests + typecheck" : 'full suite + typecheck; build if needed';
+  return 'schema only unless the worker diff changes the app; then tests + typecheck';
 }
 
 /** Promise pool: independent items overlap without unbounded network fan-out. */

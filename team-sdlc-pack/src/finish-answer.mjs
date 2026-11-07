@@ -27,6 +27,7 @@ export function finishAnswer(answerFile, schemaFile, { required = [], message } 
     .filter((l) => !/(^|\/)node_modules(\/|$)/.test(l));
   const block = [
     'STATUS: READY',
+    'SCOPE: answer',
     `COMMIT: ${commit}`,
     `TESTS: required=0 executed=1 passed=1 failed=0 skipped=0; finish-answer validated submit.json${schemaFile ? ' against the shipped schema' : ''}`,
     'CHECKS: full-suite=NOT_RUN typecheck=NOT_RUN build=NOT_RUN; build-relevant=no (answer-only)',

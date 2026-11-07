@@ -1,32 +1,43 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { answerOnly, dispatchPolicy, integrationGate, BuildQueue, mapBounded } from '../team-sdlc-pack/src/dispatch.mjs';
+import { answerOnly, answerClassification, dispatchPolicy, integrationGate, BuildQueue, mapBounded } from '../team-sdlc-pack/src/dispatch.mjs';
 import { buildChecklist } from '../team-sdlc-pack/src/checklist.mjs';
 import { RuntimeSession } from '../team-sdlc-pack/src/runtime-session.mjs';
 import { detectHeavy } from '../team-sdlc-pack/src/planner.mjs';
 
-test('heavy classifier is certain on labels and conservative without them', () => {
+test('only an explicit heavy label defers; inferred size is logged as a hint', () => {
   const peers = [{ type: 'CR', maxPoints: 100 }, { type: 'BUG', maxPoints: 140 }];
   assert.deepEqual(detectHeavy({ type: 'CR', title: '[Heavy Task] migrate reports', local: {} }, peers), { heavy: true, reason: 'title prefix' });
   assert.equal(detectHeavy({ type: 'CR', title: 'Normal export', maxPoints: 140, description: 'Add one export.', local: {} }, peers).heavy, false);
   const inferred = detectHeavy({ type: 'CR', title: 'Platform update', maxPoints: 300, description: 'large migration '.repeat(700), local: {} }, peers);
-  assert.equal(inferred.heavy, true); assert.match(inferred.reason, /high points.*long description/);
+  assert.equal(inferred.heavy, false); assert.match(inferred.hint, /high points.*long description/);
   assert.equal(detectHeavy({ type: 'PI', title: '[Heavy Task] incident', maxPoints: 500, local: {} }, peers).heavy, false);
   assert.equal(detectHeavy({ type: 'TASK', title: '[Heavy Task] analyse logs', local: { answerOnly: true } }, peers).heavy, true,
     'an explicit organizer label overrides the answer-only fast-path exclusion');
   assert.equal(detectHeavy({ type: 'CR', title: '[Heavy Task] x', local: {} }, peers, { mode: 'normal' }).heavy, false);
+  const s = new RuntimeSession();
+  s.items.set('CR-HINT', { id: 'CR-HINT', type: 'CR', title: 'Large item', maxPoints: 300, description: 'large migration '.repeat(700), local: {} });
+  s.items.set('BUG-PEER', { id: 'BUG-PEER', type: 'BUG', maxPoints: 100, local: {} });
+  s.refreshHeavyFlags();
+  assert.equal(s.items.get('CR-HINT').local.heavy, false);
+  assert.match(s.pendingEvents.find(e => e.kind === 'HEAVY_HINT')?.text || '', /not deferred without an explicit label/);
 });
 
-test('classify PI and answer TASKs without putting code or runnable MVS on the fast path', () => {
+test('structural verification selects code while wording only hints at the starting lane', () => {
   assert.equal(answerOnly({ type: 'PI' }), true);
-  assert.equal(answerOnly({ type: 'PI', description: 'Hotfix: fix the application endpoint now.' }), false);
+  assert.equal(answerOnly({ type: 'PI', description: 'Then fix the fault in the application source.' }), true);
   assert.equal(answerOnly({ type: 'PI' }, { minimumVerificationScenarios: [{ id: 'PI-TC-01' }] }), false);
-  for (const description of ['Question: calculate the total.', 'Return answer values; no code changes required.', 'Report-only: identify the total.']) {
+  for (const description of ['Question: calculate the total.', 'Return answer values; no code changes required.', 'Report-only: identify the total.', 'Update the component documentation table in the answer.']) {
     assert.equal(answerOnly({ type: 'TASK', description }), true, description);
   }
-  for (const item of [{ type: 'BUG', description: 'Answer why this fails.' }, { type: 'TASK', description: 'Question: implement a function to calculate values.' }, { type: 'TASK', description: 'Update the page and report values.' }, { type: 'TASK', description: 'Fix the answer calculation.' }, { type: 'TASK' }]) assert.equal(answerOnly(item), false);
+  for (const item of [{ type: 'BUG', description: 'Answer why this fails.' }, { type: 'TASK', description: 'Fix the calculation.' }, { type: 'TASK' }]) assert.equal(answerOnly(item), false);
   assert.equal(answerOnly({ type: 'TASK', title: 'Question' }, { minimumVerificationScenarios: [{ id: 'case-a', command: 'node verify.mjs' }] }), false);
   assert.equal(answerOnly({ type: 'TASK', title: 'Question' }, { minimumVerificationScenarios: 'No tests to run' }), true);
+  assert.deepEqual(answerClassification({ type: 'TASK', title: 'Question' }, { minimumVerificationScenarios: [{ id: 'case-a' }] }), { answerOnly: false, classifiedBy: 'structure', reason: 'minimumVerificationScenarios' });
+  assert.equal(answerClassification({ type: 'TASK', title: 'Question' }, { submitTemplate: { testResults: [] } }).classifiedBy, 'structure');
+  assert.equal(answerClassification({ type: 'TASK', title: 'Question' }, { requiredEvidence: [{ name: 'run.log', strict: true }] }).classifiedBy, 'structure');
+  assert.equal(answerClassification({ type: 'TASK', title: 'Question' }, { files: { 'qa/check.mjs': 'import assert from "node:assert"; assert(1);' } }).classifiedBy, 'structure');
+  assert.equal(answerClassification({ type: 'TASK', title: 'Question' }).classifiedBy, 'hint');
   const checklist = buildChecklist({ id: 'TASK-91', type: 'TASK', answerOnly: true, commands: { test: 'npm test', typecheck: 'tsc' } });
   assert.match(checklist.text, /shipped schema/);
   assert.doesNotMatch(checklist.text, /run npm test|Run tsc|test\.log/);
@@ -78,11 +89,10 @@ test('shared build leases enforce configured concurrency, FIFO, idempotence and 
 });
 
 test('integration gates select schema only, deadline item tests, or ordinary regression checks', () => {
-  assert.equal(integrationGate({ type: 'PI', deadlineAt: 123 }), 'schema only');
-  assert.equal(integrationGate({ type: 'TASK', local: { answerOnly: true } }), 'schema only');
-  assert.equal(integrationGate({ type: 'TASK', title: 'Question', local: { answerOnly: false }, deadlineAt: 123 }), "item's own tests + typecheck");
-  assert.equal(integrationGate({ type: 'BUG', deadlineAt: 123 }), "item's own tests + typecheck");
-  assert.equal(integrationGate({ type: 'BUG' }), 'full suite + typecheck; build if needed');
+  assert.equal(integrationGate({ type: 'PI', deadlineAt: 123 }, { codeChanged: false }), 'schema only');
+  assert.equal(integrationGate({ type: 'PI', deadlineAt: 123 }, { codeChanged: true }), "item's own tests + typecheck");
+  assert.equal(integrationGate({ type: 'BUG' }, { codeChanged: true }), 'full suite + typecheck; build if needed');
+  assert.match(integrationGate({ type: 'TASK' }), /unless the worker diff changes the app/);
 });
 
 test('bounded material pool overlaps work and isolates per-item errors', async () => {

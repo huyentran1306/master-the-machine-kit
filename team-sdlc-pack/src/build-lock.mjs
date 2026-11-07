@@ -66,19 +66,22 @@ async function main() {
   const sep = argv.indexOf('--');
   const opts = sep >= 0 ? argv.slice(0, sep) : [];
   const cmd = sep >= 0 ? argv.slice(sep + 1) : argv;
-  if (!cmd.length) { console.error('usage: build-lock.mjs [--slots 2] [--max-wait-ms 60000] [--dir D] -- <command...>'); process.exit(2); }
+  if (!cmd.length) { console.error('usage: build-lock.mjs [--slots 2] [--max-wait-ms 120000] [--fail-closed] [--dir D] -- <command...>'); process.exit(2); }
   const get = (k, d) => { const i = opts.indexOf(k); return i >= 0 ? opts[i + 1] : d; };
   const slots = Math.max(1, Number(get('--slots', process.env.MTM_MAX_BUILDS || 2)) || 2);
-  const maxWaitMs = Math.max(0, Number(get('--max-wait-ms', process.env.MTM_BUILD_LOCK_WAIT_MS || 60000)) || 60000);
+  const maxWaitMs = Math.max(0, Number(get('--max-wait-ms', process.env.MTM_BUILD_LOCK_WAIT_MS || 120000)) || 120000);
+  const failClosed = opts.includes('--fail-closed');
   const dir = get('--dir', slotDirFor(process.cwd()));
   const t0 = Date.now();
   const slot = await acquire(dir, slots, { maxWaitMs });
   const waited = Math.round((Date.now() - t0) / 100) / 10;
-  if (!slot) {
+  // Default: a worker never stalls on capacity. After the bounded wait it runs without a slot (the RAM
+  // guard still stops new workers). --fail-closed keeps the strict behaviour (exit 75, nothing started).
+  if (!slot && failClosed) {
     console.error(`[build-lock] no free slot after ${waited}s: command not started (capacity exit 75; retry later)`);
     process.exit(75);
   }
-  console.error(`[build-lock] slot ${path.basename(slot)} after ${waited}s`);
+  console.error(slot ? `[build-lock] slot ${path.basename(slot)} after ${waited}s` : `[build-lock] no free slot after ${waited}s: running anyway so the item does not stall`);
   const child = spawn(cmd[0], cmd.slice(1), { stdio: 'inherit', shell: process.platform === 'win32' });
   const stop = (sig) => { try { child.kill(sig); } catch { /* gone */ } };
   process.on('SIGINT', () => stop('SIGINT')); process.on('SIGTERM', () => stop('SIGTERM'));

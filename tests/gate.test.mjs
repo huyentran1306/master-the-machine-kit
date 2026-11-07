@@ -86,15 +86,16 @@ test('an answer-first PI uses schema gate when its integrated diff changes only 
   assert.match(out.note, /only the answer contract/);
 });
 
-test('integration gate shares heavy capacity and starts nothing when every slot is occupied', async t => {
+test('integration gate waits briefly for heavy capacity, then runs anyway so shipping never stalls', async t => {
   const { s, mode } = fixture(t); mode('green');
   s.adapter.parallel.maxHeavySteps = 1; s.adapter.parallel.heavyStepWaitMs = 100;
   const held = await acquire(slotDirFor(s.checkoutRoot), 1); t.after(() => release(held));
-  const blocked = await s.gate({ backlogItemKey: 'BUG-91' });
-  assert.equal(blocked.verdict, 'ENVIRONMENT'); assert.equal(blocked.error, 'HEAVY_CAPACITY');
-  assert.equal(fs.existsSync(path.join(s.checkoutRoot, '.mtm-notes', 'gate-BUG-91-tests.log')), false);
+  const r = await s.gate({ backlogItemKey: 'BUG-91' });
+  assert.equal(r.verdict, 'GREEN'); assert.equal(s.state.gateWithoutSlot, 1);
+  assert.equal(fs.existsSync(path.join(s.checkoutRoot, '.mtm-notes', 'gate-BUG-91-tests.log')), true);
   release(held);
   assert.equal((await s.gate({ backlogItemKey: 'BUG-91' })).verdict, 'GREEN');
+  assert.equal(s.state.gateWithoutSlot, 1, 'a free slot is used when there is one');
 });
 
 test('an urgent deadline ship interrupts a running non-deadline gate without a code-failure rollback', async t => {

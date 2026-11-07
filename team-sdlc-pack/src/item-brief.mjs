@@ -135,20 +135,22 @@ export function answerDigest({ item, material, source = '' }) {
     }
     out.push('Format: timestamp-UTC | level | service | requestId | message | other fields', '', '```text');
     const entries = l.entries || [];
-    const groups = entries.length > 160 ? [entries.slice(0, 80), entries.slice(-80)] : [entries];
-    let rendered = 0;
-    for (const group of groups) {
-      let groupChars = 0; const groupBudget = groups.length === 2 ? 16000 : 32000;
-      for (const e of group) {
-        const { timestamp, time, ts, level, service, requestId, message, ...rest } = e || {};
-        const raw = timestamp ?? time ?? ts;
-        const shown = utc(raw) + (raw && !/Z$/.test(String(raw)) ? ` (logged ${raw})` : '');
-        const line = [shown, level ?? '', service ?? '', requestId ?? '', oneLine(message ?? ''), Object.keys(rest).length ? oneLine(rest) : ''].join(' | ').slice(0, 2000);
-        if (groupChars + line.length > groupBudget) break;
-        out.push(line); groupChars += line.length + 1; rendered += 1;
-      }
-    }
-    if (rendered < entries.length) out.push(`…(${entries.length - rendered} log entries omitted from the digest; read the full merged response under files/mcp/ only if needed)`);
+    const lineOf = (e) => {
+      const { timestamp, time, ts, level, service, requestId, message, ...rest } = e || {};
+      const raw = timestamp ?? time ?? ts;
+      const shown = utc(raw) + (raw && !/Z$/.test(String(raw)) ? ` (logged ${raw})` : '');
+      return [shown, level ?? '', service ?? '', requestId ?? '', oneLine(message ?? ''), Object.keys(rest).length ? oneLine(rest) : ''].join(' | ').slice(0, 2000);
+    };
+    // Budget ~32k chars. Incident answers live mostly in non-INFO lines, so those are kept first (all of
+    // them when they fit); the rest of the budget takes INFO lines from both ends. Output stays oldest first.
+    const lines = entries.map(lineOf); const keep = new Set(); let used = 0; const budget = 32000;
+    const take = (i) => { if (keep.has(i) || used + lines[i].length + 1 > budget) return false; keep.add(i); used += lines[i].length + 1; return true; };
+    const quiet = (e) => /^(?:info|debug|trace)$/i.test(String(e?.level ?? 'info'));
+    entries.forEach((e, i) => { if (!quiet(e)) take(i); });
+    for (let a = 0, b = entries.length - 1; a <= b; a += 1, b -= 1) { const x = take(a); const y = a !== b && take(b); if (!x && !y) break; }
+    const shownIdx = [...keep].sort((x, y) => x - y);
+    for (const i of shownIdx) out.push(lines[i]);
+    if (shownIdx.length < entries.length) out.push(`…(${entries.length - shownIdx.length} log entries omitted from the digest, all INFO/DEBUG unless noted above; read the full merged response under files/mcp/ or run your mtm-query command if an answer depends on them)`);
     out.push('```', '');
   }
   if (source) out.push('## Issued application source', '', 'Answer from this source; read more files under src/ only if a needed function is missing here.', source, '');

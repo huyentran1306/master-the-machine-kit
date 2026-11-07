@@ -77,7 +77,7 @@
     "maxWorkerThreads": 10,
     "maxBuilds": 2,
     "maxHeavySteps": 2,
-    "heavyStepWaitMs": 60000,
+    "heavyStepWaitMs": 120000,
     "minFreeRamGBAll": 1.5,
     "materialConcurrency": 4,
     "portBase": 3100,

@@ -80,6 +80,10 @@ test('answer digest has item, template, KB once, and one UTC line per log entry'
   assert.ok(bounded.length < 40000, `digest too large: ${bounded.length}`);
   assert.match(bounded, /log entries omitted from the digest/);
   assert.match(bounded, /entry-0/); assert.match(bounded, /entry-999/);
+  const mixed = many.map((e, n) => n === 500 ? { ...e, level: 'ERROR', message: 'the incident line in the middle' } : { ...e, level: 'INFO' });
+  const kept = answerDigest({ item: { id: 'PI-02' }, material: { mcpMaterial: [{ purpose: 'logs', tool: 'search_logs-merged', ok: true, result: { unique: mixed.length, entries: mixed } }] } });
+  assert.match(kept, /the incident line in the middle/, 'ERROR/WARN lines survive the digest budget');
+  assert.ok(kept.indexOf('entry-0 ') < kept.indexOf('the incident line') && kept.indexOf('the incident line') < kept.indexOf('entry-999'), 'oldest first');
 });
 
 test('source-reading TASKs are separated from KB-only fast answers and receive issued source', () => {

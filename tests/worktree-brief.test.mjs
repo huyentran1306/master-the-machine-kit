@@ -640,7 +640,7 @@ test('dispatch_ready dispatches every open item in one call and respawns workers
   assert.equal(first.spawn.find(sp => sp.id === 'PI-33').answerOnly, true, 'PI wording is only a starting hint');
   assert.match(task(first.spawn.find(sp => sp.id === 'PI-33')), /Do everything the item's requirements ask\. If the item asks to change the application, make the change, run the relevant tests, and commit it with the answer\./);
   assert.match(task(first.spawn.find(sp => sp.id === 'PI-33')), /SCOPE: answer or SCOPE: answer\+code/);
-  assert.match(task(first.spawn.find(sp => sp.id === 'BUG-31')), /Builds, full test suites and browser\/e2e runs: `node ".*build-lock\.mjs" --slots 2 -- <command>`/);
+  assert.match(task(first.spawn.find(sp => sp.id === 'BUG-31')), /Builds, full test suites and browser\/e2e runs: `node ".*build-lock\.mjs" --slots 2 --max-wait-ms 120000 -- <command>` \(takes a free slot itself; after 120 s it runs anyway/);
   assert.match(task(first.spawn.find(sp => sp.id === 'BUG-31')), /query it yourself with `node ".*mtm-query\.mjs" --token-file ".*query-token\.json" --item BUG-31/, 'code workers can read KB/logs themselves');
   assert.equal(first.spawn.find(sp => sp.id === 'PI-33').reasoningEffort, 'medium');
   assert.match(task(first.spawn.find(sp => sp.id === 'BUG-31')), /Redirect long output .* print only its last 20 lines/);

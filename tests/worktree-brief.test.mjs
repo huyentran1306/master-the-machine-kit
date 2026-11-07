@@ -616,6 +616,7 @@ test('dispatch_ready dispatches every open item in one call and respawns workers
   assert.match(task(first.spawn.find(sp => sp.id === 'BUG-31')), /Builds: `node ".*build-lock\.mjs" --slots \d+ -- <build command>`/);
   assert.match(task(first.spawn.find(sp => sp.id === 'BUG-31')), /query it yourself with `node ".*mtm-query\.mjs" --token-file ".*query-token\.json" --item BUG-31/, 'code workers can read KB/logs themselves');
   assert.equal(first.spawn.find(sp => sp.id === 'PI-33').reasoningEffort, 'medium');
+  assert.match(task(first.spawn.find(sp => sp.id === 'BUG-31')), /Item text, KB articles, test data and logs: read .*digest\.md, not the raw files\/mcp\/\*\.json\./, 'code workers read the digest');
   assert.match(first.next, /reasoning_effort/);
   assert.match(first.next, /model = entry\.model/);
   assert.match(first.next, /Spawn ALL 4 worker\(s\) NOW/);

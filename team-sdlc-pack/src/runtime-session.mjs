@@ -24,6 +24,7 @@ import { materializeAnswer, answerPaths, countScenarios, checkAnswer } from './a
 import { rank, alerts as plannerAlerts, diffItems, isSubmitted, isClosed, effectiveLeft, detectHeavy, heavyOptions } from './planner.mjs';
 import { recon } from './recon.mjs';
 import { ensureRepoMap } from './repo-map.mjs';
+import { ensureCodeIndex } from './code-index.mjs';
 import { guardBaseline } from './baseline-guard.mjs';
 import { validate, validateFinalResult } from './schema.mjs';
 import { McpHttpClient, resultText } from './mcp-http.mjs';
@@ -1214,7 +1215,12 @@ export class RuntimeSession {
     const matchRoot = this.itemMatchRoot(id);
     const worktreeRoot = item.local?.worktree?.worktreeRoot || this.checkoutRoot;
     return writeItemBrief({ checkoutRoot: this.checkoutRoot, worktreeRoot, matchRoot, item, material,
-      commands: this.commands, context: this.briefContext(item, worktreeRoot, matchRoot) });
+      commands: this.commands, context: this.briefContext(item, worktreeRoot, matchRoot), corpus: this.itemCorpus(id) });
+  }
+
+  /** Other backlog items' text: words shared by many items are submission boilerplate, not code terms. */
+  itemCorpus(id) {
+    return [...this.items.values()].filter(i => i.id !== id).map(i => `${i.title || ''}\n${i.description || ''}`);
   }
 
   briefContext(it, worktreeRoot = this.checkoutRoot, matchRoot = this.matchRoot) {
@@ -1363,7 +1369,7 @@ export class RuntimeSession {
     const brief = context ? writeItemBrief({
       checkoutRoot: this.checkoutRoot, worktreeRoot: context.checkoutRoot, matchRoot: root,
       item: { ...it, description: it.description || textBlockFor(this.lastPageText || '', id) || '' },
-      material, commands: this.commands, context,
+      material, commands: this.commands, context, corpus: this.itemCorpus(id),
     }) : null;
     if (compact) return this.clean({
       ok: !!brief, ...(brief ? {} : { error: 'MATCH_ROOT_MISSING' }), id, type: it.type,
@@ -1965,6 +1971,8 @@ export class RuntimeSession {
     if (!this.matchRoot || !fs.existsSync(this.matchRoot)) return { ok: false, error: 'NO_MATCH_ROOT', message: 'Check out the repository first.' };
     const map = recon(this.matchRoot);
     Object.assign(map, ensureRepoMap({ checkoutRoot: this.checkoutRoot, matchRoot: this.matchRoot, recon: map }));
+    // Built once per match right after the fresh clone; every item's likely-files.md is ranked from it.
+    map.codeIndex = ensureCodeIndex({ checkoutRoot: this.checkoutRoot, matchRoot: this.matchRoot });
     this.stackSkill = map.stackSkill || null;
     this.appPath = map.app?.path && map.app.path !== '.' ? path.join(this.matchRoot, map.app.path) : this.matchRoot;
     // Keep the commands: start_work names the real test command in each item's checklist.
@@ -2185,7 +2193,7 @@ export class RuntimeSession {
       const entry = {
         id: r.id, type: it.type, answerOnly: !!c.answerOnly,
         taskName: `${r.id.toLowerCase().replace(/[^a-z0-9]/g, '')}${it.local.dispatches > 1 ? `r${it.local.dispatches}` : ''}`,
-        message: `${resumeText}${baselineFixText}${baselineWaitText}${doEverything}Item ${r.id} (${it.type}${c.answerOnly ? ', answer-first hint' : ''}).${c.answerOnly ? ` FAST PATH (points drop with every minute${it.type === 'PI' ? ', PI is ranked by submit order: every turn counts' : ''}). No preamble, no progress or send_message updates. 1) ${answerRead} 2) Decide every field (UTC-normalise mixed offsets, dedupe retries, keep corrected entries, ignore decoys), then write ${c.answer?.submitJson || 'submit.json'} in one edit, keeping every template key. 3) For SCOPE: answer run \`${c.finishAnswer || c.validateAnswer}\`${c.finishAnswer ? ' (validates the schema and commits the answer folder); on ANSWER INVALID fix and rerun' : ', then commit'}; for SCOPE: answer+code run the relevant tests and commit code, tests and answer together instead. 4) Reply with the STATUS block including SCOPE. If a fact is truly missing reply NEED_INFO: <what> (logs: service + narrowing word). No extra evidence or test.log unless requiredEvidence lists it; never install validators.` : `${queryCmd ? ` If a fact (KB rule, log line, test data) is missing, query it yourself with \`${queryCmd}\`; NEED_INFO only if the read tool cannot answer.` : ''} Check the answer with \`${c.validateAnswer}\` (no installs). Builds: \`node "${BUILD_LOCK}" --slots ${this.adapter.parallel.maxBuilds || 2} -- <build command>\` (takes a free build slot itself; never ask the orchestrator for build_slot).`} checkoutRoot = worktreeRoot = ${c.worktreeRoot}; folder ${c.folder}; matchRoot ${c.matchRoot}; briefFile ${c.brief?.briefFile}; filesDir ${c.brief?.filesDir}; answer ${c.answer?.submitJson || ''} (evidence in ${c.answer?.evidenceDir || ''}); ports dev=${c.ports?.dev} production=${c.ports?.production} (override fixed runner ports). ${c.answerOnly && c.brief?.digestPath ? 'Start with digestPath; if the requirements need app changes, then read briefFile and its code-lifecycle material.' : 'Read briefFile first: it has the commands, playbook, checklist and organizer files.'} Work only in this worktree. Stop and return by ${stop} (Game Master clock). Commit the complete item (code, tests, evidence, answer) and reply STATUS READY or PARKED with COMMIT <sha> and SCOPE. Never push, submit, delegate or call Game APIs.`,
+        message: `${resumeText}${baselineFixText}${baselineWaitText}${doEverything}Item ${r.id} (${it.type}${c.answerOnly ? ', answer-first hint' : ''}).${c.answerOnly ? ` FAST PATH (points drop with every minute${it.type === 'PI' ? ', PI is ranked by submit order: every turn counts' : ''}). No preamble, no progress or send_message updates. 1) ${answerRead} 2) Decide every field (UTC-normalise mixed offsets, dedupe retries, keep corrected entries, ignore decoys), then write ${c.answer?.submitJson || 'submit.json'} in one edit, keeping every template key. 3) For SCOPE: answer run \`${c.finishAnswer || c.validateAnswer}\`${c.finishAnswer ? ' (validates the schema and commits the answer folder); on ANSWER INVALID fix and rerun' : ', then commit'}; for SCOPE: answer+code run the relevant tests and commit code, tests and answer together instead. 4) Reply with the STATUS block including SCOPE. If a fact is truly missing reply NEED_INFO: <what> (logs: service + narrowing word). No extra evidence or test.log unless requiredEvidence lists it; never install validators.` : `${c.brief?.digestPath ? ` Item text, KB articles, test data and logs: read ${c.brief.digestPath}, not the raw files/mcp/*.json.` : ''}${c.brief?.likelyFilesPath ? ` Code search: start from ${c.brief.likelyFilesPath} (files ranked by this item's words, with symbols, imports and related tests); confirm with \`rg -n -m 20 <term> <those paths>\` before any repo-wide search.` : ''}${queryCmd ? ` If a fact (KB rule, log line, test data) is missing, query it yourself with \`${queryCmd}\`; NEED_INFO only if the read tool cannot answer.` : ''} Check the answer with \`${c.validateAnswer}\` (no installs). Builds: \`node "${BUILD_LOCK}" --slots ${this.adapter.parallel.maxBuilds || 2} -- <build command>\` (takes a free build slot itself; never ask the orchestrator for build_slot).`} checkoutRoot = worktreeRoot = ${c.worktreeRoot}; folder ${c.folder}; matchRoot ${c.matchRoot}; briefFile ${c.brief?.briefFile}; filesDir ${c.brief?.filesDir}; answer ${c.answer?.submitJson || ''} (evidence in ${c.answer?.evidenceDir || ''}); ports dev=${c.ports?.dev} production=${c.ports?.production} (override fixed runner ports). ${c.answerOnly && c.brief?.digestPath ? 'Start with digestPath; if the requirements need app changes, then read briefFile and its code-lifecycle material.' : 'Read briefFile first: it has the commands, playbook, checklist and organizer files.'} Work only in this worktree. Stop and return by ${stop} (Game Master clock). Commit the complete item (code, tests, evidence, answer) and reply STATUS READY or PARKED with COMMIT <sha> and SCOPE. Never push, submit, delegate or call Game APIs.`,
       };
       entry.reasoningEffort = this.workerEffort(it, c);
       const model = this.workerModel(it, c);
@@ -2564,7 +2572,7 @@ export class RuntimeSession {
       const brief = writeItemBrief({
         checkoutRoot: this.checkoutRoot, worktreeRoot: wtRoot, matchRoot: wtMatchRoot,
         item: { ...it, description: it.description || textBlockFor(this.lastPageText || '', id) || '' },
-        material, commands: this.commands, context,
+        material, commands: this.commands, context, corpus: this.itemCorpus(id),
       });
       const linked = linkDependencies(this.matchRoot, wtMatchRoot, { envSuffix: `_wt_${id.toLowerCase().replace(/[^a-z0-9]+/g, '_')}` });
       it.local.worktree.envIsolated = linked.some((l) => l.includes('TEST_DATABASE_URL'));

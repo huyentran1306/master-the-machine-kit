@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ensureExcluded } from './git.mjs';
 import { extractRequiredEvidence } from './required-evidence.mjs';
+import { ensureCodeIndex, loadCodeIndex, likelyFiles, renderLikelyFiles } from './code-index.mjs';
 
 // Start Work files are data. Reject path traversal on both Windows and POSIX, even when
 // a pack is tested on a different OS from the eventual contest machine.
@@ -50,8 +51,18 @@ function sourceTerms(item) {
     .filter(w => !stop.has(w)).slice(0, 24);
 }
 
-function sourceDigest(root, item, cap = 12000) {
+function sourceDigest(root, item, cap = 12000, ranked = []) {
   if (!root || !fs.existsSync(root)) return '';
+  if (ranked.length) {
+    // Files ranked by the code index (built after the fresh clone) replace the 500-file term scan.
+    let out = '';
+    for (const file of ranked.slice(0, 8)) {
+      let text = ''; try { text = fs.readFileSync(file.abs, 'utf8'); } catch { continue; }
+      const room = cap - out.length; if (room < 200) break;
+      out += `\n### ${file.path}\n\n\`\`\`\n${text.slice(0, Math.max(0, room - file.path.length - 20))}\n\`\`\`\n`;
+    }
+    if (out) return out.slice(0, cap);
+  }
   const terms = sourceTerms(item); const candidates = []; const todo = [root]; let scanned = 0;
   while (todo.length && scanned < 500) {
     const dir = todo.pop();
@@ -133,7 +144,7 @@ export function answerDigest({ item, material, source = '' }) {
 }
 
 /** Materialize a self-contained handoff within the child's permitted match folder. */
-export function writeItemBrief({ checkoutRoot, worktreeRoot = checkoutRoot, matchRoot, item, material, commands = {}, context = {} }) {
+export function writeItemBrief({ checkoutRoot, worktreeRoot = checkoutRoot, matchRoot, item, material, commands = {}, context = {}, corpus = [] }) {
   if (!material) throw new Error('Start Work material is missing; start the item before creating its worktree.');
   const folder = path.relative(worktreeRoot, matchRoot).replace(/\\/g, '/');
   partsOf(folder);
@@ -172,13 +183,28 @@ export function writeItemBrief({ checkoutRoot, worktreeRoot = checkoutRoot, matc
     requiredEvidence: material.requiredEvidence ?? extractRequiredEvidence(item, material), mcpMaterial,
     commands, files, repoMapPath, baselinePath, ...context,
   };
-  if (context.answerOnly) {
-    try {
-      const source = context.answerSource ? sourceDigest(context.appPath || matchRoot, item) : '';
-      brief.digestPath = writeInside(matchRoot, `${relative}/digest.md`, answerDigest({ item, material, source }) + '\n');
-    } catch { /* the raw files stay */ }
-  }
+  // Likely files: ranked from the item's own text against the per-match code index (paths relative to matchRoot).
+  let ranked = [];
+  try {
+    if (checkoutRoot && matchRoot) {
+      if (!loadCodeIndex(checkoutRoot)) ensureCodeIndex({ checkoutRoot, matchRoot: path.join(checkoutRoot, path.relative(worktreeRoot, matchRoot)) });
+      const idx = loadCodeIndex(checkoutRoot);
+      const text = [item.description, typeof item.acceptanceCriteria === 'string' ? item.acceptanceCriteria : JSON.stringify(item.acceptanceCriteria ?? ''), material.startInstruction].filter(Boolean).join('\n');
+      const result = likelyFiles(idx, text, { title: item.title || '', corpus });
+      const md = renderLikelyFiles(result, matchRoot);
+      if (md) {
+        brief.likelyFilesPath = writeInside(matchRoot, `${relative}/likely-files.md`, md);
+        ranked = result.files.map(f => ({ ...f, abs: path.join(matchRoot, f.path) }));
+      }
+    }
+  } catch { /* the index is a hint; the worker can still search */ }
+  // One readable file for item text, KB articles, test data and logs: answer items read only this,
+  // code items read it instead of the raw files/mcp/*.json (CR-07 in UDLWEWFR cat'd 41k chars of raw JSON).
+  try {
+    const source = context.answerOnly && context.answerSource ? sourceDigest(context.appPath || matchRoot, item, 12000, ranked) : '';
+    brief.digestPath = writeInside(matchRoot, `${relative}/digest.md`, answerDigest({ item, material, source }) + '\n');
+  } catch { /* the raw files stay */ }
   const briefFile = writeInside(matchRoot, `${relative}/brief.json`, JSON.stringify(brief, null, 2) + '\n');
   fs.mkdirSync(filesDir, { recursive: true });
-  return { briefFile, filesDir, files, repoMapPath, baselinePath, digestPath: brief.digestPath ?? null };
+  return { briefFile, filesDir, files, repoMapPath, baselinePath, digestPath: brief.digestPath ?? null, likelyFilesPath: brief.likelyFilesPath ?? null };
 }

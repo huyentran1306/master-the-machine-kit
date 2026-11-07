@@ -241,3 +241,25 @@ test('an ordinary item that cannot start (its own lane is full) does not hold a 
   s.items.set('TASK-2', { ...s.items.get('TASK-2'), local: { answerOnly: true, ready: true } });
   assert.equal(s.heavyDispatchDecision(s.items.get('CR-H')).allowed, false, 'once TASK-3 can start it goes before the heavy item');
 });
+
+test('a queued item comes back by itself: RAM recovers or a thread frees, and the next wait_for_update poll dispatches it', async () => {
+  const s = new RuntimeSession({ adapter: { parallel: { maxWorkerThreads: 4, maxAnswerWorkers: 6, maxCodeWorkers: 6 } } });
+  const now = Date.now();
+  s.phase = 'GAME'; s.match.status = 'IN_PROGRESS'; s.match.endsAt = now + 40 * 60000; s.now = () => now;
+  let ram = 0.5 * 1024 ** 3; s.freeMemory = () => ram;
+  s.items.set('TASK-Q', { id: 'TASK-Q', type: 'TASK', local: { answerOnly: true, startedAt: now, queued: true } });
+  assert.equal(s.hasDispatchAction(), false, 'LOW_RAM: waits');
+  ram = 4 * 1024 ** 3;
+  assert.equal(s.hasDispatchAction(), true, 'RAM recovered: wait_for_update returns and auto-dispatches');
+  for (const id of ['BUG-1', 'BUG-2']) s.items.set(id, { id, type: 'BUG', local: { worktree: {}, startedAt: now } });
+  assert.equal(s.hasDispatchAction(), false, 'THREAD_LIMIT (4 - 2 reserved): waits');
+  s.items.get('BUG-1').local.ready = true;
+  assert.equal(s.hasDispatchAction(), true, 'a worker returned READY: its thread is free again');
+  // wait_for_update re-checks on every poll, not only on page changes.
+  s.items.get('BUG-1').local.ready = false; let polls = 0;
+  s.doRefresh = async () => { polls += 1; if (polls === 2) s.items.get('BUG-1').local.ready = true; return { ok: true, events: [] }; };
+  s.withLock = fn => fn(); s.adapter.polling = { ...s.adapter.polling, successMs: 10, maxWaitMs: 2000 };
+  let dispatched = false; s.withAutoDispatch = async r => { dispatched = true; return r; };
+  const r = await s.wait_for_update({ timeoutMs: 2000 });
+  assert.equal(dispatched, true, JSON.stringify(r).slice(0, 200)); assert.equal(polls, 2);
+});

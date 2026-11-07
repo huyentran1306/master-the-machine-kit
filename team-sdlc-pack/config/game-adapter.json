@@ -66,6 +66,7 @@
     "mode": "last",
     "startAfter": "othersDispatched",
     "minMinutesLeft": 0,
+    "maxParallel": 2,
     "minPoints": 200,
     "minDescriptionChars": 6000,
     "minCriteria": 12

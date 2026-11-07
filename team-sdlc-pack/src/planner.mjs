@@ -11,7 +11,7 @@ export const PLANNER_DEFAULTS = {
   typeOrder: { PI: 0, BUG: 1, TASK: 2, CR: 3 },
 };
 
-export const HEAVY_DEFAULTS = { mode: 'last', startAfter: 'othersDone', minMinutesLeft: 15, minPoints: 200, minDescriptionChars: 6000, minCriteria: 12 };
+export const HEAVY_DEFAULTS = { mode: 'last', startAfter: 'othersDispatched', minMinutesLeft: 0, maxParallel: 2, minPoints: 200, minDescriptionChars: 6000, minCriteria: 12 };
 
 export function heavyOptions(o = {}) {
   return { ...HEAVY_DEFAULTS, ...(o || {}) };

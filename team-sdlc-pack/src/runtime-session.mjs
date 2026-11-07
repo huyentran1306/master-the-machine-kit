@@ -63,7 +63,7 @@ export const DEFAULT_ADAPTER = {
   polling: { successMs: 5000, errorMs: 10000, backgroundMs: 20000, maxWaitMs: 55000 },
   submit: { acceptedStatuses: ['ACCEPTED', 'RECEIVED'], retryBudgetMs: SUBMIT_LIMITS.retryMs },
   planner: {},
-  heavyTask: { mode: 'last', startAfter: 'othersDone', minMinutesLeft: 15, minPoints: 200, minDescriptionChars: 6000, minCriteria: 12 },
+  heavyTask: { mode: 'last', startAfter: 'othersDispatched', minMinutesLeft: 0, maxParallel: 2, minPoints: 200, minDescriptionChars: 6000, minCriteria: 12 },
   parallel: { maxCodeWorkers: 5, maxBuilds: 2, materialConcurrency: 4, portBase: 3100, workerModels: DEFAULT_WORKER_MODELS },
 };
 
@@ -152,11 +152,13 @@ export class RuntimeSession {
     if (it.local.heavyGaveUp) return { allowed: false, reason: 'HEAVY_GAVE_UP', detail: 'two red gates' };
     const { left } = effectiveLeft(it, this.now(), this.match.endsAt);
     if (left != null && left < cfg.minMinutesLeft) return { allowed: false, reason: 'HEAVY_DEFERRED', detail: `${left.toFixed(1)}m left < ${cfg.minMinutesLeft}m` };
-    const otherHeavy = items.some(x => x !== it && x.local?.heavy && x.local?.worktree && !x.local?.ready && !isSubmitted(x));
-    if (otherHeavy) return { allowed: false, reason: 'HEAVY_DEFERRED', detail: 'another heavy worker is active' };
+    const activeHeavy = items.filter(x => x !== it && x.local?.heavy && x.local?.worktree && !x.local?.ready && !isSubmitted(x)).length;
+    if (activeHeavy >= Math.max(1, Number(cfg.maxParallel) || 2)) return { allowed: false, reason: 'HEAVY_DEFERRED', detail: `${activeHeavy} heavy worker(s) already active` };
     const unavailable = (x) => ['LOCKED', 'HIDDEN', 'UPCOMING'].includes(x.availability) || x.local?.notOpenRefused;
     const openPi = items.some(x => x.type === 'PI' && !unavailable(x) && !isSubmitted(x) && !isClosed(x, this.now()) && !x.local?.worktree && !x.local?.spawnEntry);
     if (openPi) return { allowed: false, reason: 'HEAVY_DEFERRED', detail: 'PI is waiting for a worker' };
+    // UDLWEWFR: TASK-10 (heavy, own 30-min deadline) expired unstarted. A heavy item with its own deadline only yields to PI.
+    if (it.deadlineAt != null) return { allowed: true };
     const now = this.now();
     const plan = rank(items, now, this.match.endsAt, this.plannerOpts());
     const rankedIds = new Set(plan.ranked.filter(r => r.id !== it.id && !items.find(x => x.id === r.id)?.local?.heavy && r.action !== 'submit').map(r => r.id));

@@ -97,7 +97,7 @@ test('wait_for_update wakes immediately when a queued code item becomes dispatch
 });
 
 test('a deferred heavy item does not wake dispatch while ordinary work is active', () => {
-  const s = new RuntimeSession();
+  const s = new RuntimeSession({ adapter: { heavyTask: { startAfter: 'othersDone' } } });
   s.phase = 'GAME'; s.match.status = 'IN_PROGRESS'; s.match.endsAt = Date.now() + 30 * 60000; s.freeMemory = () => 8 * 1024 ** 3;
   s.items.set('CR-HEAVY', { id: 'CR-HEAVY', type: 'CR', title: '[Heavy Task] rewrite module', maxPoints: 300, local: {} });
   s.items.set('BUG-1', { id: 'BUG-1', type: 'BUG', title: 'Normal bug', maxPoints: 100, local: { startedAt: Date.now(), worktree: {} } });
@@ -107,6 +107,27 @@ test('a deferred heavy item does not wake dispatch while ordinary work is active
   assert.ok(!view.alerts.some(a => /DISPATCH NOW.*CR-HEAVY/.test(a)), JSON.stringify(view.alerts));
 });
 
+test('default heavy policy starts a heavy item once every other open item has a worker', () => {
+  const s = new RuntimeSession();
+  s.phase = 'GAME'; s.match.status = 'IN_PROGRESS'; s.match.endsAt = Date.now() + 3 * 60000; s.freeMemory = () => 8 * 1024 ** 3;
+  s.items.set('CR-HEAVY', { id: 'CR-HEAVY', type: 'CR', title: '[Heavy Task] rewrite module', maxPoints: 300, local: {} });
+  s.items.set('BUG-1', { id: 'BUG-1', type: 'BUG', title: 'Normal bug', maxPoints: 100, local: { startedAt: Date.now(), worktree: {} } });
+  assert.equal(s.hasDispatchAction(), true, 'no othersDone wait and no minimum time left by default');
+});
+
+test('two heavy items run in parallel, and a heavy item with its own deadline only yields to PI', () => {
+  const s = new RuntimeSession();
+  const now = Date.now();
+  s.phase = 'GAME'; s.match.status = 'IN_PROGRESS'; s.match.endsAt = now + 30 * 60000; s.now = () => now;
+  s.items.set('TASK-H1', { id: 'TASK-H1', type: 'TASK', title: '[Heavy Task] archive audit', maxPoints: 100, local: { heavy: true, worktree: { matchRoot: '/x' }, startedAt: now } });
+  s.items.set('TASK-H2', { id: 'TASK-H2', type: 'TASK', title: '[Heavy Task] sync storm', maxPoints: 100, deadlineAt: now + 20 * 60000, local: {} });
+  s.items.set('BUG-OPEN', { id: 'BUG-OPEN', type: 'BUG', local: {} });
+  s.refreshHeavyFlags();
+  assert.equal(s.heavyDispatchDecision(s.items.get('TASK-H2')).allowed, true, 'own deadline: does not wait for BUG-OPEN, second heavy allowed');
+  s.items.set('PI-1', { id: 'PI-1', type: 'PI', title: 'Incident', local: {} });
+  assert.equal(s.heavyDispatchDecision(s.items.get('TASK-H2')).allowed, false, 'an open PI still goes first');
+});
+
 test('heavy time, skip/normal modes and PI priority are enforced in code', () => {
   const make = (minutes, heavyTask) => {
     const s = new RuntimeSession({ adapter: { heavyTask } });
@@ -114,7 +135,7 @@ test('heavy time, skip/normal modes and PI priority are enforced in code', () =>
     s.items.set('CR-H', { id: 'CR-H', type: 'CR', title: '[Heavy Task] migration', maxPoints: 300, local: {} });
     return s;
   };
-  assert.equal(make(14).hasDispatchAction(), false, 'less than 15 minutes never starts heavy');
+  assert.equal(make(14, { minMinutesLeft: 15 }).hasDispatchAction(), false, 'an explicit minMinutesLeft still applies');
   assert.equal(make(30, { mode: 'skip' }).hasDispatchAction(), false);
   assert.equal(make(30, { mode: 'normal' }).hasDispatchAction(), true);
   const pi = make(30);

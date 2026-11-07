@@ -76,6 +76,8 @@
     "maxAnswerWorkers": 6,
     "maxWorkerThreads": 14,
     "maxBuilds": 2,
+    "maxHeavySteps": 3,
+    "minFreeRamGBAll": 1,
     "materialConcurrency": 4,
     "portBase": 3100,
     "workerEffort": { "answerOnly": "low", "pi": "medium", "code": "medium", "retry": "high" },

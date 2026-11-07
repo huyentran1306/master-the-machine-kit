@@ -73,7 +73,10 @@ export function dispatchPolicy(item, items, parallel = {}, freeBytes = available
   const maxWorkerThreads = Math.max(2, Math.floor(Number(parallel.maxWorkerThreads) || 14));
   const urgent = item.type === 'PI' || item.deadlineAt != null || !!item.local?.parked || !!item.local?.orphaned;
   const threadCap = urgent ? maxWorkerThreads : maxWorkerThreads - 2;
+  // Machine guard for every lane: below 1 GB available nothing new starts except PI (answer workers are
+  // light, but each still holds a Codex thread and may open a browser). Running workers are never stopped.
   const reason = liveWorkers >= threadCap ? 'THREAD_LIMIT'
+    : item.type !== 'PI' && freeRamGB < Math.min(minFreeRamGB, Number(parallel.minFreeRamGBAll) || 1) ? 'LOW_RAM'
     : item.type === 'PI' ? null : isAnswer ? answerWorkers >= maxAnswerWorkers ? 'ANSWER_WORKER_LIMIT' : null : codeWorkers >= maxCodeWorkers ? 'CODE_WORKER_LIMIT' : freeRamGB < minFreeRamGB ? 'LOW_RAM' : null;
   return { allowed: !reason, reason, codeWorkers, maxCodeWorkers, answerWorkers, maxAnswerWorkers, liveWorkers, maxWorkerThreads, freeRamGB, minFreeRamGB };
 }

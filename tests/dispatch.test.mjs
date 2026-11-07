@@ -43,7 +43,7 @@ test('structural verification selects code while wording only hints at the start
   assert.doesNotMatch(checklist.text, /run npm test|Run tsc|test\.log/);
 });
 
-test('dispatch gates code on current RAM and active code count, never answer workers', () => {
+test('dispatch gates code on current RAM and active code count; answer workers only on the machine floor', () => {
   const running = Array.from({ length: 6 }, (_, n) => ({ id: `BUG-${n}`, type: 'BUG', local: { worktree: {} } }));
   const code = { id: 'CR-91', type: 'CR' };
   const gb = 1024 ** 3;
@@ -54,7 +54,8 @@ test('dispatch gates code on current RAM and active code count, never answer wor
   running[1].local.parked = { remainingStep: 'verify' };
   running[2].local.ready = true;
   assert.equal(dispatchPolicy(code, running, { maxCodeWorkers: 4 }, 3 * gb).codeWorkers, 3);
-  for (const item of [{ id: 'PI-91', type: 'PI' }, { id: 'TASK-91', type: 'TASK', title: 'Question: answer values' }]) assert.equal(dispatchPolicy(item, running, { maxCodeWorkers: 1 }, 0).allowed, true);
+  assert.equal(dispatchPolicy({ id: 'PI-91', type: 'PI' }, running, { maxCodeWorkers: 1 }, 0).allowed, true);
+  assert.equal(dispatchPolicy({ id: 'TASK-91', type: 'TASK', title: 'Question: answer values' }, running, { maxCodeWorkers: 1 }, 1.1 * gb).allowed, true, 'answer workers only need the 1 GB machine floor');
 });
 
 test('answer workers are capped, PI bypasses caps, and urgent/resume code uses 1.5 GB floor', () => {
@@ -215,4 +216,28 @@ test('thread budget: ordinary items queue at maxWorkerThreads-2, PI/deadline/res
   const done = live(8).map(i => ({ ...i, local: { ...i.local, ready: true } }));
   assert.equal(dispatchPolicy(task, done, p, 10 * gb).allowed, true, 'READY workers have ended');
   assert.equal(dispatchPolicy(task, live(3), {}, 10 * gb).maxWorkerThreads, 14);
+});
+
+test('RAM floor: below 1 GB only PI starts, answer items included; running workers are not counted as stopped', () => {
+  const gb = 1024 ** 3;
+  const answer = { id: 'TASK-1', type: 'TASK', local: { answerOnly: true } };
+  const pi = { id: 'PI-1', type: 'PI', local: {} };
+  assert.equal(dispatchPolicy(answer, [], {}, 0.9 * gb).reason, 'LOW_RAM');
+  assert.equal(dispatchPolicy(answer, [], {}, 1.2 * gb).allowed, true, 'answer workers need only the floor');
+  assert.equal(dispatchPolicy(pi, [], {}, 0.3 * gb).allowed, true);
+  assert.equal(dispatchPolicy(answer, [], { minFreeRamGBAll: 0.5 }, 0.9 * gb).allowed, true, 'configurable');
+});
+
+test('an ordinary item that cannot start (its own lane is full) does not hold a heavy item with a free slot', () => {
+  const s = new RuntimeSession({ adapter: { parallel: { maxAnswerWorkers: 2, maxCodeWorkers: 6, maxWorkerThreads: 14 } } });
+  const now = Date.now();
+  s.phase = 'GAME'; s.match.status = 'IN_PROGRESS'; s.match.endsAt = now + 40 * 60000; s.now = () => now; s.freeMemory = () => 8 * 1024 ** 3;
+  s.items.set('CR-H', { id: 'CR-H', type: 'CR', title: '[Heavy Task] migration', maxPoints: 300, local: {} });
+  for (const id of ['TASK-1', 'TASK-2']) s.items.set(id, { id, type: 'TASK', local: { answerOnly: true, worktree: {}, startedAt: now } });
+  s.items.set('TASK-3', { id: 'TASK-3', type: 'TASK', local: { answerOnly: true, queued: true } });
+  s.refreshHeavyFlags();
+  assert.deepEqual(s.heavyDispatchDecision(s.items.get('CR-H')), { allowed: true }, 'TASK-3 waits for an answer slot; CR-H uses a free code slot');
+  s.items.get('TASK-2').local.worktree = null;
+  s.items.set('TASK-2', { ...s.items.get('TASK-2'), local: { answerOnly: true, ready: true } });
+  assert.equal(s.heavyDispatchDecision(s.items.get('CR-H')).allowed, false, 'once TASK-3 can start it goes before the heavy item');
 });

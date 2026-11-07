@@ -201,12 +201,16 @@ export class RuntimeSession {
     const staleParked = (x) => x.local?.parked && (!x.local.parked.remainingStep || now - (x.local.dispatchedAt || 0) >= IDLE_WORKER_MS);
     const blocks = items.filter(x => {
       if (x === it || x.local?.heavy || unavailable(x) || isSubmitted(x) || isClosed(x, now) || x.local?.ready || staleParked(x) || (x.local?.startRefusals || 0) >= 2) return false;
-      if (cfg.startAfter === 'othersDispatched') return !x.local?.worktree && !x.local?.spawnEntry && rankedIds.has(x.id);
+      // "Còn worker là chạy": an item that cannot start now anyway (its own lane full, e.g. ANSWER_WORKER_LIMIT)
+      // must not hold a heavy item that has a free slot. Shared limits (threads, code slots, RAM) block both.
+      if (cfg.startAfter === 'othersDispatched') return !x.local?.worktree && !x.local?.spawnEntry && rankedIds.has(x.id)
+        && dispatchPolicy(x, items.filter(i => !isSubmitted(i)), this.adapter.parallel, this.freeMemory()).allowed;
       const activeWorker = x.local?.worktree && !x.local?.parked;
       return activeWorker || rankedIds.has(x.id);
     });
     if (blocks.length) return { allowed: false, reason: 'HEAVY_DEFERRED', detail: `${cfg.startAfter}: ${blocks.map(x => x.id).join(', ')} not done` };
-    const deadlinePending = items.some(x => x !== it && !unavailable(x) && x.deadlineAt != null && !isSubmitted(x) && !isClosed(x, now) && !x.local?.ready && !x.local?.worktree && !staleParked(x));
+    const deadlinePending = items.some(x => x !== it && !unavailable(x) && x.deadlineAt != null && !isSubmitted(x) && !isClosed(x, now) && !x.local?.ready && !x.local?.worktree && !staleParked(x)
+      && dispatchPolicy(x, items.filter(i => !isSubmitted(i)), this.adapter.parallel, this.freeMemory()).allowed);
     if (deadlinePending) return { allowed: false, reason: 'HEAVY_DEFERRED', detail: 'deadline item is pending' };
     return { allowed: true };
   }
@@ -1019,6 +1023,12 @@ export class RuntimeSession {
     this.refreshHeavyFlags();
     const plan = rank(items, now, this.match.endsAt, this.plannerOpts());
     const freeBytes = this.freeMemory();
+    if (this.phase === 'GAME' && this.state) {
+      const gb = Math.round(freeBytes / 1024 ** 3 * 10) / 10;
+      const live = items.filter(i => i.local?.worktree && !i.local?.ready && !isSubmitted(i) && !i.local?.parked).length;
+      if (this.state.ramMinGB == null || gb < this.state.ramMinGB) { this.state.ramMinGB = gb; this.state.ramMinAt = new Date(now).toISOString(); this.state.ramMinWorkers = live; }
+      this.state.peakWorkers = Math.max(this.state.peakWorkers || 0, live);
+    }
     const eligible = r => r.action === 'submit' || this.heavyDispatchDecision(this.items.get(r.id), items).allowed && dispatchPolicy(this.items.get(r.id), items.filter(i => !isSubmitted(i)), this.adapter.parallel, freeBytes).allowed;
     const ranked = plan.ranked.filter(eligible);
     const queued = plan.ranked.filter(r => !eligible(r));
@@ -1043,6 +1053,8 @@ export class RuntimeSession {
       ...plannerAlerts(items, now, this.match.endsAt, { current, paused: this.phase === 'PAUSED', status: this.match.status }, this.adapter.planner),
       ...deferredHeavy.map(h => `note: HEAVY ${h.id} deferred (${h.detail}); helper starts it when eligible.`),
       ...baselineDefects.filter(d => d.likelyOwner === 'BASELINE-FIX').map(d => `!! BASELINE DEFECT: ${d.test}. The first code worker fixes it in its item (code or a new migration); never weaken the original test.`),
+      ...(this.phase === 'GAME' && freeBytes / 1024 ** 3 < 1.5
+        ? [`!! LOW_RAM ${(freeBytes / 1024 ** 3).toFixed(1)} GB available: only PI/deadline items start until it recovers. Tell idle workers to stop their dev servers and browsers; never start a build or browser in main.`] : []),
       ...[...(this.localAlerts?.values() || [])].map((t) => `!! ${t}`),
       ...this.logProblems.splice(0).map((t) => `!! progress log: ${t}`),
     ];
@@ -2199,7 +2211,7 @@ export class RuntimeSession {
       const entry = {
         id: r.id, type: it.type, answerOnly: !!c.answerOnly,
         taskName: `${r.id.toLowerCase().replace(/[^a-z0-9]/g, '')}${it.local.dispatches > 1 ? `r${it.local.dispatches}` : ''}`,
-        message: `${resumeText}${baselineFixText}${baselineWaitText}${doEverything}Item ${r.id} (${it.type}${c.answerOnly ? ', answer-first hint' : ''}).${c.answerOnly ? ` FAST PATH (points drop with every minute${it.type === 'PI' ? ', PI is ranked by submit order: every turn counts' : ''}). No preamble, no progress or send_message updates. 1) ${answerRead} 2) Decide every field (UTC-normalise mixed offsets, dedupe retries, keep corrected entries, ignore decoys), then write ${c.answer?.submitJson || 'submit.json'} in one edit, keeping every template key. 3) For SCOPE: answer run \`${c.finishAnswer || c.validateAnswer}\`${c.finishAnswer ? ' (validates the schema and commits the answer folder); on ANSWER INVALID fix and rerun' : ', then commit'}; for SCOPE: answer+code run the relevant tests and commit code, tests and answer together instead. 4) Reply with the STATUS block including SCOPE. Only if your mtm-query command cannot answer, reply NEED_INFO: <what> (logs: service + narrowing word). No extra evidence or test.log unless requiredEvidence lists it; never install validators.` : `${c.brief?.digestPath ? ` Item text, KB articles, test data and logs: read ${c.brief.digestPath}, not the raw files/mcp/*.json.` : ''}${c.brief?.likelyFilesPath ? ` Code search: start from ${c.brief.likelyFilesPath} (files ranked by this item's words, with symbols, imports and related tests); confirm with \`rg -n -m 20 <term> <those paths>\` before any repo-wide search.` : ''}${queryCmd ? ` If a fact (KB rule, log line, test data) is missing, query it yourself with \`${queryCmd}\`; NEED_INFO only if the read tool cannot answer.` : ''} Check the answer with \`${c.validateAnswer}\` (no installs). Builds: \`node "${BUILD_LOCK}" --slots ${this.adapter.parallel.maxBuilds || 2} -- <build command>\` (takes a free build slot itself; never ask the orchestrator for build_slot).`} checkoutRoot = worktreeRoot = ${c.worktreeRoot}; folder ${c.folder}; matchRoot ${c.matchRoot}; briefFile ${c.brief?.briefFile}; filesDir ${c.brief?.filesDir}; answer ${c.answer?.submitJson || ''} (evidence in ${c.answer?.evidenceDir || ''}); ports dev=${c.ports?.dev} production=${c.ports?.production} (override fixed runner ports). ${c.answerOnly && c.brief?.digestPath ? 'Start with digestPath; if the requirements need app changes, then read briefFile and its code-lifecycle material.' : 'Read briefFile first: it has the commands, playbook, checklist and organizer files.'} Work only in this worktree. Stop and return by ${stop} (Game Master clock). Commit the complete item (code, tests, evidence, answer) and reply STATUS READY or PARKED with COMMIT <sha> and SCOPE. Never push, submit, delegate or call Game APIs.`,
+        message: `${resumeText}${baselineFixText}${baselineWaitText}${doEverything}Item ${r.id} (${it.type}${c.answerOnly ? ', answer-first hint' : ''}).${c.answerOnly ? ` FAST PATH (points drop with every minute${it.type === 'PI' ? ', PI is ranked by submit order: every turn counts' : ''}). No preamble, no progress or send_message updates. 1) ${answerRead} 2) Decide every field (UTC-normalise mixed offsets, dedupe retries, keep corrected entries, ignore decoys), then write ${c.answer?.submitJson || 'submit.json'} in one edit, keeping every template key. 3) For SCOPE: answer run \`${c.finishAnswer || c.validateAnswer}\`${c.finishAnswer ? ' (validates the schema and commits the answer folder); on ANSWER INVALID fix and rerun' : ', then commit'}; for SCOPE: answer+code run the relevant tests and commit code, tests and answer together instead. 4) Reply with the STATUS block including SCOPE. Only if your mtm-query command cannot answer, reply NEED_INFO: <what> (logs: service + narrowing word). No extra evidence or test.log unless requiredEvidence lists it; never install validators.` : `${c.brief?.digestPath ? ` Item text, KB articles, test data and logs: read ${c.brief.digestPath}, not the raw files/mcp/*.json.` : ''}${c.brief?.likelyFilesPath ? ` Code search: start from ${c.brief.likelyFilesPath} (files ranked by this item's words, with symbols, imports and related tests); confirm with \`rg -n -m 20 <term> <those paths>\` before any repo-wide search.` : ''}${queryCmd ? ` If a fact (KB rule, log line, test data) is missing, query it yourself with \`${queryCmd}\`; NEED_INFO only if the read tool cannot answer.` : ''} Check the answer with \`${c.validateAnswer}\` (no installs). Builds, full test suites and browser/e2e runs: \`node "${BUILD_LOCK}" --slots ${this.adapter.parallel.maxHeavySteps || 3} -- <command>\` (takes a free slot itself, never waits past 5 min; never ask the orchestrator for build_slot). Single test files run directly. Stop dev servers and browsers as soon as the evidence is captured.`} checkoutRoot = worktreeRoot = ${c.worktreeRoot}; folder ${c.folder}; matchRoot ${c.matchRoot}; briefFile ${c.brief?.briefFile}; filesDir ${c.brief?.filesDir}; answer ${c.answer?.submitJson || ''} (evidence in ${c.answer?.evidenceDir || ''}); ports dev=${c.ports?.dev} production=${c.ports?.production} (override fixed runner ports). ${c.answerOnly && c.brief?.digestPath ? 'Start with digestPath; if the requirements need app changes, then read briefFile and its code-lifecycle material.' : 'Read briefFile first: it has the commands, playbook, checklist and organizer files.'} Work only in this worktree. Stop and return by ${stop} (Game Master clock). Commit the complete item (code, tests, evidence, answer) and reply STATUS READY or PARKED with COMMIT <sha> and SCOPE. Never push, submit, delegate or call Game APIs.`,
       };
       entry.reasoningEffort = this.workerEffort(it, c);
       const model = this.workerModel(it, c);

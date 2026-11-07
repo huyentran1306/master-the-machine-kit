@@ -72,3 +72,16 @@ test('ensureCodeIndex builds once per match after the clone; every item brief ge
   assert.ok(brief.digestPath, 'code items get a digest too');
   assert.match(fs.readFileSync(brief.digestPath, 'utf8'), /KB-SCH-1 Upcoming window[\s\S]*Inclusive of the last day/);
 });
+
+test('a failed index build is not retried for every brief', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kit3-noindex-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, '.mtm-notes'), 'a file where the notes directory should be');
+  const first = ensureCodeIndex({ checkoutRoot: root, matchRoot: root });
+  assert.equal(first.codeIndexPath, null); assert.match(first.codeIndexWarning, /unavailable/);
+  const started = Date.now();
+  assert.equal(ensureCodeIndex({ checkoutRoot: root, matchRoot: root }).codeIndexWarning, first.codeIndexWarning);
+  assert.ok(Date.now() - started < 50);
+  const brief = writeItemBrief({ checkoutRoot: root, matchRoot: path.join(root, 'm'), item: { id: 'BUG-1', type: 'BUG', title: 'x' }, material: { files: {} } });
+  assert.equal(brief.likelyFilesPath, null, 'brief still written without the index');
+});

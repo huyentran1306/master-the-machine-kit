@@ -98,7 +98,12 @@ export function buildCodeIndex(matchRoot, { maxFiles = 8000, budgetMs = 10000 } 
   return { version: 1, builtAt: new Date().toISOString(), ms: Date.now() - started, limited, n: files.length, files, t };
 }
 
+// A failed build is not retried in the same helper process: writeItemBrief runs on every mtm-query result
+// and must never spend the 10 s budget again for an index that cannot be written.
+const failedRoots = new Map();
 export function ensureCodeIndex({ checkoutRoot, matchRoot }) {
+  const key = path.resolve(checkoutRoot || '.');
+  if (failedRoots.has(key)) return { codeIndexPath: null, codeIndexWarning: failedRoots.get(key) };
   try {
     const dir = path.join(path.resolve(checkoutRoot), '.mtm-notes');
     const file = path.join(dir, 'code-index.json');
@@ -110,7 +115,7 @@ export function ensureCodeIndex({ checkoutRoot, matchRoot }) {
       return { codeIndexPath: file, files: idx.n, ms: idx.ms, limited: idx.limited };
     }
     return { codeIndexPath: file };
-  } catch (e) { return { codeIndexPath: null, codeIndexWarning: `Code index unavailable: ${e.message}` }; }
+  } catch (e) { const warning = `Code index unavailable: ${e.message}`; failedRoots.set(key, warning); return { codeIndexPath: null, codeIndexWarning: warning }; }
 }
 
 const cache = new Map();

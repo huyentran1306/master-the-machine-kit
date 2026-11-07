@@ -614,6 +614,8 @@ test('dispatch_ready dispatches every open item in one call and respawns workers
   assert.match(task(first.spawn.find(sp => sp.id === 'PI-33')), /Do everything the item's requirements ask\. If the item asks to change the application, make the change, run the relevant tests, and commit it with the answer\./);
   assert.match(task(first.spawn.find(sp => sp.id === 'PI-33')), /SCOPE: answer or SCOPE: answer\+code/);
   assert.match(task(first.spawn.find(sp => sp.id === 'BUG-31')), /Builds: `node ".*build-lock\.mjs" --slots \d+ -- <build command>`/);
+  assert.match(task(first.spawn.find(sp => sp.id === 'BUG-31')), /query it yourself with `node ".*mtm-query\.mjs" --token-file ".*query-token\.json" --item BUG-31/, 'code workers can read KB/logs themselves');
+  assert.equal(first.spawn.find(sp => sp.id === 'PI-33').reasoningEffort, 'medium');
   assert.match(first.next, /reasoning_effort/);
   assert.match(first.next, /model = entry\.model/);
   assert.match(first.next, /Spawn ALL 4 worker\(s\) NOW/);

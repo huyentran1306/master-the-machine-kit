@@ -203,6 +203,10 @@ test('worker reasoning effort: low for answer-only, medium for code, high for a 
   assert.equal(s.workerEffort(it({ deadlineAt: Date.now() + 3 * 60000 }), { answerOnly: true }), 'medium', 'no time for a second try');
   assert.equal(s.workerEffort(it({ local: { dispatches: 2 } }), {}), 'high');
   assert.equal(s.workerEffort(it({ local: { dispatches: 2 }, deadlineAt: Date.now() + 6 * 60000 }), {}), 'medium');
+  assert.equal(s.workerEffort(it({ type: 'PI' }), { answerOnly: true }), 'medium', 'PI: a wrong field costs more than one submit rank');
+  assert.equal(s.workerEffort(it({ type: 'PI', local: { dispatches: 2 } }), { answerOnly: true }), 'high', 'PI retry with time left');
+  s.adapter = { parallel: { workerEffort: { pi: 'low' } } };
+  assert.equal(s.workerEffort(it({ type: 'PI' }), { answerOnly: true }), 'low', 'PI adapter override');
   s.adapter = { parallel: { workerEffort: { answerOnly: 'medium' } } };
   assert.equal(s.workerEffort(it(), { answerOnly: true }), 'medium', 'adapter override');
 });

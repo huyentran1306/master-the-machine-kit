@@ -27,7 +27,7 @@ import { guardBaseline } from './baseline-guard.mjs';
 import { validate, validateFinalResult } from './schema.mjs';
 import { McpHttpClient, resultText } from './mcp-http.mjs';
 import { buildChecklist, looksLikeTestOutput } from './checklist.mjs';
-import { writeItemBrief, answerNeedsSource } from './item-brief.mjs';
+import { writeItemBrief, answerNeedsSource, answerNeedsImage } from './item-brief.mjs';
 import { extractRequiredEvidence, evidenceArrayRefs, unscorableAnswer } from './required-evidence.mjs';
 import { collectMcpMaterial } from './mcp-material.mjs';
 import { until, SUBMIT_LIMITS } from './deadline.mjs';
@@ -1791,7 +1791,7 @@ export class RuntimeSession {
     const items = [...this.items.values()].map(it => ({ id: it.id, text: `${it.title || ''}\n${String(it.description || '').slice(0, 1500)}` }));
     const descriptions = items.map(i => i.text).join('\n');
     return [...failingTests(text)].filter(test => !resolved.has(test)).map((test) => {
-      const rel = (String(test).match(/(?:^|\s)((?:tests|test)\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?)/i) || [])[1] || null;
+      const rel = (String(test).match(/^\s*([^\s>]+\.(?:test|spec)\.[cm]?[jt]sx?)(?:\s|>|$)/i) || [])[1] || null;
       let source = ''; try { if (rel && this.appPath) source = fs.readFileSync(path.join(this.appPath, rel), 'utf8'); } catch { /* missing */ }
       return classifyBaselineDefect({ test, file: rel, source, decisions, descriptions, items });
     });
@@ -1953,6 +1953,7 @@ export class RuntimeSession {
     const { left } = effectiveLeft(it, this.now(), this.match.endsAt);
     if (it.local?.heavy) return 'medium';
     if (it.local?.answerSource) return 'medium';
+    if (it.local?.answerImage) return 'medium';
     const retry = (it.local?.dispatches || 0) > 1;
     if (retry) return left != null && left < 10 ? cfg.code : cfg.retry;
     if (c.answerOnly) return left != null && left < 4 ? cfg.code : cfg.answerOnly;
@@ -2050,7 +2051,9 @@ export class RuntimeSession {
         ? `BASELINE-FIX (ship with this first code item): fresh-DB original suite fails ${sharedDefects.map(d => d.test).join('; ')}. The grader reruns the WHOLE original suite on this item's submitted revision, so make every listed test pass in this item even if a later BUG may be about it: read the test, DECISIONS.md and the KB, fix the code with the smallest change (a schema rule: a NEW migration; never edit old migrations), keep the original tests untouched, add a focused regression, run the full suite, and record CONTRADICTION: in this item's engineering record. ` : '';
       const resumeText = heavyText + (c.resume ? `RESUME: preserved commit ${c.resume.commit}; do only the remaining step: ${c.resume.remainingStep}. `
         : orphaned ? 'RESUME: the previous worker on this item stopped when the session restarted. Its commits and uncommitted files are in this worktree: check git status and git log first, keep that work and continue it; do not restart. ' : '');
-      const answerRead = it.local.answerSource
+      const answerRead = it.local.answerImage
+        ? `Open every image path named in the item with the image viewer. Crop or zoom each number, count digits against neighbouring values, and cross-check totals (for example net equals the sum of its parts) before writing the answer. Then read ${c.brief?.digestPath || c.brief?.briefFile}.`
+        : it.local.answerSource
         ? `Read ${c.brief?.digestPath || c.brief?.briefFile} first; it contains relevant issued source. Verify any missing function directly under ${c.appPath || c.matchRoot}; answer from code, never infer accounting or UI behavior.`
         : `Read ONLY ${c.brief?.digestPath || `${c.brief?.briefFile} and files/`}${c.brief?.digestPath ? ' (item text, answer template, KB articles, test data and every production log line in UTC, oldest first); do not open brief.json, repo-map, baseline, skills, checklist or raw files/mcp/*.json unless the digest says a part is missing' : ''}.`;
       const entry = {
@@ -2381,6 +2384,7 @@ export class RuntimeSession {
       if (!it.local?.startedAt || !this.readMaterial(id)) return { ok: false, error: 'NOT_STARTED', next: 'Call start_work before worktree create.' };
       it.local.answerOnly = answerOnly(it, this.readMaterial(id));
       it.local.answerSource = it.local.answerOnly && answerNeedsSource(it);
+      it.local.answerImage = it.local.answerOnly && answerNeedsImage(it);
       const policy = dispatchPolicy(it, [...this.items.values()].filter(i => !isSubmitted(i)), this.adapter.parallel, this.freeMemory());
       if ((!it.local.worktree || it.local.parked) && !policy.allowed) {
         it.local.queued = true; this.saveState();

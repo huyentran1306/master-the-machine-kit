@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { finishAnswer } from '../team-sdlc-pack/src/finish-answer.mjs';
-import { answerDigest, answerNeedsSource } from '../team-sdlc-pack/src/item-brief.mjs';
+import { answerDigest, answerNeedsSource, answerNeedsImage } from '../team-sdlc-pack/src/item-brief.mjs';
 
 const pack = path.resolve('team-sdlc-pack/src');
 const schema = { type: 'object', required: ['backlogId', 'status', 'rootCauseRelease'], properties: { backlogId: { type: 'string' }, status: { enum: ['DONE', 'PARTIAL', 'BLOCKED'] }, rootCauseRelease: { type: 'string', minLength: 1 } } };
@@ -81,6 +81,12 @@ test('source-reading TASKs are separated from KB-only fast answers and receive i
   assert.match(md, /Issued application source/);
   assert.match(md, /Answer from this source/);
   assert.match(md, /return twoLines/);
+});
+
+test('issued source directories and image-only answers are detected generically', () => {
+  assert.equal(answerNeedsSource({ description: 'Use facts from the issued source in packages/loot-core/src/server/budget/, as issued.' }), true);
+  assert.equal(answerNeedsSource({ description: 'Answer from the source under packages/loot-core/src/server/rules/' }), true);
+  assert.equal(answerNeedsImage({ description: 'It exists only as an image: data/cfo-audit-voucher-2025-10.png' }), true);
 });
 
 test('failingTests reads vitest and jest failure names, so baseline-only failures can be told apart', async () => {

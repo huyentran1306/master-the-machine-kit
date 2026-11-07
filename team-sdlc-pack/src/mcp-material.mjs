@@ -35,7 +35,7 @@ function argumentsFor(tool, item, kind) {
 
 /** Services a log-search tool names in its description, e.g. "(services: web, api, payment-api)". */
 export function logServices(tool) {
-  const m = String(tool.description || '').match(/\bservices?\s*[:(]\s*([^)\n]+)/i);
+  const m = String(tool.description || '').match(/\bservices?\s*(?::|\(|include[sd]?|such\s+as|like|are|e\.g\.)\s*([^)\n]+)/i);
   if (!m) return [];
   return [...new Set(m[1].split(/[,;]|\s+and\s+|\s+or\s+/).map(s => s.trim().replace(/^(?:e\.g\.|for example)\s*/i, '').replace(/[.\s]+$/, ''))
     .filter(s => /^[a-z0-9][\w.-]{0,40}$/i.test(s)))].slice(0, 16);
@@ -104,7 +104,7 @@ async function sweepLogs(tool, fetchOnly, cutoff) {
     const covered = parts.reduce((n, x) => n + (x.r?.returned || 0), 0);
     if (covered < t.total) truncated.push({ service, total: t.total, fetched: Math.min(t.total, covered || t.returned), levelsOverLimit: parts.filter(x => x.r && x.r.total > x.r.returned).map(x => x.level) });
   }
-  if (!serviceKey && top[0]?.parsed && top[0].parsed.total > top[0].parsed.returned) truncated.push({ service: '*', total: top[0].parsed.total, fetched: top[0].parsed.returned });
+  if (top[0]?.parsed && top[0].parsed.total > top[0].parsed.returned && seen.size < top[0].parsed.total) truncated.push({ service: '*', total: top[0].parsed.total, fetched: Math.min(top[0].parsed.total, seen.size || top[0].parsed.returned) });
   const entries = [...seen.values()].sort((a, b) => stamp(a) - stamp(b));
   return {
     purpose: 'logs', tool: `${tool.name}-merged`, args: { services }, ok: true,

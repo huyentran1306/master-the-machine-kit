@@ -160,6 +160,7 @@ export function usableTitle(raw) {
   if (/^(?:[$>]\s*)?(?:curl|wget|httpie|Invoke-WebRequest|Invoke-RestMethod|fetch|git|npm|npx|pnpm|yarn|node|python|pwsh|powershell|cmd)(?:\s|\()/i.test(s)) return null;
   if (/^(?:API\s+)?(?:endpoint|request URL)\s*:/i.test(s)) return null;
   if (/^(?:\d+\s*(?:pt|pts|points)|open|closed|visible|working|submitted|passed|failed|not started)$/i.test(s)) return null;
+  if (/\b(?:NOT STARTED|\d+(?:\.\d+)?\s*(?:pt|pts|points)\s+OPEN|Deadline\s*[·:]|\d+(?:\.\d+)?\s*(?:m|min|minutes?)\s+left)\b/i.test(s)) return null;
   return s;
 }
 

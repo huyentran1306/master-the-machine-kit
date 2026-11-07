@@ -34,7 +34,12 @@ const utc = (ts) => { const t = Date.parse(ts ?? ''); return Number.isNaN(t) ? S
 /** Answer-only questions that explicitly require repository truth must not use the digest-only fast path. */
 export function answerNeedsSource(item = {}) {
   const text = `${item.title || ''}\n${item.description || ''}`;
-  return /application source|source code|from the (?:issued )?(?:app|code)|in the code|\b(?:src|app|server|lib|components?)\/[\w./-]+\.(?:[cm]?[jt]sx?|py|go|rb)\b/i.test(text);
+  return /issued source|as issued|from the (?:issued )?source|application source|source code|from the (?:issued )?(?:app|code)|in the code|`?\b(?:packages|src|app|server|lib|components?)\/[\w./-]+`?/i.test(text);
+}
+
+export function answerNeedsImage(item = {}) {
+  const text = `${item.title || ''}\n${item.description || ''}`;
+  return /\bimage\b|\b[\w./-]+\.(?:png|jpe?g|webp|gif)\b/i.test(text);
 }
 
 function sourceTerms(item) {
@@ -61,6 +66,8 @@ function sourceDigest(root, item, cap = 12000) {
       if (score) candidates.push({ file, score, text });
     }
   }
+  const named = [...`${item.title || ''}\n${item.description || ''}`.matchAll(/`?((?:packages|src|app|server|lib|components?)\/[\w./-]+)`?/gi)].map(m => m[1].replace(/\/$/, ''));
+  for (const c of candidates) if (named.some(n => path.relative(root, c.file).replace(/\\/g, '/').includes(n))) c.score += 100;
   candidates.sort((a, b) => b.score - a.score || a.text.length - b.text.length);
   let out = '';
   for (const c of candidates.slice(0, 8)) {

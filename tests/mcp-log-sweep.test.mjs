@@ -29,6 +29,11 @@ test('logServices reads the service list from the description', () => {
   assert.deepEqual(logServices({ description: 'no list here' }), []);
 });
 
+test('logServices accepts services include phrasing used by match tools', () => {
+  const tool = { description: 'Search production logs (services include api-gateway, sync-server, web, payments, import, rules, rule-engine, schedules, status-cache, deploy) at most 20 per call.' };
+  assert.deepEqual(logServices(tool), ['api-gateway', 'sync-server', 'web', 'payments', 'import', 'rules', 'rule-engine', 'schedules', 'status-cache', 'deploy']);
+});
+
 test('parseLogResult reads total/returned/entries', () => {
   assert.deepEqual(parseLogResult(text({ total: 3, returned: 1, entries: [{ a: 1 }] })), { total: 3, returned: 1, entries: [{ a: 1 }] });
   assert.equal(parseLogResult({ raw: { content: [{ type: 'text', text: 'nope' }] } }), null);

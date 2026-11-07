@@ -40,3 +40,7 @@ test('command lines, URLs, endpoint text and React props are never titles', () =
   assert.equal(parseMatchPage('<article><h2>TASK-91</h2><h3>Add shelf labels</h3></article>').items[0].title, row.title);
   assert.equal(parseMatchPage('<article><h2>TASK-91</h2></article><section><h2>Unrelated heading</h2></section>').items[0].title, null);
 });
+
+test('card status text is never accepted as an item title', () => {
+  assert.equal(usableTitle('Task 100 pts OPEN Deadline · 30 min from reveal · 20:59 left NOT STARTED'), null);
+});

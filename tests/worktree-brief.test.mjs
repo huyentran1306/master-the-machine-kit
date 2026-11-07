@@ -253,6 +253,17 @@ test('fresh baseline contradictions are exposed as a shared BASELINE-FIX defect'
   assert.deepEqual(s.baselineDefects(), [{ test: 'tests/cascade.test.ts > deleting a company with invoices is RESTRICTED', file: 'tests/cascade.test.ts', likelyOwner: 'BASELINE-FIX', reason: 'schema rule in test and DECISIONS.md' }]);
 });
 
+test('baseline defect parser accepts original tests under any source directory', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kit3-baseline-any-dir-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const app = path.join(root, 'app'); const rel = 'src/server/transactions/import/parse-file.test.ts';
+  fs.mkdirSync(path.join(app, path.dirname(rel)), { recursive: true }); fs.mkdirSync(path.join(root, '.mtm-notes'));
+  fs.writeFileSync(path.join(app, rel), "test('handles windows-1252 charset', () => {})\n");
+  fs.writeFileSync(path.join(root, '.mtm-notes', 'test.log'), ` FAIL  ${rel} > File import > handles windows-1252 charset\nTests 1 failed\n`);
+  const s = new RuntimeSession(); s.checkoutRoot = root; s.appPath = app;
+  assert.equal(s.baselineDefects()[0].file, rel);
+});
+
 test('only the first code worker receives the shared BASELINE-FIX assignment', async t => {
   const { s, args } = worktreeSession(t);
   const app = path.join(args.matchRoot, 'src'); fs.mkdirSync(path.join(app, 'tests'), { recursive: true });

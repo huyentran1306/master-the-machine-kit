@@ -66,8 +66,16 @@ export function dispatchPolicy(item, items, parallel = {}, freeBytes = available
   const answerWorkers = items.filter(i => i.id !== item.id && i.type !== 'PI' && (i.local?.answerOnly ?? answerOnly(i)) && i.local?.worktree && !i.local?.parked && !i.local?.ready && !i.local?.submittedAt && !i.local?.receiptId).length;
   const maxAnswerWorkers = Math.max(1, Math.floor(Number(parallel.maxAnswerWorkers) || 6));
   const minFreeRamGB = item.deadlineAt != null || item.local?.parked || item.local?.orphaned ? 1.5 : 2.5;
-  const reason = item.type === 'PI' ? null : isAnswer ? answerWorkers >= maxAnswerWorkers ? 'ANSWER_WORKER_LIMIT' : null : codeWorkers >= maxCodeWorkers ? 'CODE_WORKER_LIMIT' : freeRamGB < minFreeRamGB ? 'LOW_RAM' : null;
-  return { allowed: !reason, reason, codeWorkers, maxCodeWorkers, answerWorkers, maxAnswerWorkers, freeRamGB, minFreeRamGB };
+  // Codex caps open threads per session (config/codex.toml max_concurrent_threads_per_session, root included).
+  // Past it spawn_agent fails and the item waits for a retry after the next wait_agent, in no particular
+  // order. Queue here instead, by rank, and keep the last 2 threads for PI, deadline items and resumes.
+  const liveWorkers = items.filter(i => i.id !== item.id && i.local?.worktree && !i.local?.parked && !i.local?.ready && !i.local?.submittedAt && !i.local?.receiptId).length;
+  const maxWorkerThreads = Math.max(2, Math.floor(Number(parallel.maxWorkerThreads) || 14));
+  const urgent = item.type === 'PI' || item.deadlineAt != null || !!item.local?.parked || !!item.local?.orphaned;
+  const threadCap = urgent ? maxWorkerThreads : maxWorkerThreads - 2;
+  const reason = liveWorkers >= threadCap ? 'THREAD_LIMIT'
+    : item.type === 'PI' ? null : isAnswer ? answerWorkers >= maxAnswerWorkers ? 'ANSWER_WORKER_LIMIT' : null : codeWorkers >= maxCodeWorkers ? 'CODE_WORKER_LIMIT' : freeRamGB < minFreeRamGB ? 'LOW_RAM' : null;
+  return { allowed: !reason, reason, codeWorkers, maxCodeWorkers, answerWorkers, maxAnswerWorkers, liveWorkers, maxWorkerThreads, freeRamGB, minFreeRamGB };
 }
 
 export function integrationGate(item, { codeChanged } = {}) {

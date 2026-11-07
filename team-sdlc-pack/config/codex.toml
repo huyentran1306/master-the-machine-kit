@@ -8,11 +8,12 @@ set = { npm_config_verify_deps_before_run = "false", pnpm_config_verify_deps_bef
 
 # Codex multi-agent v2 caps the open threads of a session (root + every live subagent): 4 by default
 # in Codex 0.166, i.e. 3 workers. Rehearsal 2026-10-31: spawn_agent failed twice with "agent thread
-# limit reached" and BUG-04 waited 3.5 min for a slot. `enabled = true` is required: the table form
+# limit reached" and BUG-04 waited 3.5 min for a slot. 16 = root + 14 workers (parallel.maxWorkerThreads,
+# the helper queues past it by rank) + 1 spare; UDLWEWFR revealed 12 items. `enabled = true` is required: the table form
 # alone turns the feature off, and the team skills use the v2 tools (fork_turns, followup_task).
 [features.multi_agent_v2]
 enabled = true
-max_concurrent_threads_per_session = 12
+max_concurrent_threads_per_session = 16
 
 [mcp_servers.mtm_minimal]
 command = "node"

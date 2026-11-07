@@ -199,3 +199,20 @@ test('a heavy item gives up after two red gates and cannot dispatch a third time
   assert.equal(it.local.heavyGaveUp, true);
   assert.equal(s.heavyDispatchDecision(it).reason, 'HEAVY_GAVE_UP');
 });
+
+test('thread budget: ordinary items queue at maxWorkerThreads-2, PI/deadline/resume may use the last 2 threads', () => {
+  const live = n => Array.from({ length: n }, (_, i) => ({ id: `TASK-${i}`, type: 'TASK', local: { worktree: {}, answerOnly: true } }));
+  const gb = 1024 ** 3;
+  const task = { id: 'TASK-99', type: 'TASK', local: { answerOnly: true } };
+  const pi = { id: 'PI-99', type: 'PI', local: {} };
+  const bug = { id: 'BUG-99', type: 'BUG', deadlineAt: Date.now() + 600000, local: { answerOnly: false } };
+  const p = { maxWorkerThreads: 8, maxAnswerWorkers: 20 };
+  assert.equal(dispatchPolicy(task, live(6), p, 10 * gb).reason, 'THREAD_LIMIT');
+  assert.equal(dispatchPolicy(task, live(5), p, 10 * gb).allowed, true);
+  assert.equal(dispatchPolicy(pi, live(7), p, 10 * gb).allowed, true, 'PI uses a reserved thread');
+  assert.equal(dispatchPolicy(pi, live(8), p, 10 * gb).reason, 'THREAD_LIMIT', 'never past the Codex thread cap');
+  assert.equal(dispatchPolicy(bug, live(7), { ...p, maxCodeWorkers: 20 }, 10 * gb).allowed, true, 'deadline item uses a reserved thread');
+  const done = live(8).map(i => ({ ...i, local: { ...i.local, ready: true } }));
+  assert.equal(dispatchPolicy(task, done, p, 10 * gb).allowed, true, 'READY workers have ended');
+  assert.equal(dispatchPolicy(task, live(3), {}, 10 * gb).maxWorkerThreads, 14);
+});

@@ -266,3 +266,15 @@ test('wait_for_update auto-dispatch re-offers a missed spawn once without cachin
   const third = await s.wait_for_update({ timeoutMs: 1000 });
   assert.equal(third.spawn?.length || 0, 0, 'offered once only');
 });
+
+test('an orchestrator match_mcp relay for a live worker points at the worker mtm-query command', async () => {
+  const s = Object.create(RuntimeSession.prototype);
+  s.phase = 'GAME'; s.matchMcpUrl = () => 'https://mcp.example.test/mcp'; s.allowedOrigins = () => ['https://mcp.example.test'];
+  s.mcp = { url: 'https://mcp.example.test/mcp', call: async () => ({ content: [{ type: 'text', text: 'log line' }] }) };
+  s.items = new Map([['PI-02', { id: 'PI-02', type: 'PI', local: { queryToken: 't' } }], ['BUG-01', { id: 'BUG-01', type: 'BUG', local: {} }]]);
+  s.readMaterial = () => ({}); s.appendMcpMaterial = () => ({}); s.clean = v => v;
+  const r = await s.match_mcp({ action: 'call', name: 'search_logs', args: {}, backlogItemKey: 'PI-02' });
+  assert.equal(r.ok, true); assert.match(r.next, /PI-02's worker to run its mtm-query command/);
+  assert.equal(s.items.get('PI-02').local.orchestratorQueries, 1);
+  assert.equal((await s.match_mcp({ action: 'call', name: 'search_logs', args: {}, backlogItemKey: 'BUG-01' })).next, undefined, 'no worker token: no hint');
+});

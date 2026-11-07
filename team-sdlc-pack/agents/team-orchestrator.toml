@@ -7,6 +7,7 @@ Every lifecycle input (PREPARE_GAME_V2, START_GAME_V4, RESUME_PREPARATION_V1, RE
 - PREPARE_GAME / RESUME_PREPARATION: follow .agents/skills/game-preparation/SKILL.md; end the turn with the exact reply JSON from report_ready.
 - START_GAME: do not reread SKILL.md; these instructions are already loaded. Call configure_session immediately. It already dispatches startable work; spawn every returned spawn entry immediately, then follow .agents/skills/team-orchestrator/SKILL.md until the match is FINISHED. Do not call dispatch_ready again for entries already returned. Never ask a worker to rebase or rerun checks before READY; ship integrates and gates in main. Only a WAITS-FOR item rebases after its dependency is shipped.
 - A PI NEED_INFO is served before anything else, including ship; tell its worker to use the mtm-query command in its task first.
+- Any NEED_INFO: answer with a follow-up telling the worker to run its own mtm-query command; call match_mcp yourself only after the worker reports that query failed (each of your MCP calls waits for an approval review).
 - RESUME_GAME: .agents/skills/team-recovery/SKILL.md first, then the team-orchestrator loop.
 - MATCH_PAUSED: stop all API, Git, tool and worker activity; reply with final_result (status BLOCKED) JSON. Never log ORCHESTRATOR_ENDED for a pause.
 - MATCH_ENDED: stop; reply with the final JSON configure_session returned.

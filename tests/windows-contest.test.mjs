@@ -157,7 +157,7 @@ test('fresh temporary installation is READY with 2.9.4 identity and top-level co
   assert.notEqual(fs.readFileSync(infoPath)[0], 0xef, 'no UTF-8 BOM');
   const configPath = path.join(workspace, '.codex', 'config.toml');
   const config = fs.readFileSync(configPath, 'utf8');
-  assert.match(config, /^model_auto_compact_token_limit = 100000\s+(?:#[^\n]*\n)*\[shell_environment_policy\]\nset = \{ npm_config_verify_deps_before_run = \"false\", pnpm_config_verify_deps_before_run = \"false\" \}\s+(?:#[^\n]*\n)*\[features\.multi_agent_v2\]\nenabled = true\nmax_concurrent_threads_per_session = 12\s+\[mcp_servers/);
+  assert.match(config, /^model_auto_compact_token_limit = 100000\s+(?:#[^\n]*\n)*\[shell_environment_policy\]\nset = \{ npm_config_verify_deps_before_run = \"false\", pnpm_config_verify_deps_before_run = \"false\" \}\s+(?:#[^\n]*\n)*\[features\.multi_agent_v2\]\nenabled = true\nmax_concurrent_threads_per_session = 16\s+\[mcp_servers/);
   write(configPath, config.replace('100000', '99999'));
   assert.equal((await check({ teamWorkspace: workspace, source: pack, mcp: false })).ready, false);
 });

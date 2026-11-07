@@ -148,6 +148,6 @@ test('workers capture before editing and request missing material instead of giv
     const text = read(file);
     for (const term of ['allowMissingEvidence', 'allowBlocked:true', 'reason', 'last minutes', 'extraction mistake']) assert.ok(text.includes(term), `${file}: ${term}`);
   }
-  assert.match(read('skills/team-orchestrator/SKILL.md'), /backlogItemKey.*appends raw results/);
+  assert.match(read('skills/team-orchestrator/SKILL.md'), /mtm-query.*appends results to its digest.*match_mcp with backlogItemKey/);
   assert.doesNotMatch(read('skills/evidence-and-answer/SKILL.md'), /3 minutes -> skip screenshots/);
 });

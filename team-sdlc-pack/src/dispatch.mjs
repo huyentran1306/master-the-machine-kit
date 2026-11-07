@@ -25,7 +25,12 @@ export function availableMemory({ platform = process.platform, readVmStat = () =
 }
 
 export function answerOnly(item, material = {}) {
-  if (item.type === 'PI') return true;
+  if (item.type === 'PI') {
+    const text = [item.title, item.description, item.acceptanceCriteria, material.startInstruction].map(v => typeof v === 'string' ? v : JSON.stringify(v || '')).join(' ');
+    const mvs = material.minimumVerificationScenarios;
+    const hasMvs = mvs != null && !['', '[]', '{}', 'null', '""'].includes(JSON.stringify(mvs));
+    return !hasMvs && !/\b(?:fix|hotfix|patch|repair|implement|change|update|modify)\b.{0,80}\b(?:application|app|code|source|function|endpoint|component|service)\b/i.test(text);
+  }
   if (item.type !== 'TASK') return false;
   const text = [item.title, item.description, item.acceptanceCriteria, material.startInstruction].map(v => typeof v === 'string' ? v : JSON.stringify(v || '')).join(' ');
   const prose = text.replace(/\b(?:no|without|do not|don't)\s+(?:source\s+|code\s+)?(?:changes?|edits?|modifications?|implementation)(?:\s+(?:needed|required))?/gi, '');
@@ -38,10 +43,14 @@ export function answerOnly(item, material = {}) {
 
 export function dispatchPolicy(item, items, parallel = {}, freeBytes = availableMemory()) {
   const codeWorkers = items.filter(i => i.id !== item.id && i.local?.worktree && !(i.local?.answerOnly ?? answerOnly(i)) && !i.local?.parked && !i.local?.ready && !i.local?.submittedAt && !i.local?.receiptId).length;
-  const maxCodeWorkers = Math.max(1, Math.floor(Number(parallel.maxCodeWorkers) || 5));
+  const maxCodeWorkers = Math.max(1, Math.floor(Number(parallel.maxCodeWorkers) || 6));
   const freeRamGB = freeBytes / 1024 ** 3;
-  const reason = (item.local?.answerOnly ?? answerOnly(item)) ? null : codeWorkers >= maxCodeWorkers ? 'CODE_WORKER_LIMIT' : freeRamGB < 2.5 ? 'LOW_RAM' : null;
-  return { allowed: !reason, reason, codeWorkers, maxCodeWorkers, freeRamGB, minFreeRamGB: 2.5 };
+  const isAnswer = item.local?.answerOnly ?? answerOnly(item);
+  const answerWorkers = items.filter(i => i.id !== item.id && i.type !== 'PI' && (i.local?.answerOnly ?? answerOnly(i)) && i.local?.worktree && !i.local?.parked && !i.local?.ready && !i.local?.submittedAt && !i.local?.receiptId).length;
+  const maxAnswerWorkers = Math.max(1, Math.floor(Number(parallel.maxAnswerWorkers) || 6));
+  const minFreeRamGB = item.deadlineAt != null || item.local?.parked || item.local?.orphaned ? 1.5 : 2.5;
+  const reason = item.type === 'PI' ? null : isAnswer ? answerWorkers >= maxAnswerWorkers ? 'ANSWER_WORKER_LIMIT' : null : codeWorkers >= maxCodeWorkers ? 'CODE_WORKER_LIMIT' : freeRamGB < minFreeRamGB ? 'LOW_RAM' : null;
+  return { allowed: !reason, reason, codeWorkers, maxCodeWorkers, answerWorkers, maxAnswerWorkers, freeRamGB, minFreeRamGB };
 }
 
 export function integrationGate(item) {

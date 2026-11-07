@@ -264,7 +264,7 @@ test('baseline defect parser accepts original tests under any source directory',
   assert.equal(s.baselineDefects()[0].file, rel);
 });
 
-test('only the first code worker receives the shared BASELINE-FIX assignment', async t => {
+test('baseline fix avoids a deadline worker when a non-deadline code item exists', async t => {
   const { s, args } = worktreeSession(t);
   const app = path.join(args.matchRoot, 'src'); fs.mkdirSync(path.join(app, 'tests'), { recursive: true });
   fs.mkdirSync(path.join(args.checkoutRoot, '.mtm-notes'), { recursive: true });
@@ -274,7 +274,7 @@ test('only the first code worker receives the shared BASELINE-FIX assignment', a
   git(args.checkoutRoot, 'add', 'assigned/src'); git(args.checkoutRoot, 'commit', '-qm', 'scenario source');
   s.appPath = app; s.phase = 'GAME'; s.match.status = 'IN_PROGRESS'; s.match.endsAt = Date.now() + 30 * 60000;
   for (const id of ['BUG-61', 'CR-62']) {
-    s.items.set(id, { id, type: id.startsWith('BUG') ? 'BUG' : 'CR', local: { startedAt: Date.now() } });
+    s.items.set(id, { id, type: id.startsWith('BUG') ? 'BUG' : 'CR', ...(id === 'BUG-61' ? { deadlineAt: Date.now() + 15 * 60000 } : {}), local: { startedAt: Date.now() } });
     s.materialCache[id] = { files: {}, submitTemplate: { backlogId: id } };
   }
   assert.equal(s.view().baselineDefects[0].likelyOwner, 'BASELINE-FIX');
@@ -282,20 +282,76 @@ test('only the first code worker receives the shared BASELINE-FIX assignment', a
   assert.equal(out.spawn.length, 2);
   const tasks = out.spawn.map(e => fs.readFileSync(e.taskFile, 'utf8'));
   assert.equal(tasks.filter(text => text.includes('BASELINE-FIX (ship with this first code item)')).length, 1);
-  assert.ok(['BUG-61', 'CR-62'].includes(s.state.baselineFixAssigned));
+  assert.match(fs.readFileSync(out.spawn.find(e => e.id === 'CR-62').taskFile, 'utf8'), /BASELINE-FIX \(ship with this first code item\)/);
+  assert.match(fs.readFileSync(out.spawn.find(e => e.id === 'BUG-61').taskFile, 'utf8'), /WAITS-FOR BASELINE-FIX/);
+  assert.equal(s.state.baselineFixAssigned, 'CR-62');
 });
 
-test('five code workers and uncapped PI get distinct persistent ports, private test DBs and remapped paths', async t => {
+test('a sole deadline code item still receives the baseline fix', async t => {
+  const { s, args } = worktreeSession(t);
+  const app = path.join(args.matchRoot, 'src'); fs.mkdirSync(path.join(app, 'tests'), { recursive: true });
+  fs.mkdirSync(path.join(args.checkoutRoot, '.mtm-notes'), { recursive: true });
+  fs.writeFileSync(path.join(app, 'tests', 'cascade.test.ts'), "test('company delete is RESTRICTED', () => {})\n");
+  fs.writeFileSync(path.join(app, 'DECISIONS.md'), 'Financial history uses RESTRICT on delete.\n');
+  fs.writeFileSync(path.join(args.checkoutRoot, '.mtm-notes', 'test.log'), ' FAIL  tests/cascade.test.ts > company delete is RESTRICTED\nTests 1 failed\n');
+  git(args.checkoutRoot, 'add', 'assigned/src'); git(args.checkoutRoot, 'commit', '-qm', 'scenario source');
+  s.appPath = app; s.phase = 'GAME'; s.match.status = 'IN_PROGRESS'; s.match.endsAt = Date.now() + 30 * 60000;
+  s.items.set('BUG-63', { id: 'BUG-63', type: 'BUG', deadlineAt: Date.now() + 15 * 60000, local: { startedAt: Date.now() } });
+  s.materialCache['BUG-63'] = { files: {}, submitTemplate: { backlogId: 'BUG-63' } };
+  const out = await s.dispatch_ready();
+  assert.match(fs.readFileSync(out.spawn[0].taskFile, 'utf8'), /BASELINE-FIX \(ship with this first code item\)/);
+  assert.equal(s.state.baselineFixAssigned, 'BUG-63');
+});
+
+test('worker query queue enforces item token/read-only tools and rebuilds digest', async t => {
+  const { s, create } = worktreeSession(t);
+  s.matchId = 'QUERY-MATCH';
+  const c = await create('PI-70', 'PI');
+  const it = s.items.get('PI-70'); it.local.queryToken = 'token-pi-70';
+  const calls = [];
+  s.match_mcp = async req => {
+    if (req.action === 'tools') return { ok: true, tools: [
+      { name: 'search_logs', description: 'Search production logs', annotations: { readOnlyHint: true }, inputSchema: { properties: { service: { type: 'string' } } } },
+      { name: 'inventory_snapshot', description: 'Current inventory', annotations: { readOnlyHint: true, destructiveHint: false }, inputSchema: { properties: {} } },
+      { name: 'restart_service', description: 'Restart service', annotations: { destructiveHint: true } },
+    ] };
+    calls.push(req); return { ok: true, raw: { content: [{ type: 'text', text: '{"entries":[{"service":"api","message":"found"}]}' }] } };
+  };
+  const dir = s.queryQueueDir(); fs.mkdirSync(dir, { recursive: true });
+  const ask = async (name, body) => {
+    fs.writeFileSync(path.join(dir, `${name}.request.json`), JSON.stringify(body));
+    await s.processQueryQueue();
+    return JSON.parse(fs.readFileSync(path.join(dir, `${name}.response.json`), 'utf8'));
+  };
+  const good = await ask('good', { item: 'PI-70', token: 'token-pi-70', tool: 'search_logs', args: { service: 'api' } });
+  assert.equal(good.ok, true); assert.equal(calls.length, 1);
+  assert.match(fs.readFileSync(good.digestPath, 'utf8'), /found/);
+  const tokenFile = path.join(path.dirname(c.brief.briefFile), 'query-token.json');
+  fs.writeFileSync(tokenFile, JSON.stringify({ item: 'PI-70', token: 'token-pi-70', queueDir: dir }));
+  const cli = spawn(process.execPath, [path.resolve('team-sdlc-pack/bin/mtm-query.mjs'), '--token-file', tokenFile, '--item', 'PI-70', '--tool', 'search_logs', '--service', 'api'], { cwd: path.resolve('.') });
+  let stdout = ''; cli.stdout.on('data', b => { stdout += b; });
+  for (let i = 0; i < 50 && !fs.readdirSync(dir).some(f => f.endsWith('.request.json')); i += 1) await new Promise(resolve => setTimeout(resolve, 20));
+  await s.processQueryQueue();
+  const [exit] = await once(cli, 'exit');
+  assert.equal(exit, 0); assert.match(stdout, /found/);
+  assert.equal((await ask('annotated-read', { item: 'PI-70', token: 'token-pi-70', tool: 'inventory_snapshot', args: {} })).ok, true);
+  s.items.set('PI-71', { id: 'PI-71', type: 'PI', local: { queryToken: 'other' } });
+  assert.equal((await ask('wrong-item', { item: 'PI-71', token: 'token-pi-70', tool: 'search_logs', args: {} })).error, 'ITEM_FORBIDDEN');
+  assert.equal((await ask('write-tool', { item: 'PI-70', token: 'token-pi-70', tool: 'restart_service', args: {} })).error, 'TOOL_NOT_READ_ONLY');
+  assert.ok(c.brief.digestPath);
+});
+
+test('six code workers and uncapped PI get distinct persistent ports, private test DBs and remapped paths', async t => {
   const { s, args, create } = worktreeSession(t);
-  const outputs = await Promise.all(['TASK-91', 'BUG-92', 'CR-93', 'BUG-97', 'CR-98'].map(id => create(id)));
+  const outputs = await Promise.all(['TASK-91', 'BUG-92', 'CR-93', 'BUG-97', 'CR-98', 'BUG-99'].map(id => create(id)));
   assert.ok(outputs.every(o => o.ok));
   assert.equal((await create('TASK-94')).error, 'CODE_WORKER_LIMIT');
   outputs.push(await create('PI-95', 'PI'));
-  assert.equal(outputs[3].ok, true);
-  outputs.push(await create('PI-96', 'PI'));
   assert.equal(outputs[6].ok, true);
-  const ports = outputs.flatMap(o => Object.values(o.ports)); assert.equal(new Set(ports).size, 14);
-  assert.deepEqual(ports, [3100, 3101, 3102, 3103, 3104, 3105, 3106, 3107, 3108, 3109, 3110, 3111, 3112, 3113]);
+  outputs.push(await create('PI-96', 'PI'));
+  assert.equal(outputs[7].ok, true);
+  const ports = outputs.flatMap(o => Object.values(o.ports)); assert.equal(new Set(ports).size, 16);
+  assert.deepEqual(ports, [3100, 3101, 3102, 3103, 3104, 3105, 3106, 3107, 3108, 3109, 3110, 3111, 3112, 3113, 3114, 3115]);
   for (const out of outputs) {
     const brief = JSON.parse(fs.readFileSync(out.brief.briefFile, 'utf8'));
     assert.deepEqual(brief.ports, out.ports); assert.equal(brief.checkoutRoot, out.worktreeRoot);
@@ -307,7 +363,25 @@ test('five code workers and uncapped PI get distinct persistent ports, private t
   assert.equal(fs.readFileSync(path.join(args.matchRoot, '.env'), 'utf8'), 'TEST_DATABASE_URL="postgresql://localhost/synthetic_test"\n');
   await s.worktree({ action: 'remove', backlogItemKey: 'TASK-91' });
   await s.worktree({ action: 'remove', backlogItemKey: 'PI-95' });
-  const replacement = await create('TASK-94'); assert.deepEqual(replacement.ports, { dev: 3114, production: 3115 });
+  const replacement = await create('TASK-94'); assert.deepEqual(replacement.ports, { dev: 3116, production: 3117 });
+});
+
+test('a deadline item with 12 minutes left parks the lowest-value non-deadline code worker', async t => {
+  const { s, create } = worktreeSession(t);
+  const active = ['BUG-81', 'BUG-82', 'BUG-83', 'BUG-84', 'BUG-85', 'BUG-86'];
+  for (const id of active) {
+    await create(id, 'BUG');
+    const it = s.items.get(id); it.maxPoints = id === 'BUG-81' ? 10 : 100; it.local.spawnEntry = { taskName: id.toLowerCase(), at: Date.now(), respawns: 0 };
+  }
+  s.phase = 'GAME'; s.match.status = 'IN_PROGRESS'; s.match.endsAt = Date.now() + 30 * 60000;
+  s.items.set('BUG-90', { id: 'BUG-90', type: 'BUG', maxPoints: 100, deadlineAt: Date.now() + 12 * 60000, local: { startedAt: Date.now() } });
+  s.materialCache['BUG-90'] = { files: {}, submitTemplate: { backlogId: 'BUG-90' } };
+  const out = await s.dispatch_ready();
+  assert.equal(out.preemptions?.[0]?.id, 'BUG-81');
+  assert.equal(out.preemptions?.[0]?.for, 'BUG-90');
+  assert.equal(out.spawn.some(e => e.id === 'BUG-90'), true, JSON.stringify(out.waiting));
+  assert.equal(s.items.get('BUG-81').local.parked.preemptedFor, 'BUG-90');
+  assert.match(out.next, /DEADLINE PREEMPT/);
 });
 
 test('helper worker cap and port base are configurable', async t => {
@@ -462,6 +536,19 @@ test('deadline READY preempts parked and newly revealed items and gates other in
   assert.doesNotMatch(integrated.next, /full suite/);
 });
 
+test('READY cannot keep waiting for an unshipped dependency inside the last five minutes', async t => {
+  const { s, args } = worktreeSession(t);
+  s.playerSessionId = 'synthetic-session';
+  s.log = new ProgressLog({ file: path.join(args.checkoutRoot, '.git', 'progress.ndjson'), playerSessionId: s.playerSessionId });
+  s.match.endsAt = Date.now() + 30 * 60000;
+  s.items.set('BUG-91', { id: 'BUG-91', type: 'BUG', deadlineAt: Date.now() + 4 * 60000, local: {} });
+  s.items.set('BUG-92', { id: 'BUG-92', type: 'BUG', local: {} });
+  const out = await s.report_progress({ event: { type: 'BACKLOG_STATUS', backlogId: 'BUG-91', status: 'READY', summary: 'WAITS-FOR BUG-92 (shared failing test)' } });
+  assert.equal(out.error, 'WAITS_FOR_DEADLINE_FALLBACK');
+  assert.match(out.followUp, /smallest change.*READY again/);
+  assert.equal(s.items.get('BUG-91').local.ready, undefined);
+});
+
 test('worktree remove stops a synthetic process for that path and leaves a similar unrelated path alive', async t => {
   const { s, create } = worktreeSession(t);
   const wt = await create('TASK-91');
@@ -509,6 +596,7 @@ test('dispatch_ready dispatches every open item in one call and respawns workers
   assert.match(s.view().alerts[0], /^!! DISPATCH NOW: .*BUG-31 \(open 2\.0m\).*CR-32.*PI-33.*TASK-34/);
   const first = await s.dispatch_ready();
   assert.equal(first.ok, true);
+  assert.equal(first.spawn[0].id, 'PI-33', 'PI is always the first returned spawn entry');
   assert.deepEqual(first.spawn.map(x => x.id).sort(), ['BUG-31', 'CR-32', 'PI-33', 'TASK-34']);
   const task = (sp) => fs.readFileSync(sp.taskFile, 'utf8');
   for (const sp of first.spawn) {

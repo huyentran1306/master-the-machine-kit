@@ -33,13 +33,15 @@ const utc = (ts) => { const t = Date.parse(ts ?? ''); return Number.isNaN(t) ? S
 
 /** Answer-only questions that explicitly require repository truth must not use the digest-only fast path. */
 export function answerNeedsSource(item = {}) {
-  const text = `${item.title || ''}\n${item.description || ''}`;
+  if (item.type === 'PI') return false;
+  const text = `${item.title || ''}\n${item.description || ''}`.replace(/https?:\/\/\S+/gi, '');
   return /issued source|as issued|from the (?:issued )?source|application source|source code|from the (?:issued )?(?:app|code)|in the code|`?\b(?:packages|src|app|server|lib|components?)\/[\w./-]+`?/i.test(text);
 }
 
 export function answerNeedsImage(item = {}) {
+  if (item.type === 'PI') return false;
   const text = `${item.title || ''}\n${item.description || ''}`;
-  return /\bimage\b|\b[\w./-]+\.(?:png|jpe?g|webp|gif)\b/i.test(text);
+  return /\b(?:only as an image|the image shows|shown in (?:the|an) image)\b|\b[\w./-]+\.(?:png|jpe?g|webp|gif)\b/i.test(text);
 }
 
 function sourceTerms(item) {

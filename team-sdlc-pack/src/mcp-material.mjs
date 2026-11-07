@@ -48,7 +48,12 @@ export function parseLogResult(result) {
     try {
       const data = JSON.parse(part.text);
       const entries = Array.isArray(data) ? data : data.entries || data.logs || data.results || data.items;
-      if (Array.isArray(entries)) return { total: Number(data.total ?? entries.length), returned: Number(data.returned ?? entries.length), entries };
+      if (Array.isArray(entries)) {
+        const parsed = { total: Number(data.total ?? entries.length), returned: Number(data.returned ?? entries.length), entries };
+        const nextCursor = data.nextCursor ?? data.next_cursor ?? data.cursor?.next ?? data.pagination?.nextCursor;
+        if (nextCursor != null) parsed.nextCursor = nextCursor;
+        return parsed;
+      }
     } catch { /* not JSON */ }
   }
   return null;
@@ -68,13 +73,23 @@ async function sweepLogs(tool, fetchOnly, cutoff) {
   const key = re => Object.keys(props).find(k => re.test(words(k)));
   const queryKey = key(/^(?:q|query|search|search query|search text|search term|search terms|keywords|terms|text)$/);
   const serviceKey = key(/^(?:service|service name|services|source|component|app|application)$/);
-  if (required.some(k => k !== queryKey && k !== serviceKey)) return null;
+  const pageKey = key(/^(?:page|page number|page index)$/);
+  const offsetKey = key(/^(?:offset|start|start index|skip)$/);
+  const cursorKey = key(/^(?:cursor|page cursor|after)$/);
+  const limitKey = key(/^(?:limit|page size|per page|count|max results)$/);
+  const pagingKeys = new Set([pageKey, offsetKey, cursorKey, limitKey].filter(Boolean));
+  if (required.some(k => k !== queryKey && k !== serviceKey && !pagingKeys.has(k))) return null;
   const services = serviceKey ? logServices(tool) : [];
-  const argsFor = (service, query) => {
+  const argsFor = (service, query, paging = {}) => {
     const args = {};
     if (service && serviceKey) args[serviceKey] = service;
     if (query && queryKey) args[queryKey] = query;
     else if (queryKey && required.includes(queryKey)) return null;
+    if (pageKey && (required.includes(pageKey) || props[pageKey]?.default != null)) args[pageKey] = Number(props[pageKey]?.default ?? 1);
+    if (offsetKey && (required.includes(offsetKey) || props[offsetKey]?.default != null)) args[offsetKey] = Number(props[offsetKey]?.default ?? 0);
+    if (limitKey && (required.includes(limitKey) || props[limitKey]?.default != null)) args[limitKey] = Number(props[limitKey]?.default ?? 20);
+    if (cursorKey && props[cursorKey]?.default != null) args[cursorKey] = props[cursorKey].default;
+    Object.assign(args, paging);
     return args;
   };
   const seen = new Map();
@@ -84,9 +99,38 @@ async function sweepLogs(tool, fetchOnly, cutoff) {
     if (!args) return { parsed: null, reason: 'FAILED' };
     if (Date.now() >= cutoff) return { parsed: null, reason: 'TIMEOUT' };
     const entry = await fetchOnly({ action: 'call', name: tool.name, args }, cutoff);
-    const parsed = entry.ok ? parseLogResult(entry.result) : null;
-    for (const e of parsed?.entries || []) seen.set(JSON.stringify(e), e);
-    return { parsed, reason: parsed ? null : entry.reason || 'FAILED' };
+    let parsed = entry.ok ? parseLogResult(entry.result) : null;
+    const localSeen = new Set();
+    for (const e of parsed?.entries || []) { const k = JSON.stringify(e); localSeen.add(k); seen.set(k, e); }
+    if (!parsed) return { parsed, reason: entry.reason || 'FAILED' };
+
+    // Prefer the pagination contract advertised by the tool instead of guessing
+    // match-specific nouns. Keep paging until the server's total is covered or
+    // the shared PI sweep deadline is reached.
+    let fetched = localSeen.size;
+    let page = Number(props[pageKey]?.default ?? 1);
+    let offset = Number(props[offsetKey]?.default ?? 0);
+    let cursor = parsed.nextCursor;
+    const size = Math.max(1, parsed.returned || Number(props[limitKey]?.default) || 20);
+    for (let guard = 0; fetched < parsed.total && guard < 100 && Date.now() + 100 < cutoff; guard += 1) {
+      const paging = {};
+      if (offsetKey) { offset += size; paging[offsetKey] = offset; }
+      else if (pageKey) { page += 1; paging[pageKey] = page; }
+      else if (cursorKey && cursor != null) paging[cursorKey] = cursor;
+      else break;
+      if (limitKey) paging[limitKey] = size;
+      const more = await fetchOnly({ action: 'call', name: tool.name, args: argsFor(service, query, paging) }, cutoff);
+      const next = more.ok ? parseLogResult(more.result) : null;
+      if (!next?.entries?.length) break;
+      for (const e of next.entries) { const k = JSON.stringify(e); localSeen.add(k); seen.set(k, e); }
+      fetched = localSeen.size;
+      if (cursorKey) {
+        if (next.nextCursor == null || next.nextCursor === cursor) break;
+        cursor = next.nextCursor;
+      }
+    }
+    parsed = { ...parsed, returned: Math.min(parsed.total, fetched) };
+    return { parsed, reason: null };
   };
   const top = await mapBounded([null, ...services], 4, service => run(service, null));
   // A transiently missed service is more valuable than deeper level splits. Retry just those once,

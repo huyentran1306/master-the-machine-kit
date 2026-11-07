@@ -36,6 +36,8 @@ const identity = (teamWorkspace && readJson(path.join(teamWorkspace, '.mtm', 'te
 const adapter = readJson(path.join(PACK_ROOT, 'config', 'game-adapter.json')) || {};
 const pkg = readJson(path.join(PACK_ROOT, 'package.json')) || {};
 const session = new RuntimeSession({ teamWorkspace, packRoot: PACK_ROOT, adapter, identity });
+const queryPoller = setInterval(() => session.processQueryQueue().catch((e) => process.stderr.write(`[mtm-runtime] query queue: ${e.message}\n`)), 250);
+queryPoller.unref();
 
 function send(msg) {
   process.stdout.write(`${JSON.stringify(msg)}\n`);
@@ -102,6 +104,7 @@ rl.on('line', (line) => {
   else handle(msg);
 });
 rl.on('close', () => {
+  clearInterval(queryPoller);
   session.stopPoller();
   session.saveState();
   process.exit(0);

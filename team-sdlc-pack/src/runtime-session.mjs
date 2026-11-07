@@ -12,6 +12,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 const VALIDATE_ANSWER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'validate-answer.mjs');
 const FINISH_ANSWER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'finish-answer.mjs');
+const MTM_QUERY = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'mtm-query.mjs');
 const BUILD_LOCK = path.join(path.dirname(fileURLToPath(import.meta.url)), 'build-lock.mjs');
 import { ProgressLog, scrubSummary, playerRuleErrors } from './progress.mjs';
 import { parseLifecycleText, validateDescriptor, publicDescriptor } from './lifecycle.mjs';
@@ -29,7 +30,7 @@ import { McpHttpClient, resultText } from './mcp-http.mjs';
 import { buildChecklist, looksLikeTestOutput } from './checklist.mjs';
 import { writeItemBrief, answerNeedsSource, answerNeedsImage } from './item-brief.mjs';
 import { extractRequiredEvidence, evidenceArrayRefs, unscorableAnswer } from './required-evidence.mjs';
-import { collectMcpMaterial } from './mcp-material.mjs';
+import { collectMcpMaterial, purpose as materialPurpose } from './mcp-material.mjs';
 import { until, SUBMIT_LIMITS } from './deadline.mjs';
 import {
   oneLine, safeId, uuid, sleep, readJson, writeJson, loggableOrigin, loggablePath, originOf, redact, truncate, minutes, SHA_RE, ITEM_KEY_RE, sha256, isInside, nowIso, repoKey,
@@ -64,7 +65,7 @@ export const DEFAULT_ADAPTER = {
   submit: { acceptedStatuses: ['ACCEPTED', 'RECEIVED'], retryBudgetMs: SUBMIT_LIMITS.retryMs },
   planner: {},
   heavyTask: { mode: 'last', startAfter: 'othersDispatched', minMinutesLeft: 0, maxParallel: 2, minPoints: 200, minDescriptionChars: 6000, minCriteria: 12 },
-  parallel: { maxCodeWorkers: 5, maxBuilds: 2, materialConcurrency: 4, portBase: 3100, workerModels: DEFAULT_WORKER_MODELS },
+  parallel: { maxCodeWorkers: 6, maxAnswerWorkers: 6, maxBuilds: 2, materialConcurrency: 4, portBase: 3100, workerModels: DEFAULT_WORKER_MODELS },
 };
 
 function deepMerge(a, b) {
@@ -101,6 +102,7 @@ export class RuntimeSession {
     this.openPairs = new WeakMap();
     this.submissionsInFlight = new Set();
     this.shipChain = Promise.resolve(); // ship() calls run one at a time: main checkout, gate and push are shared
+    this.activeGate = null;
     this.poller = null;
     this.lastPollError = null;
     this.lastWaitForUpdateAt = null;
@@ -126,6 +128,36 @@ export class RuntimeSession {
       };
       drain();
     });
+  }
+
+  queryQueueDir() {
+    return this.teamWorkspace ? path.join(this.teamWorkspace, 'team-sdlc-pack', 'query-queue') : null;
+  }
+
+  async processQueryQueue() {
+    const dir = this.queryQueueDir(); if (!dir) return;
+    fs.mkdirSync(dir, { recursive: true });
+    let files = []; try { files = fs.readdirSync(dir).filter(f => f.endsWith('.request.json')).slice(0, 8); } catch { return; }
+    for (const name of files) {
+      const requestFile = path.join(dir, name); const responseFile = requestFile.replace(/\.request\.json$/, '.response.json');
+      let q; try { q = JSON.parse(fs.readFileSync(requestFile, 'utf8')); } catch { continue; }
+      try {
+        const it = this.items.get(String(q.item || ''));
+        if (!it || !it.local?.queryToken || q.token !== it.local.queryToken) throw Object.assign(new Error('Token does not belong to this item.'), { code: 'ITEM_FORBIDDEN' });
+        const priority = it.type === 'PI' ? 0 : 1;
+        const listed = await this.limitedMaterialMcp({ action: 'tools', raw: true }, priority);
+        const tool = (listed.tools || []).find(t => t.name === q.tool);
+        const kind = tool && materialPurpose(tool);
+        if (!tool || !kind) throw Object.assign(new Error('Only advertised read-only material tools are allowed.'), { code: 'TOOL_NOT_READ_ONLY' });
+        const result = await this.limitedMaterialMcp({ action: 'call', name: q.tool, args: q.args || {}, raw: true }, priority);
+        // Follow-up query results must remain visible in the compact digest.  Raw
+        // per-service log captures are otherwise intentionally elided there in
+        // favour of the merged sweep result.
+        const brief = this.appendMcpMaterial(it.id, { purpose: 'follow-up', materialPurpose: kind, tool: q.tool, args: q.args || {}, ok: result?.ok === true, result });
+        writeJson(responseFile, { ok: result?.ok === true, item: it.id, tool: q.tool, text: resultText(result?.raw), result, digestPath: brief.digestPath || null });
+      } catch (e) { writeJson(responseFile, { ok: false, error: e.code || 'QUERY_FAILED', message: e.message }); }
+      try { fs.unlinkSync(requestFile); } catch { /* next poll */ }
+    }
   }
 
   plannerOpts() { return { ...this.adapter.planner, heavyTask: heavyOptions(this.adapter.heavyTask) }; }
@@ -164,7 +196,7 @@ export class RuntimeSession {
     const rankedIds = new Set(plan.ranked.filter(r => r.id !== it.id && !items.find(x => x.id === r.id)?.local?.heavy && r.action !== 'submit').map(r => r.id));
     const staleParked = (x) => x.local?.parked && (!x.local.parked.remainingStep || now - (x.local.dispatchedAt || 0) >= IDLE_WORKER_MS);
     const blocks = items.filter(x => {
-      if (x === it || x.local?.heavy || unavailable(x) || isSubmitted(x) || isClosed(x, now) || x.local?.ready || staleParked(x)) return false;
+      if (x === it || x.local?.heavy || unavailable(x) || isSubmitted(x) || isClosed(x, now) || x.local?.ready || staleParked(x) || (x.local?.startRefusals || 0) >= 2) return false;
       if (cfg.startAfter === 'othersDispatched') return !x.local?.worktree && !x.local?.spawnEntry && rankedIds.has(x.id);
       const activeWorker = x.local?.worktree && !x.local?.parked;
       return activeWorker || rankedIds.has(x.id);
@@ -992,10 +1024,12 @@ export class RuntimeSession {
       return `${r.id}${it?.revealedAt ? ` (open ${Math.max(0, (now - it.revealedAt) / 60000).toFixed(1)}m)` : ''}`;
     });
     const al = [
+      ...items.filter(i => i.type === 'PI' && i.local?.needInfo && !isSubmitted(i)).map(i => `!! PI NEED_INFO ${i.id}: ${i.local.needInfo}. Serve this before ship or other messages; tell the worker to use its mtm-query command.`),
       ...(undispatched.length && this.phase === 'GAME' && !['PAUSED', 'FINISHED'].includes(this.match.status)
         ? [`!! DISPATCH NOW: ${undispatched.join(', ')} have no worker. Call dispatch_ready and spawn every returned worker in this same turn, before servicing READY/messages.`] : []),
       ...(this.phase === 'GAME' && !['PAUSED', 'FINISHED'].includes(this.match.status) && this.idleCandidates(now).length
         ? [`!! CHECK WORKERS: ${this.idleCandidates(now).map(i => i.id).join(', ')} unchanged ${Math.round(IDLE_WORKER_MS / 60000)}+ min after dispatch. Call dispatch_ready and follow its respawnCheck (list_agents first; never start a second worker on a live one).`] : []),
+      ...items.filter(i => i.local?.preemptRequested && i.local?.parked).map(i => `!! DEADLINE PREEMPT ${i.id}: interrupt its worker now; worktree preserved for resume after ${i.local.parked.preemptedFor}.`),
       ...plannerAlerts(items, now, this.match.endsAt, { current, paused: this.phase === 'PAUSED', status: this.match.status }, this.adapter.planner),
       ...deferredHeavy.map(h => `note: HEAVY ${h.id} deferred (${h.detail}); helper starts it when eligible.`),
       ...baselineDefects.filter(d => d.likelyOwner === 'BASELINE-FIX').map(d => `!! BASELINE DEFECT: ${d.test}. The first code worker fixes it in its item (code or a new migration); never weaken the original test.`),
@@ -1036,7 +1070,7 @@ export class RuntimeSession {
     if (this.lastParse && !this.lastParse.structured) out.parse = `page structure unknown (${this.lastParse.warnings.join('; ')}): read pageText; pass matchUuid to start_work if needed`;
     if (pageText && this.lastPageText) out.pageText = truncate(this.lastPageText, 12000);
     out.maxCodeWorkers = this.adapter.parallel.maxCodeWorkers;
-    if (this.phase === 'GAME' && this.match.status !== 'FINISHED') out.keepAlive = 'Match running: spawn returned entries immediately; submit READY immediately. With workers, service completions first. Before the next wait_agent, call wait_for_update timeoutMs:1000 only when dispatch.lastDrainSecAgo is null or >=20; otherwise wait_agent <=45s. Never guess reveal waves or use generic wait. Without workers: wait_for_update with no timeoutMs.';
+    if (this.phase === 'GAME' && this.match.status !== 'FINISHED') out.keepAlive = 'Match running: spawn returned entries immediately; submit READY immediately. With workers, service completions first. Before the next wait_agent, call wait_for_update timeoutMs:1000 only when dispatch.lastDrainSecAgo is null or >=20; otherwise wait_agent <=20s. If a known reveal is due within 45s, use wait_for_update instead. Never guess reveal waves or use generic wait. Without workers: wait_for_update with no timeoutMs.';
     return out;
   }
 
@@ -1692,6 +1726,14 @@ export class RuntimeSession {
     if (!this.log) return { ok: false, error: 'NOT_CONFIGURED', next: this.nextHint() };
     const ev = { ...event };
     const workerStatus = ev.type === 'BACKLOG_STATUS' ? ev.status : null;
+    const wait = workerStatus === 'READY' && String(`${ev.summary || ''} ${remainingStep || ''}`).match(/WAITS-FOR\s+([A-Z][A-Z0-9_-]*-\d+|BASELINE-FIX)/i);
+    if (wait) {
+      const it = this.items.get(ev.backlogId); const dependency = wait[1].toUpperCase();
+      const depOpen = dependency === 'BASELINE-FIX' ? !this.state.baselineDefectsResolved : !isSubmitted(this.items.get(dependency) || {});
+      const left = it ? effectiveLeft(it, this.now(), this.match.endsAt).left : null;
+      if (depOpen && left != null && left < 5) return this.clean({ ok: false, error: 'WAITS_FOR_DEADLINE_FALLBACK', backlogItemKey: ev.backlogId, dependency, leftMin: Math.round(left * 10) / 10,
+        followUp: `Deadline fallback: ${dependency} is still unshipped and workerStopAt is under 5 minutes away. Fix that test/shared defect in your own item with the smallest change, verify it, commit, and reply READY again; do not keep waiting.` });
+    }
     if (workerStatus === 'READY') ev.status = 'COMPLETED';
     if (workerStatus === 'PARKED') ev.status = 'BLOCKED';
     delete ev.schemaVersion;
@@ -1731,6 +1773,8 @@ export class RuntimeSession {
           it.local.ready = ev.status === 'COMPLETED';
           if (ev.status === 'BLOCKED') it.local.parked = { commit, remainingStep: remainingStep || ev.summary, remainingMinutes: Number(remainingMinutes) || null, worktreeRoot: wt?.worktreeRoot || null };
           else delete it.local.parked;
+          if (it.type === 'PI' && ev.status === 'BLOCKED' && /NEED_INFO/i.test(`${ev.summary || ''} ${remainingStep || ''}`)) it.local.needInfo = remainingStep || ev.summary;
+          else if (ev.status === 'COMPLETED') delete it.local.needInfo;
           this.saveState(); // Preserve resume data even if process inspection fails.
           if (wt) await stopWorktreeProcesses(wt.worktreeRoot);
           this.buildQueue.update('release', ev.backlogId);
@@ -2011,6 +2055,37 @@ export class RuntimeSession {
     return out;
   }
 
+  async preemptForDeadline(it, items = [...this.items.values()]) {
+    if (!it?.deadlineAt || it.type === 'PI' || (it.local?.answerOnly ?? answerOnly(it, this.readMaterial(it.id) || {}))) return null;
+    const cfg = this.plannerOpts(); const estimate = cfg.estMinutes?.[it.type] ?? 10;
+    const left = effectiveLeft(it, this.now(), this.match.endsAt).left;
+    if (left == null || left > estimate + 2) return null;
+    const policy = dispatchPolicy(it, items.filter(i => !isSubmitted(i)), this.adapter.parallel, this.freeMemory());
+    if (policy.allowed || policy.reason !== 'CODE_WORKER_LIMIT') return null;
+    const candidates = items.filter(x => x.id !== it.id && x.type !== 'PI' && x.deadlineAt == null && x.local?.worktree && !x.local?.answerOnly
+      && !x.local?.ready && !x.local?.parked && !isSubmitted(x));
+    candidates.sort((a, b) => {
+      const ea = cfg.estMinutes?.[a.type] ?? 10; const eb = cfg.estMinutes?.[b.type] ?? 10;
+      const va = (Number(a.maxPoints) || 0) / ea; const vb = (Number(b.maxPoints) || 0) / eb;
+      const ra = Math.max(1, ea - Math.max(0, (this.now() - (a.local?.dispatchedAt || a.local?.startedAt || this.now())) / 60000));
+      const rb = Math.max(1, eb - Math.max(0, (this.now() - (b.local?.dispatchedAt || b.local?.startedAt || this.now())) / 60000));
+      return va - vb || rb - ra || a.id.localeCompare(b.id, 'en', { numeric: true });
+    });
+    const victim = candidates[0]; if (!victim) return null;
+    const victimEstimate = cfg.estMinutes?.[victim.type] ?? 10;
+    const spent = Math.max(0, (this.now() - (victim.local?.dispatchedAt || victim.local?.startedAt || this.now())) / 60000);
+    const commit = await G.revParse(victim.local.worktree.worktreeRoot, 'HEAD').catch(() => null);
+    victim.local.parked = { commit, remainingStep: `Resume after deadline item ${it.id}; inspect and preserve any uncommitted work first.`, remainingMinutes: Math.max(1, Math.ceil(victimEstimate - spent)), worktreeRoot: victim.local.worktree.worktreeRoot, preemptedFor: it.id };
+    victim.local.preemptRequested = true;
+    this.buildQueue.update('release', victim.id);
+    await stopWorktreeProcesses(victim.local.worktree.worktreeRoot).catch(() => []);
+    const event = { id: victim.id, taskName: victim.local.spawnEntry?.taskName || null, for: it.id, leftMin: Math.round(left * 10) / 10,
+      message: `Interrupt ${victim.id}'s worker now; its worktree is preserved and will resume after deadline item ${it.id}.` };
+    this.pendingEvents.push({ kind: 'DEADLINE_PREEMPT', id: victim.id, text: `DEADLINE_PREEMPT ${victim.id} for ${it.id}` });
+    this.saveState();
+    return event;
+  }
+
   async dispatch_ready() {
     const dispatchStartedAt = Date.now();
     if (this.phase !== 'GAME') return { ok: false, error: 'NOT_IN_GAME', next: this.nextHint() };
@@ -2031,6 +2106,25 @@ export class RuntimeSession {
       const res = await mapBounded(needStart, this.adapter.parallel.materialConcurrency, id => this.start_work({ backlogItemKey: id, compact: true }));
       res.forEach((r, i) => { if (!r?.ok) startErrors[needStart[i]] = r?.error || 'START_FAILED'; });
     }
+    // A shared baseline repair is valuable to every later submission, but must
+    // not consume most of a short-lived item's worker budget. Route it to the
+    // first non-deadline code item when the leading code item has <20 minutes.
+    const sharedDefects = !this.state.baselineDefectsResolved ? this.baselineDefects().filter(d => d.likelyOwner === 'BASELINE-FIX') : [];
+    let baselineFixTarget = this.state.baselineFixAssigned || null;
+    if (!baselineFixTarget && sharedDefects.length) {
+      const code = picked.map(r => this.items.get(r.id)).filter(it => it && !startErrors[it.id] && !answerOnly(it, this.readMaterial(it.id) || {}));
+      const first = code[0];
+      const firstLeft = first ? effectiveLeft(first, this.now(), this.match.endsAt).left : null;
+      baselineFixTarget = first && first.deadlineAt != null && firstLeft != null && firstLeft < 20
+        ? code.find(it => it.deadlineAt == null)?.id || first.id
+        : first?.id || null;
+      if (baselineFixTarget) this.state.baselineFixTarget = baselineFixTarget;
+    }
+    const preemptions = [];
+    for (const r of picked) {
+      const p = await this.preemptForDeadline(this.items.get(r.id), [...this.items.values()]);
+      if (p) preemptions.push(p);
+    }
     const spawn = [];
     this.refreshHeavyFlags(); // start_work may have supplied the description needed for detection
     for (const r of picked) {
@@ -2044,22 +2138,29 @@ export class RuntimeSession {
       delete it.local.orphaned;
       it.local.dispatches = (it.local.dispatches || 0) + 1;
       it.local.dispatchedAt = this.now();
+      const queryTokenFile = c.brief?.briefFile ? path.join(path.dirname(c.brief.briefFile), 'query-token.json') : null;
+      if (queryTokenFile && this.queryQueueDir()) {
+        it.local.queryToken ||= crypto.randomBytes(24).toString('hex');
+        writeJson(queryTokenFile, { item: it.id, token: it.local.queryToken, queueDir: this.queryQueueDir() });
+      }
+      const queryCmd = queryTokenFile ? `node "${MTM_QUERY}" --token-file "${queryTokenFile}" --item ${it.id} --tool <read-tool> [--service <s>] [--query "<words>"]` : null;
       const stop = c.workerStopAt ? new Date(c.workerStopAt).toISOString() : 'match end minus 5 minutes';
       const heavyText = it.local.heavy ? 'HEAVY item: deliver the highest-value part first, commit working increments, and at workerStopAt return what passes with honest PARTIAL rows and real evidence; never start a broad refactor. ' : '';
-      const sharedDefects = !this.state.baselineDefectsResolved ? this.baselineDefects().filter(d => d.likelyOwner === 'BASELINE-FIX') : [];
-      const baselineFixText = !c.answerOnly && !this.state.baselineFixAssigned && sharedDefects.length
+      const baselineFixText = !c.answerOnly && !this.state.baselineFixAssigned && sharedDefects.length && r.id === baselineFixTarget
         ? `BASELINE-FIX (ship with this first code item): fresh-DB original suite fails ${sharedDefects.map(d => d.test).join('; ')}. The grader reruns the WHOLE original suite on this item's submitted revision, so make every listed test pass in this item even if a later BUG may be about it: read the test, DECISIONS.md and the KB, fix the code with the smallest change (a schema rule: a NEW migration; never edit old migrations), keep the original tests untouched, add a focused regression, run the full suite, and record CONTRADICTION: in this item's engineering record. ` : '';
+      const baselineWaitText = !c.answerOnly && !this.state.baselineFixAssigned && sharedDefects.length && r.id !== baselineFixTarget && it.deadlineAt != null
+        ? `WAITS-FOR BASELINE-FIX: keep this item scoped and rebase when ${baselineFixTarget} ships; if your workerStopAt is under 5 minutes away and it is still unshipped, make the smallest shared fix here and return READY. ` : '';
       const resumeText = heavyText + (c.resume ? `RESUME: preserved commit ${c.resume.commit}; do only the remaining step: ${c.resume.remainingStep}. `
         : orphaned ? 'RESUME: the previous worker on this item stopped when the session restarted. Its commits and uncommitted files are in this worktree: check git status and git log first, keep that work and continue it; do not restart. ' : '');
       const answerRead = it.local.answerImage
         ? `Open every image path named in the item with the image viewer. Crop or zoom each number, count digits against neighbouring values, and cross-check totals (for example net equals the sum of its parts) before writing the answer. Then read ${c.brief?.digestPath || c.brief?.briefFile}.`
         : it.local.answerSource
         ? `Read ${c.brief?.digestPath || c.brief?.briefFile} first; it contains relevant issued source. Verify any missing function directly under ${c.appPath || c.matchRoot}; answer from code, never infer accounting or UI behavior.`
-        : `Read ONLY ${c.brief?.digestPath || `${c.brief?.briefFile} and files/`}${c.brief?.digestPath ? ' (item text, answer template, KB articles, test data and every production log line in UTC, oldest first); do not open brief.json, repo-map, baseline, skills, checklist or raw files/mcp/*.json unless the digest says a part is missing' : ''}.`;
+        : `Read ONLY ${c.brief?.digestPath || `${c.brief?.briefFile} and files/`}${c.brief?.digestPath ? ' (item text, answer template, KB articles, test data and every production log line in UTC, oldest first); do not open brief.json, repo-map, baseline, skills, checklist or raw files/mcp/*.json unless the digest says a part is missing' : ''}.${queryCmd ? ` If a fact is missing, query it yourself with \`${queryCmd}\`; NEED_INFO only if the read tool cannot answer.` : ''}`;
       const entry = {
         id: r.id, type: it.type, answerOnly: !!c.answerOnly,
         taskName: `${r.id.toLowerCase().replace(/[^a-z0-9]/g, '')}${it.local.dispatches > 1 ? `r${it.local.dispatches}` : ''}`,
-        message: `${resumeText}${baselineFixText}Item ${r.id} (${it.type}${c.answerOnly ? ', answer-only: no dev server, build or full suite' : ''}).${c.answerOnly ? ` FAST PATH (points drop with every minute${it.type === 'PI' ? ', PI is ranked by submit order: every turn counts' : ''}). No preamble, no progress or send_message updates. 1) ${answerRead} 2) Decide every field (UTC-normalise mixed offsets, dedupe retries, keep corrected entries, ignore decoys), then write ${c.answer?.submitJson || 'submit.json'} in one edit, keeping every template key. 3) Run \`${c.finishAnswer || c.validateAnswer}\`${c.finishAnswer ? ' (validates the schema and commits the answer folder); on ANSWER INVALID fix and rerun' : ', then commit'}. 4) Reply with exactly the STATUS block it printed. If a fact is truly missing reply NEED_INFO: <what> (logs: service + narrowing word). No extra evidence or test.log unless requiredEvidence lists it; never install validators.` : ` Check the answer with \`${c.validateAnswer}\` (no installs). Builds: \`node "${BUILD_LOCK}" --slots ${this.adapter.parallel.maxBuilds || 2} -- <build command>\` (takes a free build slot itself; never ask the orchestrator for build_slot).`} checkoutRoot = worktreeRoot = ${c.worktreeRoot}; folder ${c.folder}; matchRoot ${c.matchRoot}; briefFile ${c.brief?.briefFile}; filesDir ${c.brief?.filesDir}; answer ${c.answer?.submitJson || ''} (evidence in ${c.answer?.evidenceDir || ''}); ports dev=${c.ports?.dev} production=${c.ports?.production} (override fixed runner ports). ${c.answerOnly && c.brief?.digestPath ? 'The digest replaces briefFile for this item.' : 'Read briefFile first: it has the commands, playbook, checklist and organizer files.'} Work only in this worktree. Stop and return by ${stop} (Game Master clock). Commit the complete item (code, tests, evidence, answer) and reply STATUS READY or PARKED with COMMIT <sha>. Never push, submit, delegate or call Game APIs.`,
+        message: `${resumeText}${baselineFixText}${baselineWaitText}Item ${r.id} (${it.type}${c.answerOnly ? ', answer-only: no dev server, build or full suite' : ''}).${c.answerOnly ? ` FAST PATH (points drop with every minute${it.type === 'PI' ? ', PI is ranked by submit order: every turn counts' : ''}). No preamble, no progress or send_message updates. 1) ${answerRead} 2) Decide every field (UTC-normalise mixed offsets, dedupe retries, keep corrected entries, ignore decoys), then write ${c.answer?.submitJson || 'submit.json'} in one edit, keeping every template key. 3) Run \`${c.finishAnswer || c.validateAnswer}\`${c.finishAnswer ? ' (validates the schema and commits the answer folder); on ANSWER INVALID fix and rerun' : ', then commit'}. 4) Reply with exactly the STATUS block it printed. If a fact is truly missing reply NEED_INFO: <what> (logs: service + narrowing word). No extra evidence or test.log unless requiredEvidence lists it; never install validators.` : `${it.type === 'PI' && queryCmd ? ` If a fact is missing, query it yourself with \`${queryCmd}\`; NEED_INFO only if the read tool cannot answer.` : ''} Check the answer with \`${c.validateAnswer}\` (no installs). Builds: \`node "${BUILD_LOCK}" --slots ${this.adapter.parallel.maxBuilds || 2} -- <build command>\` (takes a free build slot itself; never ask the orchestrator for build_slot).`} checkoutRoot = worktreeRoot = ${c.worktreeRoot}; folder ${c.folder}; matchRoot ${c.matchRoot}; briefFile ${c.brief?.briefFile}; filesDir ${c.brief?.filesDir}; answer ${c.answer?.submitJson || ''} (evidence in ${c.answer?.evidenceDir || ''}); ports dev=${c.ports?.dev} production=${c.ports?.production} (override fixed runner ports). ${c.answerOnly && c.brief?.digestPath ? 'The digest replaces briefFile for this item.' : 'Read briefFile first: it has the commands, playbook, checklist and organizer files.'} Work only in this worktree. Stop and return by ${stop} (Game Master clock). Commit the complete item (code, tests, evidence, answer) and reply STATUS READY or PARKED with COMMIT <sha>. Never push, submit, delegate or call Game APIs.`,
       };
       entry.reasoningEffort = this.workerEffort(it, c);
       const model = this.workerModel(it, c);
@@ -2082,6 +2183,7 @@ export class RuntimeSession {
         ...(entry.model ? { model: entry.model } : {}), at: this.now(), respawns: 0, ...(await this.worktreeFingerprint(c.worktreeRoot)) };
     }
     const respawnCheck = await this.idleWorkers();
+    spawn.sort((a, b) => (a.type === 'PI' ? -1 : 0) - (b.type === 'PI' ? -1 : 0));
     // Once, within 30 s: covers an orchestrator that ignored the spawn field of wait_for_update; the
     // no-worker watchdog (4 min) remains the net for anything else.
     if (!spawn.length && this.recentSpawn && this.now() - this.recentSpawn.at < 30000) {
@@ -2096,9 +2198,9 @@ export class RuntimeSession {
     }
     this.saveState();
     return this.clean({
-      ok: true, spawn, waiting, ...(respawnCheck.length ? { respawnCheck } : {}),
+      ok: true, spawn, waiting, ...(preemptions.length ? { preemptions } : {}), ...(respawnCheck.length ? { respawnCheck } : {}),
       dispatchMs: Date.now() - dispatchStartedAt,
-      next: (respawnCheck.length ? `respawnCheck: ${respawnCheck.map(e => e.id).join(', ')} show no file change or commit ${Math.round(IDLE_WORKER_MS / 60000)}+ min after dispatch. For each: list_agents; if NO live agent has a task path ending in its previous taskName (${respawnCheck.map(e => e.previousTaskName).join(', ')}), spawn_agent with the entry's taskName and message exactly (same worktree); if one is alive, ignore the entry. ` : '') + (spawn.length
+      next: (preemptions.length ? `DEADLINE PREEMPT: interrupt the worker(s) for ${preemptions.map(p => p.id).join(', ')} now; their worktrees are PARKED and preserved. ` : '') + (respawnCheck.length ? `respawnCheck: ${respawnCheck.map(e => e.id).join(', ')} show no file change or commit ${Math.round(IDLE_WORKER_MS / 60000)}+ min after dispatch. For each: list_agents; if NO live agent has a task path ending in its previous taskName (${respawnCheck.map(e => e.previousTaskName).join(', ')}), spawn_agent with the entry's taskName and message exactly (same worktree); if one is alive, ignore the entry. ` : '') + (spawn.length
         ? `Spawn ALL ${spawn.length} worker(s) NOW, in this same turn, before anything else: one spawn_agent per entry with agent_type "team_feature_worker", fork_turns "none", task_name = taskName, message exactly as given, reasoning_effort = the entry's reasoningEffort, and model = entry.model when present (pass returned settings exactly; omit model only when absent; never substitute another model). If a spawn fails (e.g. "agent thread limit reached"), keep its entry and retry that same spawn right after the next wait_agent; the worktree already exists. Then service READY items.`
         : waiting.length ? 'Nothing could be dispatched yet (see waiting); service READY, then wait.' : 'Every open item already has a worker; service READY, then wait.'),
       view: this.view(),
@@ -2138,11 +2240,15 @@ export class RuntimeSession {
     const gateDb = freshGateDatabaseEnv(appDir, `${databaseSuffix(this.matchId)}_gate_${String(id).toLowerCase().replace(/[^a-z0-9]+/g, '_')}_${this.state.gateDbCounter}`);
     const env = { ...process.env, ...PNPM_SAFE_ENV, ...gateDb, FORCE_COLOR: '0', NO_COLOR: '1' };
     delete env.NODE_TEST_CONTEXT;
-    const t0 = Date.now();
-    const [tr, ty] = await Promise.all([
-      test ? runBounded(test, { cwd: appDir, env, timeoutMs: budgetSec * 1000, logFile: path.join(notes, `gate-${id}-tests.log`) }) : null,
-      types ? runBounded(types, { cwd: appDir, env, timeoutMs: budgetSec * 1000, logFile: path.join(notes, `gate-${id}-types.log`) }) : null,
-    ]);
+    const t0 = Date.now(); const controller = new AbortController();
+    const active = { id, deadlineAt: it.deadlineAt ?? null, controller }; this.activeGate = active;
+    let tr; let ty;
+    try {
+      [tr, ty] = await Promise.all([
+        test ? runBounded(test, { cwd: appDir, env, timeoutMs: budgetSec * 1000, logFile: path.join(notes, `gate-${id}-tests.log`), signal: controller.signal }) : null,
+        types ? runBounded(types, { cwd: appDir, env, timeoutMs: budgetSec * 1000, logFile: path.join(notes, `gate-${id}-types.log`), signal: controller.signal }) : null,
+      ]);
+    } finally { if (this.activeGate === active) this.activeGate = null; }
     // Nothing runnable found is not a green gate: treat it like an environment problem.
     const green = !!(tr || ty) && (!tr || tr.exit === 0) && (!ty || ty.exit === 0);
     let code = assertionFailure(tr, 'tests') || assertionFailure(ty, 'types');
@@ -2155,9 +2261,10 @@ export class RuntimeSession {
       try { base = failingTests(fs.readFileSync(path.join(notes, 'test.log'), 'utf8')); } catch { /* no baseline */ }
       if (fails.length && fails.every((f) => base.has(f))) { preExisting = fails; code = false; }
     }
-    const verdict = green || preExisting ? 'GREEN' : code ? 'CODE_FAILURE' : 'ENVIRONMENT';
-    if (scope === 'full' && green && this.baselineDefects().length) this.state.baselineDefectsResolved = true;
-    else if (scope === 'full' && Object.keys(gateDb).length && tr) this.resolveBaselineDefects(tr.text || '');
+    const interrupted = !!(tr?.interrupted || ty?.interrupted);
+    const verdict = interrupted ? 'INTERRUPTED' : green || preExisting ? 'GREEN' : code ? 'CODE_FAILURE' : 'ENVIRONMENT';
+    if (!interrupted && scope === 'full' && green && this.baselineDefects().length) this.state.baselineDefectsResolved = true;
+    else if (!interrupted && scope === 'full' && Object.keys(gateDb).length && tr) this.resolveBaselineDefects(tr.text || '');
     if (gateDb.TEST_DATABASE_URL) dropGateDatabase(appDir, gateDb.TEST_DATABASE_URL);
     const leftNow = effectiveLeft(it, this.now(), this.match.endsAt).left;
     const part = (r, label) => r ? { command: label, exit: r.exit, timedOut: r.timedOut, seconds: Math.round(r.ms / 100) / 10, summary: testSummary(r.text), tail: r.tail.slice(-6) } : { command: null, note: 'no runner found' };
@@ -2165,6 +2272,7 @@ export class RuntimeSession {
     this.saveState();
     const leftTxt = leftNow == null ? '' : ` (${leftNow.toFixed(1)}m left)`;
     const next = verdict === 'GREEN' ? `Gate GREEN${preExisting ? ` (only pre-existing baseline failures: ${preExisting.join('; ').slice(0, 200)})` : ''}: push now, then submit_work ${id} immediately${leftTxt}.`
+      : verdict === 'INTERRUPTED' ? `Gate INTERRUPTED for a deadline-ready item. Do not roll back ${id}; ship the urgent deadline item now, then rerun this gate.`
       : verdict === 'CODE_FAILURE' ? `Failing assertions/type errors: worktree rollback ${id}, send the worker .mtm-notes/gate-${id}-*.log and the main SHA for a fix-up.`
       : leftNow != null && leftNow <= 3 ? `ENVIRONMENT problem, not a code failure${leftTxt}: do NOT roll back. Push and submit_work ${id} NOW with the worker-verified commit.`
       : `ENVIRONMENT problem (timeout/hang/tool exit without a failing test), not a code failure: do NOT roll back. Call gate ${id} once more; if it repeats, push and submit_work (the worker already passed MVS + suite on its worktree).`;
@@ -2185,6 +2293,12 @@ export class RuntimeSession {
    * nothing is forced: on any refusal ship stops and returns the step and its next action.
    */
   async ship(args = {}) {
+    const incoming = this.items.get(String(args.backlogItemKey || '').trim());
+    const left = incoming ? effectiveLeft(incoming, this.now(), this.match.endsAt).left : null;
+    if (incoming?.deadlineAt != null && left != null && left <= 3 && this.activeGate && this.activeGate.id !== incoming.id) {
+      const running = this.items.get(this.activeGate.id);
+      if (running?.deadlineAt == null) this.activeGate.controller.abort();
+    }
     const go = async () => this.clean(await this.withAutoDispatch(await this.shipOne(args)));
     const run = this.shipChain.then(go, go);
     this.shipChain = run.catch(() => {});
@@ -2211,6 +2325,7 @@ export class RuntimeSession {
     const g = await this.gate({ backlogItemKey: id });
     steps.push({ step: 'gate', verdict: g.verdict, seconds: g.seconds ?? null });
     const leftNow = effectiveLeft(it, this.now(), this.match.endsAt).left;
+    if (g.verdict === 'INTERRUPTED') return this.clean({ ok: false, stage: 'gate', verdict: g.verdict, steps, interrupted: true, rolledBack: false, next: g.next });
     if (g.verdict === 'CODE_FAILURE') {
       if (it.local.heavy) {
         it.local.heavyGateFailures = (it.local.heavyGateFailures || 0) + 1;
@@ -2438,7 +2553,7 @@ export class RuntimeSession {
         const checklist = fs.readFileSync(context.checklistFile, 'utf8');
         fs.writeFileSync(context.checklistFile, checklist.split(this.appPath).join(context.appPath));
       }
-      if (resume) { delete it.local.parked; it.local.ready = false; }
+      if (resume) { delete it.local.parked; delete it.local.preemptRequested; it.local.ready = false; }
       const schemaRel = Object.keys(material.files || {}).find((k) => k.endsWith(`${id}-submit.schema.json`)) || Object.keys(material.files || {}).find((k) => /submit\.schema\.json$/.test(k));
       const mustCite = (material.requiredEvidence || []).filter((r) => r && r.reference !== false && r.name).map((r) => r.name);
       const validateAnswer = `node "${VALIDATE_ANSWER}" "${answerPaths(wtMatchRoot, id).submitJson}"${schemaRel ? ` "${path.join(brief.filesDir, ...schemaRel.split('/'))}"` : ''}${mustCite.length ? ` --required ${mustCite.join(',')}` : ''}`;

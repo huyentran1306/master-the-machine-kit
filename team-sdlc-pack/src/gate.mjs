@@ -42,19 +42,23 @@ function killTree(child) {
 }
 
 /** Runs one command with a hard timeout; output to logFile. Resolves { exit, timedOut, ms, tail }. */
-export function runBounded(spec, { cwd, env, timeoutMs, logFile }) {
+export function runBounded(spec, { cwd, env, timeoutMs, logFile, signal }) {
   return new Promise((resolve) => {
     const t0 = Date.now();
     const out = fs.openSync(logFile, 'w');
     fs.writeSync(out, `$ ${spec.label}\n`);
     const opts = { cwd, env, stdio: ['ignore', out, out], detached: process.platform !== 'win32', windowsHide: true };
     const child = spec.shell ? spawn(spec.shell, { ...opts, shell: true }) : spawn(spec.cmd, spec.args, opts);
-    let timedOut = false;
+    let timedOut = false; let interrupted = false; let settled = false;
     const timer = setTimeout(() => { timedOut = true; killTree(child); }, Math.max(1000, timeoutMs));
+    const abort = () => { interrupted = true; killTree(child); };
+    if (signal?.aborted) abort(); else signal?.addEventListener('abort', abort, { once: true });
     const done = (exit) => {
+      if (settled) return; settled = true;
       clearTimeout(timer); try { fs.closeSync(out); } catch { /* closed */ }
+      signal?.removeEventListener('abort', abort);
       const text = fs.readFileSync(logFile, 'utf8').replace(/\x1b\[[0-9;]*m/g, '');
-      resolve({ exit, timedOut, ms: Date.now() - t0, text, tail: text.split('\n').filter((l) => l.trim()).slice(-12) });
+      resolve({ exit, timedOut, interrupted, ms: Date.now() - t0, text, tail: text.split('\n').filter((l) => l.trim()).slice(-12) });
     };
     child.on('exit', (code, sig) => done(code ?? (sig ? 1 : 0)));
     child.on('error', (e) => { fs.appendFileSync(logFile, String(e)); done(127); });

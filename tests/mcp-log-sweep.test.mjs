@@ -73,3 +73,28 @@ test('log sweep retries HTTP 429 and marks services that still fail as missing',
   assert.ok(deployAttempts >= 2, `deploy attempts: ${deployAttempts}`);
   assert.deepEqual(merged.result.truncated, [{ service: 'payment-api', reason: 'FAILED' }]);
 });
+
+test('log sweep follows an advertised generic page contract until total is covered', async () => {
+  const all = Array.from({ length: 57 }, (_, i) => ({ timestamp: `2026-11-04T10:${String(i).padStart(2, '0')}:00Z`, message: `entry-${i}` }));
+  const advertised = [{ name: 'search_logs', description: 'Search production logs, 20 per page.',
+    inputSchema: { properties: { page: { type: 'integer', default: 1 }, limit: { type: 'integer', default: 20 } }, required: [] } }];
+  const entries = await collectMcpMaterial({ id: 'PI-57', type: 'PI', description: 'Investigate production logs.' }, async req => {
+    if (req.action === 'tools') return { ok: true, tools: advertised };
+    const page = Number(req.args?.page || 1); const limit = Number(req.args?.limit || 20);
+    const slice = all.slice((page - 1) * limit, page * limit);
+    return text({ total: all.length, returned: slice.length, entries: slice });
+  }, 10000);
+  const merged = entries.find(e => e.tool === 'search_logs-merged');
+  assert.equal(merged.result.unique, 57);
+  assert.deepEqual(merged.result.truncated, []);
+});
+
+test('log sweep reports the exact missing count when no paging shape is advertised', async () => {
+  const advertised = [{ name: 'search_logs', description: 'Search production logs.', inputSchema: { properties: {}, required: [] } }];
+  const entries = await collectMcpMaterial({ id: 'PI-MISSING', type: 'PI', description: 'Investigate production logs.' }, async req => {
+    if (req.action === 'tools') return { ok: true, tools: advertised };
+    return text({ total: 57, returned: 20, entries: Array.from({ length: 20 }, (_, i) => ({ timestamp: i, message: `entry-${i}` })) });
+  }, 10000);
+  const merged = entries.find(e => e.tool === 'search_logs-merged');
+  assert.deepEqual(merged.result.truncated, [{ service: '*', total: 57, fetched: 20 }]);
+});

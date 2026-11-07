@@ -71,6 +71,21 @@ test('gate runs the item\'s own tests with direct binaries and tells code failur
   assert.equal((await s.gate({ backlogItemKey: 'NOPE-1' })).error, 'UNKNOWN_ITEM');
 });
 
+test('an urgent deadline ship interrupts a running non-deadline gate without a code-failure rollback', async t => {
+  const { s, mode } = fixture(t);
+  s.items.get('BUG-91').deadlineAt = null;
+  mode('hang');
+  const running = s.gate({ backlogItemKey: 'BUG-91', budgetSec: 30 });
+  while (!s.activeGate) await new Promise(resolve => setImmediate(resolve));
+  s.items.set('BUG-99', { id: 'BUG-99', type: 'BUG', deadlineAt: Date.now() + 2 * 60000, local: {} });
+  s.phase = 'IDLE'; // the trigger is independent of auto-dispatch in this focused test
+  await s.ship({ backlogItemKey: 'BUG-99' });
+  const out = await running;
+  assert.equal(out.verdict, 'INTERRUPTED');
+  assert.match(out.next, /Do not roll back BUG-91/);
+  assert.ok(out.seconds < 5, JSON.stringify(out));
+});
+
 test('gate helpers', () => {
   assert.deepEqual(itemTestFiles(['assigned/src/tests/x.test.ts', 'assigned/src/lib/x.ts', 'other/y.test.ts', 'assigned/src/challenge/z.test.ts'], 'assigned/src'), ['tests/x.test.ts']);
   assert.equal(assertionFailure({ exit: 1, text: 'error TS2322: nope' }, 'types'), true);

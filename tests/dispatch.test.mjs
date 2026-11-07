@@ -19,6 +19,8 @@ test('heavy classifier is certain on labels and conservative without them', () =
 
 test('classify PI and answer TASKs without putting code or runnable MVS on the fast path', () => {
   assert.equal(answerOnly({ type: 'PI' }), true);
+  assert.equal(answerOnly({ type: 'PI', description: 'Hotfix: fix the application endpoint now.' }), false);
+  assert.equal(answerOnly({ type: 'PI' }, { minimumVerificationScenarios: [{ id: 'PI-TC-01' }] }), false);
   for (const description of ['Question: calculate the total.', 'Return answer values; no code changes required.', 'Report-only: identify the total.']) {
     assert.equal(answerOnly({ type: 'TASK', description }), true, description);
   }
@@ -31,7 +33,7 @@ test('classify PI and answer TASKs without putting code or runnable MVS on the f
 });
 
 test('dispatch gates code on current RAM and active code count, never answer workers', () => {
-  const running = Array.from({ length: 5 }, (_, n) => ({ id: `BUG-${n}`, type: 'BUG', local: { worktree: {} } }));
+  const running = Array.from({ length: 6 }, (_, n) => ({ id: `BUG-${n}`, type: 'BUG', local: { worktree: {} } }));
   const code = { id: 'CR-91', type: 'CR' };
   const gb = 1024 ** 3;
   assert.equal(dispatchPolicy(code, running, {}, 10 * gb).reason, 'CODE_WORKER_LIMIT');
@@ -39,8 +41,24 @@ test('dispatch gates code on current RAM and active code count, never answer wor
   assert.equal(dispatchPolicy(code, running, {}, 2.5 * gb).allowed, true);
   assert.equal(dispatchPolicy(code, running, {}, 2.5 * gb - 1).reason, 'LOW_RAM');
   running[1].local.parked = { remainingStep: 'verify' };
+  running[2].local.ready = true;
   assert.equal(dispatchPolicy(code, running, { maxCodeWorkers: 4 }, 3 * gb).codeWorkers, 3);
   for (const item of [{ id: 'PI-91', type: 'PI' }, { id: 'TASK-91', type: 'TASK', title: 'Question: answer values' }]) assert.equal(dispatchPolicy(item, running, { maxCodeWorkers: 1 }, 0).allowed, true);
+});
+
+test('answer workers are capped, PI bypasses caps, and urgent/resume code uses 1.5 GB floor', () => {
+  const answers = Array.from({ length: 6 }, (_, i) => ({ id: `TASK-${i}`, type: 'TASK', local: { answerOnly: true, worktree: {} } }));
+  const q = { id: 'TASK-Q', type: 'TASK', local: { answerOnly: true } };
+  assert.equal(dispatchPolicy(q, answers, { maxAnswerWorkers: 6 }, 10 * 1024 ** 3).reason, 'ANSWER_WORKER_LIMIT');
+  assert.equal(dispatchPolicy({ id: 'PI-Q', type: 'PI', local: { answerOnly: true } }, answers, { maxAnswerWorkers: 1 }, 0).allowed, true);
+  const urgent = { id: 'BUG-U', type: 'BUG', deadlineAt: Date.now() + 60000, local: {} };
+  assert.equal(dispatchPolicy(urgent, [], {}, 1.6 * 1024 ** 3).allowed, true);
+  assert.equal(dispatchPolicy({ id: 'BUG-N', type: 'BUG', local: {} }, [], {}, 1.6 * 1024 ** 3).reason, 'LOW_RAM');
+});
+
+test('view keepAlive caps agent waits at 20 seconds', () => {
+  const s = new RuntimeSession(); s.phase = 'GAME'; s.match.status = 'IN_PROGRESS';
+  assert.match(s.view().keepAlive, /wait_agent <=20s/);
 });
 
 test('shared build leases enforce configured concurrency, FIFO, idempotence and cancellation', () => {

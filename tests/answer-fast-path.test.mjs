@@ -87,6 +87,10 @@ test('issued source directories and image-only answers are detected generically'
   assert.equal(answerNeedsSource({ description: 'Use facts from the issued source in packages/loot-core/src/server/budget/, as issued.' }), true);
   assert.equal(answerNeedsSource({ description: 'Answer from the source under packages/loot-core/src/server/rules/' }), true);
   assert.equal(answerNeedsImage({ description: 'It exists only as an image: data/cfo-audit-voucher-2025-10.png' }), true);
+  assert.equal(answerNeedsImage({ description: 'Update the docker image configuration.' }), false);
+  assert.equal(answerNeedsSource({ type: 'PI', description: 'Incident in src/server/payments/' }), false);
+  assert.equal(answerNeedsImage({ type: 'PI', description: 'Production image shows an outage.' }), false);
+  assert.equal(answerNeedsSource({ type: 'TASK', description: 'Inspect https://example.test/app/dashboard for values.' }), false);
 });
 
 test('failingTests reads vitest and jest failure names, so baseline-only failures can be told apart', async () => {

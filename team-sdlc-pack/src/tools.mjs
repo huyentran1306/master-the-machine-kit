@@ -24,7 +24,7 @@ export const TOOLS = [
   },
   {
     name: 'wait_for_update',
-    description: 'Wait for Game Master events. With active workers: wait_agent <=45s, shortened to the next cutoff or known wave. Service a completion immediately; only after a timeout call this with timeoutMs:1000. Near a known wave (<=15s), call this through the wave instead. Never use generic wait. Without workers omit timeoutMs. Never end the turn while the match runs.',
+    description: 'Wait for Game Master events. With active workers: wait_agent <=20s, shortened to the next cutoff. Service a completion immediately; only after a timeout call this with timeoutMs:1000. When a known reveal is due within 45s, call this instead of wait_agent. Never use generic wait. Without workers omit timeoutMs. Never end the turn while the match runs.',
     inputSchema: obj({ timeoutMs: { type: 'integer', minimum: 1000, maximum: 55000 } }),
     handler: (s, a) => s.wait_for_update(a),
   },
@@ -95,7 +95,7 @@ export const TOOLS = [
   },
   {
     name: 'worktree',
-    description: 'Worker lifecycle: create isolated worktree/brief with unique dev/production ports (uncapped answer-only; code limited by RAM and maxCodeWorkers); integrate clean worker commits; rollback a failed unsubmitted integration using revert commits; remove; list. Never commits unfinished worker files.',
+    description: 'Worker lifecycle: create isolated worktree/brief with unique dev/production ports (PI bypasses caps; other answer-only uses maxAnswerWorkers; code uses RAM and maxCodeWorkers); integrate clean worker commits; rollback a failed unsubmitted integration using revert commits; remove; list. Never commits unfinished worker files.',
     inputSchema: obj({ action: { type: 'string', enum: ['create', 'integrate', 'rollback', 'remove', 'list'] }, backlogItemKey: key, message: { type: 'string', description: 'Legacy argument; worker supplies its own commit message.' } }, ['action']),
     handler: (s, a) => s.worktree(a),
   },

@@ -73,6 +73,7 @@
   },
   "parallel": {
     "maxCodeWorkers": 6,
+    "maxAnswerWorkers": 6,
     "maxBuilds": 2,
     "materialConcurrency": 4,
     "portBase": 3100,

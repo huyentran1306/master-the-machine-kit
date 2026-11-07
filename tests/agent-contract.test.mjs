@@ -110,10 +110,10 @@ test('orchestrator dispatches every item with a bounded completion and event loo
   assert.ok(card.trim().split('\n').length <= 30);
   assert.ok(text.indexOf('# Quick card') < 250);
   for (const phrase of ['Read this skill once', '-TotalCount 30', 'Never implement', 'EVERY startable item', 'late reveals',
-    'compact:true', 'worktree create', 'answer-only items uncapped', 'parallel.maxCodeWorkers', 'parallel.maxBuilds',
+    'compact:true', 'worktree create', 'answer-only workers are capped', 'parallel.maxCodeWorkers', 'parallel.maxBuilds',
     'deadline READY -> PARKED resume -> new PI -> nearest deadline -> points per minute', 'minus a quarter of the time left',
     'Never hold READY', 'target <=2 minutes', 'full suite + typecheck', 'build-relevant files',
-    'worktree rollback', 'trivial one-line conflict', 'entry.model', 'wait_agent', '45,000 ms', 'timeoutMs:1000',
+    'worktree rollback', 'trivial one-line conflict', 'entry.model', 'wait_agent', '20,000 ms', 'timeoutMs:1000',
     'Never use generic', 'no assumed cross-tool wait-any', 'stop-and-return', 'Never view_image', 'git diff --stat', '-Tail 15']) assert.ok(text.includes(phrase), phrase);
   assert.doesNotMatch(text, /Parallel lane \(when it pays\)|Keep working on your own item|Max 2 workers|redo the (small )?change in main|stash push/);
   const profile = read('agents/team-orchestrator.toml');

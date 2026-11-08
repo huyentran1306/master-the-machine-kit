@@ -254,6 +254,39 @@ test('gate scope: a baseline suite over 60 s runs the item tests on main; PI alw
   it.type = 'PI';
   assert.equal((await s.gate({ backlogItemKey: 'BUG-91' })).scope, 'item', 'PI: item scope');
   it.type = 'BUG';
-  fs.writeFileSync(path.join(notes, 'test.log'), ' Test Files  88 passed\n      Tests  1385 passed\n   Duration  104.07s (setup 83%)\n');
-  assert.equal((await s.gate({ backlogItemKey: 'BUG-91' })).scope, 'item', 'long suite: the worker ran it already');
+  fs.writeFileSync(path.join(notes, 'test.log'), ' Test Files  88 passed\n      Tests  1385 passed (1385)\n   Duration  104.07s (setup 83%)\n');
+  assert.equal((await s.gate({ backlogItemKey: 'BUG-91' })).scope, 'full', 'long suite but no proof the worker ran it: full suite here');
+  const ev = path.join(s.matchRoot, 'answers', 'BUG-91', 'evidence'); fs.mkdirSync(ev, { recursive: true });
+  fs.writeFileSync(path.join(ev, 'full-suite.log'), ' Test Files  89 passed\n      Tests  1390 passed (1390)\n');
+  const g = await s.gate({ backlogItemKey: 'BUG-91' });
+  assert.equal(g.scope, 'item', 'worker full-suite run on the same base stands'); assert.equal(it.local.gate.workerFullSuite.ok, true);
+  fs.writeFileSync(path.join(ev, 'full-suite.log'), ' Test Files  1 failed | 88 passed\n FAIL  src/x.test.ts > new break\n      Tests  1 failed | 1389 passed (1390)\n');
+  assert.equal((await s.gate({ backlogItemKey: 'BUG-91' })).scope, 'full', 'a new failure in the worker run is not proof');
+  fs.writeFileSync(path.join(ev, 'full-suite.log'), '      Tests  12 passed (12)\n');
+  assert.equal((await s.gate({ backlogItemKey: 'BUG-91' })).scope, 'full', 'a partial run is not proof');
+  fs.writeFileSync(path.join(ev, 'full-suite.log'), '      Tests  1390 passed (1390)\n');
+  // main gained other code since the worker's base: its run no longer stands
+  const fx = path.join(s.appPath, 'b.ts'); fs.writeFileSync(fx, 'export const b = 1;\n');
+  git(s.checkoutRoot, 'add', '-A'); git(s.checkoutRoot, 'commit', '-qm', 'other item');
+  const wt = it.local.worktree; wt.mainBefore = git(s.checkoutRoot, 'rev-parse', 'HEAD');
+  assert.equal((await s.gate({ backlogItemKey: 'BUG-91' })).scope, 'full'); assert.match(it.local.gate.workerFullSuite.reason, /main gained other code/);
+  delete wt.mainBefore; s.match.endsAt = Date.now() + 2.5 * 60000;
+  const late = await s.gate({ backlogItemKey: 'BUG-91' });
+  assert.equal(late.scope, 'item', 'no time for a full run: item tests rather than none ' + JSON.stringify({ v: late.verdict, e: late.error, n: late.next }).slice(0, 300));
+});
+
+test('a worker full-suite log older than its last code edit is not proof', async t => {
+  const { s, mode } = fixture(t); mode('green');
+  const it = s.items.get('BUG-91'); it.deadlineAt = null;
+  const notes = path.join(s.checkoutRoot, '.mtm-notes'); fs.mkdirSync(notes, { recursive: true });
+  fs.writeFileSync(path.join(notes, 'test.log'), '      Tests  1385 passed (1385)\n   Duration  104.07s\n');
+  // the worker's worktree: the evidence log was written before the last code edit
+  const wtRoot = s.checkoutRoot; const wtMatch = s.matchRoot;
+  Object.assign(it.local.worktree, { worktreeRoot: wtRoot, matchRoot: wtMatch });
+  const ev = path.join(wtMatch, 'answers', 'BUG-91', 'evidence'); fs.mkdirSync(ev, { recursive: true });
+  const log = path.join(ev, 'baseline-suite.log'); fs.writeFileSync(log, '      Tests  1390 passed (1390)\n');
+  const old = new Date(Date.now() - 60000); fs.utimesSync(log, old, old);
+  assert.equal((await s.gate({ backlogItemKey: 'BUG-91' })).scope, 'full');
+  fs.utimesSync(log, new Date(), new Date());
+  assert.equal((await s.gate({ backlogItemKey: 'BUG-91' })).scope, 'item');
 });

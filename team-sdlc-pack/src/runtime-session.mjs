@@ -1332,6 +1332,46 @@ export class RuntimeSession {
     };
   }
 
+  /**
+   * Did the worker run the whole suite on a tree equal to this integration (except its own changes)? Looks for a
+   * test summary in the item's evidence logs with at least 90% of the baseline test count and no failure beyond
+   * the baseline's, and checks that main gained no code outside answers/ between the worker's base and integration.
+   */
+  async workerFullSuiteRun(it, baselineText, wt = it?.local?.worktree) {
+    const count = (t) => Number((String(t).match(/^\s*Tests\s+.*?\((\d+)\)/m) || [])[1] || 0);
+    const baseTotal = count(baselineText);
+    const baseFails = failingTests(baselineText);
+    // Prefer the worker's worktree: file times there are real, so a run older than the last code edit (a baseline
+    // or "before fix" run) is not taken as proof for the final code.
+    const wtDir = wt?.matchRoot ? path.join(wt.matchRoot, 'answers', it.id, 'evidence') : null;
+    const dir = wtDir && fs.existsSync(wtDir) ? wtDir : path.join(this.matchRoot || '', 'answers', it.id, 'evidence');
+    let lastCode = 0;
+    if (dir === wtDir && wt?.worktreeRoot) {
+      const scope = await this.integratedChangeScope(it, wt.integratedSha).catch(() => ({ codeFiles: [] }));
+      for (const f of scope.codeFiles || []) { try { lastCode = Math.max(lastCode, fs.statSync(path.join(wt.worktreeRoot, f)).mtimeMs); } catch { /* deleted */ } }
+    }
+    let best = null;
+    try {
+      for (const f of fs.readdirSync(dir).filter((n) => /\.(?:log|txt)$/i.test(n))) {
+        if (lastCode && fs.statSync(path.join(dir, f)).mtimeMs < lastCode) continue;
+        const text = fs.readFileSync(path.join(dir, f), 'utf8');
+        const total = count(text);
+        if (!total || (baseTotal && total < baseTotal * 0.9)) continue;
+        const fails = [...failingTests(text)].filter((x) => !baseFails.has(x));
+        if (/\b\d+ failed\b/.test(text) && fails.length) continue;
+        best = { file: f, total };
+      }
+    } catch { /* no evidence dir */ }
+    if (!best) return { ok: false, reason: 'no full-suite run in the evidence' };
+    if (wt?.integrationBase && wt?.mainBefore && wt.integrationBase !== wt.mainBefore) {
+      const d = await G.git(this.checkoutRoot, ['diff', '--name-only', wt.integrationBase, wt.mainBefore]);
+      const appRel = path.relative(this.checkoutRoot, this.appPath || this.matchRoot).split(path.sep).join('/');
+      const code = d.code ? ['?'] : d.stdout.split(/\r?\n/).filter(Boolean).filter((f) => (!appRel || f.startsWith(`${appRel}/`)) && !/(^|\/)answers\//.test(f));
+      if (code.length) return { ok: false, reason: `main gained other code since the worker's base (${code.length} file(s))`, ...best };
+    }
+    return { ok: true, ...best };
+  }
+
   async integratedChangeScope(it, revision = it?.local?.worktree?.integratedSha) {
     const wt = it?.local?.worktree; let base = wt?.mainBefore || wt?.integrationBase || this.environmentRevision || this.state.envReady?.revision;
     if (!base && revision) base = (await G.git(this.checkoutRoot, ['rev-parse', `${revision}^`])).stdout.trim() || null;
@@ -2370,7 +2410,13 @@ export class RuntimeSession {
     // item scope (ranked by submit order). An open baseline fix still gets the full suite, with a budget it can finish in.
     const suiteSec = Math.max(0, ...[...baselineText.matchAll(/^\s*Duration\s+([\d.]+)\s*s\b/gm)].map((m) => Number(m[1]) || 0));
     const longSuite = suiteSec > 60;
-    const scope = !full && !openBaselineFix && (it.deadlineAt != null || leftMin < 8 || it.type === 'PI' || longSuite) && own.length ? 'item' : 'full';
+    // A long suite is skipped on main only when the worker's own full-suite run still stands for this revision:
+    // its evidence shows a full run (>= 90% of the baseline test count), and main gained no other code between
+    // the worker's base and this integration. Otherwise the full suite runs here if it fits the time left.
+    const fullRunByWorker = longSuite ? await this.workerFullSuiteRun(it, baselineText, wt) : null;
+    const fullFits = !suiteSec || leftMin * 60 - 60 >= suiteSec * 1.3;
+    const itemOk = it.deadlineAt != null || leftMin < 8 || it.type === 'PI' || (longSuite && (fullRunByWorker?.ok || !fullFits));
+    const scope = !full && !openBaselineFix && itemOk && own.length ? 'item' : 'full';
     const { test, types } = gateCommands(appDir, { files: scope === 'item' ? own : [], recon: this.commands || {} });
     baselineText = baselineText.slice(0, 20000);
     const projectSpecs = test?.cmd ? projectTestSpecs(appDir, { files: scope === 'item' ? own : [], codeFiles: changeScope.codeFiles, appRel, baselineText }) : null;
@@ -2431,7 +2477,7 @@ export class RuntimeSession {
     if (gateDb.TEST_DATABASE_URL) dropGateDatabase(appDir, gateDb.TEST_DATABASE_URL);
     const leftNow = effectiveLeft(it, this.now(), this.match.endsAt).left;
     const part = (r, label) => r ? { command: label, exit: r.exit, timedOut: r.timedOut, seconds: Math.round(r.ms / 100) / 10, summary: testSummary(r.text), tail: r.tail.slice(-6) } : { command: null, note: 'no runner found' };
-    it.local.gate = { verdict, at: this.now(), scope, codeChanged: true, ...(preExisting ? { preExisting } : {}), ...(typesNotOurs ? { typesNotOurs } : {}) };
+    it.local.gate = { verdict, at: this.now(), scope, codeChanged: true, ...(preExisting ? { preExisting } : {}), ...(typesNotOurs ? { typesNotOurs } : {}), ...(fullRunByWorker ? { workerFullSuite: fullRunByWorker } : {}) };
     this.saveState();
     const leftTxt = leftNow == null ? '' : ` (${leftNow.toFixed(1)}m left)`;
     const next = verdict === 'GREEN' ? `Gate GREEN${preExisting ? ` (only pre-existing baseline failures: ${preExisting.join('; ').slice(0, 200)})` : ''}: push now, then submit_work ${id} immediately${leftTxt}.`

@@ -110,6 +110,7 @@ export class RuntimeSession {
     this.lastWaitForUpdateAt = null;
     this.materialMcpActive = 0;
     this.materialMcpQueue = [];
+    this.queryItemLimits = new Map();
     this.queryDrain = null;
   }
 
@@ -153,6 +154,51 @@ export class RuntimeSession {
     return this.teamWorkspace ? path.join(this.teamWorkspace, 'team-sdlc-pack', 'query-queue') : null;
   }
 
+  /** Worker-side query fan-out is useful, but one PI may not occupy the four-slot shared MCP pool. */
+  limitedItemQuery(itemId, work) {
+    let state = this.queryItemLimits.get(itemId);
+    if (!state) { state = { active: 0, queue: [] }; this.queryItemLimits.set(itemId, state); }
+    return new Promise((resolve, reject) => {
+      state.queue.push({ work, resolve, reject });
+      const drain = () => {
+        while (state.active < 2 && state.queue.length) {
+          const job = state.queue.shift(); state.active += 1;
+          Promise.resolve().then(job.work).then(job.resolve, job.reject).finally(() => {
+            state.active -= 1;
+            if (!state.active && !state.queue.length) this.queryItemLimits.delete(itemId);
+            else drain();
+          });
+        }
+      };
+      drain();
+    });
+  }
+
+  /** Retry a small 429 burst with jitter, but preserve the worker's 25 s retryable ceiling. */
+  async workerMaterialCall(request, priority) {
+    const cutoff = Date.now() + 25000; let last = null;
+    for (let attempt = 0; attempt < 3 && Date.now() < cutoff; attempt += 1) {
+      let timer;
+      try {
+        last = await Promise.race([
+          this.limitedMaterialMcp(request, priority),
+          new Promise((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error('The match MCP did not answer within 25 s; retry the same command.'), { code: 'MCP_BUSY' })), Math.max(1, cutoff - Date.now())); timer.unref?.(); }),
+        ]);
+      } catch (e) {
+        if (e?.code === 'MCP_BUSY') throw e;
+        const status = Number(e?.httpStatus || e?.status || e?.cause?.status);
+        if (status !== 429 && !/\b429\b|rate.?limit/i.test(String(e?.message || e))) throw e;
+        last = { ok: false, httpStatus: 429, error: e?.message || 'HTTP 429' };
+      } finally { clearTimeout(timer); }
+      const status = Number(last?.httpStatus || last?.status || last?.error?.httpStatus);
+      if (status !== 429 && !/\b429\b|rate.?limit/i.test(String(last?.error || ''))) return last;
+      const delay = 250 * 2 ** attempt + Math.floor(Math.random() * 250);
+      if (Date.now() + delay >= cutoff) break;
+      await sleep(delay);
+    }
+    throw Object.assign(new Error(`The match MCP is rate limited (${last?.error || 'HTTP 429'}); retry the same command in a few seconds.`), { code: 'MCP_BUSY' });
+  }
+
   async processQueryQueue() {
     // A drain stuck on one hung MCP call must not stop every later worker query: after 45 s start a new one.
     if (this.queryDrain && Date.now() - (this.queryDrainAt || 0) < 45000) return this.queryDrain;
@@ -179,6 +225,7 @@ export class RuntimeSession {
       }
     }
     let files = []; try { files = fs.readdirSync(dir).filter(f => f.endsWith('.request.json')).slice(0, 8); } catch { return; }
+    const claimed = [];
     for (const name of files) {
       const requestFile = path.join(dir, name);
       const claimedFile = requestFile.replace(/\.request\.json$/, '.processing.json');
@@ -194,6 +241,9 @@ export class RuntimeSession {
       try { fs.renameSync(requestFile, claimedFile); } catch { continue; } // atomic claim across pollers/processes
       let q; try { q = JSON.parse(fs.readFileSync(claimedFile, 'utf8')); }
       catch { writeJson(responseFile, { ok: false, error: 'QUERY_INVALID', message: 'Request JSON is invalid.' }); try { fs.unlinkSync(claimedFile); } catch { /* gone */ } continue; }
+      claimed.push({ q, claimedFile, responseFile });
+    }
+    await mapBounded(claimed, 4, ({ q, claimedFile, responseFile }) => this.limitedItemQuery(String(q.item || ''), async () => {
       try {
         const it = this.items.get(String(q.item || ''));
         if (!it || !it.local?.queryToken || q.token !== it.local.queryToken) throw Object.assign(new Error('Token does not belong to this item.'), { code: 'ITEM_FORBIDDEN' });
@@ -202,11 +252,7 @@ export class RuntimeSession {
         const tool = tools.find(t => t.name === q.tool);
         const kind = tool && materialPurpose(tool);
         if (!tool || !kind) throw Object.assign(new Error(`Only advertised read-only material tools are allowed (${tools.filter(t => materialPurpose(t)).map(t => t.name).join(', ') || 'none advertised'}).`), { code: 'TOOL_NOT_READ_ONLY' });
-        let timer;
-        const result = await Promise.race([
-          this.limitedMaterialMcp({ action: 'call', name: q.tool, args: q.args || {}, raw: true }, priority),
-          new Promise((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error('The match MCP did not answer within 25 s; retry the same command.'), { code: 'MCP_BUSY' })), 25000); timer.unref?.(); }),
-        ]).finally(() => clearTimeout(timer));
+        const result = await this.workerMaterialCall({ action: 'call', name: q.tool, args: q.args || {}, raw: true }, priority);
         // Follow-up query results must remain visible in the compact digest.  Raw
         // per-service log captures are otherwise intentionally elided there in
         // favour of the merged sweep result.
@@ -214,7 +260,7 @@ export class RuntimeSession {
         writeJson(responseFile, { ok: result?.ok === true, item: it.id, tool: q.tool, text: resultText(result?.raw), result, digestPath: brief.digestPath || null });
       } catch (e) { writeJson(responseFile, { ok: false, error: e.code || 'QUERY_FAILED', message: e.message }); }
       try { fs.unlinkSync(claimedFile); } catch { /* next poll */ }
-    }
+    }));
   }
 
   plannerOpts() { return { ...this.adapter.planner, heavyTask: heavyOptions(this.adapter.heavyTask) }; }
@@ -1081,6 +1127,12 @@ export class RuntimeSession {
     return this.clean({ ok: r.ok, error: r.error, view: this.view({ includeEvents: true, pageText: needText }) });
   }
 
+  wrapUpCandidates(now = this.now()) {
+    return [...this.items.values()].filter(it => it.local?.worktree && it.local?.startedAt && !it.local?.ready && !it.local?.parked
+      && !isSubmitted(it) && Number.isFinite(it.local?.workerStopAt) && now >= it.local.workerStopAt)
+      .sort((a, b) => (a.type === 'PI' ? 0 : 1) - (b.type === 'PI' ? 0 : 1) || (b.maxPoints || 0) - (a.maxPoints || 0));
+  }
+
   /** Compact state for the model; every tool result carries alerts and NEXT. */
   view({ includeEvents = false, pageText = false } = {}) {
     const now = this.now();
@@ -1104,14 +1156,16 @@ export class RuntimeSession {
     }).filter(Boolean);
     const baselineDefects = this.state.baselineDefectsResolved ? [] : this.baselineDefects();
     const current = this.state.current;
+    const wrapUp = this.wrapUpCandidates(now);
     const undispatched = ranked.filter(r => r.action !== 'submit').map((r) => {
       const it = this.items.get(r.id);
       return `${r.id}${it?.revealedAt ? ` (open ${Math.max(0, (now - it.revealedAt) / 60000).toFixed(1)}m)` : ''}`;
     });
     const al = [
-      ...items.filter(i => i.type === 'PI' && i.local?.needInfo && !isSubmitted(i)).map(i => `!! PI NEED_INFO ${i.id}: ${i.local.needInfo}. Serve this before ship or other messages; tell the worker to use its mtm-query command.`),
+      ...wrapUp.map(i => `!! WRAP UP ${i.id} NOW${i.type === 'PI' ? ' (PI — strongest priority)' : ''}: tell the worker to keep its fix, write the best values it can verify now, set status honestly, commit and return READY. Ship it immediately; do not spend another time box collecting.`),
       ...(undispatched.length && this.phase === 'GAME' && !['PAUSED', 'FINISHED'].includes(this.match.status)
         ? [`!! DISPATCH NOW: ${undispatched.join(', ')} have no worker. Call dispatch_ready and spawn every returned worker in this same turn, before servicing READY/messages.`] : []),
+      ...items.filter(i => i.type === 'PI' && i.local?.needInfo && !isSubmitted(i)).map(i => `!! PI NEED_INFO ${i.id}: ${i.local.needInfo}. After all returned spawns and urgent READY work, tell the worker to use its mtm-query command; do not relay a query it can run.`),
       ...(this.phase === 'GAME' && !['PAUSED', 'FINISHED'].includes(this.match.status) && this.idleCandidates(now).length
         ? [`!! CHECK WORKERS: ${this.idleCandidates(now).map(i => i.id).join(', ')} unchanged ${Math.round(IDLE_WORKER_MS / 60000)}+ min after dispatch. Call dispatch_ready and follow its respawnCheck (list_agents first; never start a second worker on a live one).`] : []),
       ...items.filter(i => i.local?.preemptRequested && i.local?.parked).map(i => `!! DEADLINE PREEMPT ${i.id}: interrupt its worker now; worktree preserved for resume after ${i.local.parked.preemptedFor}.`),
@@ -1152,12 +1206,14 @@ export class RuntimeSession {
       heavy: { mode: heavyOptions(this.adapter.heavyTask).mode, deferred: deferredHeavy },
       baselineDefects,
     };
+    if (wrapUp.length) out.wrapUp = wrapUp.map(i => ({ id: i.id, priority: i.type === 'PI' ? 'PI' : 'normal',
+      message: `Stop collecting now. Keep the working fix; write the best values you can verify, set status honestly, commit, and return STATUS READY with the commit SHA.` }));
     if (includeEvents && this.pendingEvents.length) out.events = this.pendingEvents.splice(0, 30);
     if (this.lastPollError) out.pollError = this.lastPollError;
     if (this.lastParse && !this.lastParse.structured) out.parse = `page structure unknown (${this.lastParse.warnings.join('; ')}): read pageText; pass matchUuid to start_work if needed`;
     if (pageText && this.lastPageText) out.pageText = truncate(this.lastPageText, 12000);
     out.maxCodeWorkers = this.adapter.parallel.maxCodeWorkers;
-    if (this.phase === 'GAME' && this.match.status !== 'FINISHED') out.keepAlive = 'Match running: spawn returned entries immediately; submit READY immediately. With workers, service completions first. Before the next wait_agent, call wait_for_update timeoutMs:1000 only when dispatch.lastDrainSecAgo is null or >=20; otherwise wait_agent <=20s. If a known reveal is due within 45s, use wait_for_update instead. Never guess reveal waves or use generic wait. Without workers: wait_for_update with no timeoutMs.';
+    if (this.phase === 'GAME' && this.match.status !== 'FINISHED') out.keepAlive = 'Match running: spawn returned entries first; submit imminent-deadline/READY PI work next; relay worker queries last and never relay what mtm-query can do. With workers, service completions first. Before the next wait_agent, call wait_for_update timeoutMs:1000 only when dispatch.lastDrainSecAgo is null or >=20; otherwise wait_agent <=20s. If a known reveal is due within 45s, use wait_for_update instead. Never guess reveal waves or use generic wait. Without workers: wait_for_update with no timeoutMs.';
     return out;
   }
 
@@ -1191,14 +1247,14 @@ export class RuntimeSession {
     const max = Math.min(Number(timeoutMs) || ceiling, ceiling);
     const until = Date.now() + max;
     let lastErr = null;
-    if (this.pendingEvents.length || this.hasDispatchAction()) return this.clean(await this.withAutoDispatch({ ok: true, changed: true, view: this.view({ includeEvents: true }) }));
+    if (this.pendingEvents.length || this.hasDispatchAction() || this.wrapUpCandidates().length) return this.clean(await this.withAutoDispatch({ ok: true, changed: true, view: this.view({ includeEvents: true }) }));
     const startStatus = this.match.status;
     while (Date.now() < until) {
       const r = await this.withLock(() => this.doRefresh());
       lastErr = r.ok ? null : r.error;
       const changed = r.ok && !!r.events?.some((e) => e.kind !== 'RESULT'); // grading results do not wake the agent
       const newlyPaused = this.match.status === 'PAUSED' && startStatus !== 'PAUSED'; // a pause that persists is waited out, not spun on
-      if (changed || this.hasDispatchAction() || this.match.status === 'FINISHED' || newlyPaused || this.phase !== 'GAME' && this.phase !== 'PREPARATION') {
+      if (changed || this.hasDispatchAction() || this.wrapUpCandidates().length || this.match.status === 'FINISHED' || newlyPaused || this.phase !== 'GAME' && this.phase !== 'PREPARATION') {
         return this.clean(await this.withAutoDispatch({ ok: true, changed, view: this.view({ includeEvents: true, pageText: !!r.events?.some((e) => e.kind === 'NEW' || e.kind === 'EDITED') && !this.lastParse?.structured }) }));
       }
       const wait = r.ok ? this.adapter.polling.successMs : this.adapter.polling.errorMs;
@@ -1212,12 +1268,24 @@ export class RuntimeSession {
     this.stopPoller();
     const ms = this.adapter.polling.backgroundMs;
     if (!ms || ms < 3000) return;
-    this.poller = setInterval(() => {
-      if (this.phase !== 'GAME') return;
-      if (this.match.lastRefreshAt && this.now() - this.match.lastRefreshAt < ms - 500) { this.prestartNew().catch(() => {}); return; }
-      this.withLock(() => this.doRefresh()).then(() => this.prestartNew()).catch(() => {});
-    }, ms);
+    this.poller = setInterval(() => { this.backgroundPoll().catch(() => {}); }, ms);
     this.poller.unref?.();
+  }
+
+  /** READY preparation keeps watching the same round so the first wave is booked before START is parsed. */
+  async backgroundPoll() {
+    if (!['PREPARATION', 'GAME'].includes(this.phase)) return;
+    const ms = this.adapter.polling.backgroundMs;
+    const fresh = this.match.lastRefreshAt && this.now() - this.match.lastRefreshAt < ms - 500;
+    if (!fresh || this.phase === 'PREPARATION') await this.withLock(() => this.doRefresh());
+    if (this.phase === 'PREPARATION') {
+      if (!this.state.envReady || this.match.status !== 'IN_PROGRESS') return;
+      this.phase = 'GAME';
+      this.syncDone = true;
+      this.pendingEvents.push({ kind: 'GAME_AUTO_STARTED', text: 'Match became IN_PROGRESS after readiness; first-wave material pickup started before the START message.' });
+      this.saveState();
+    }
+    await this.prestartNew();
   }
 
   /**
@@ -1344,8 +1412,10 @@ export class RuntimeSession {
   briefContext(it, worktreeRoot = this.checkoutRoot, matchRoot = this.matchRoot) {
     const { left } = effectiveLeft(it, this.now(), this.match.endsAt);
     // Keep time to integrate and submit, but a fixed 5 minutes would leave an 8-minute item 3.
-    const margin = left == null ? 5 : Math.min(5, Math.max(1.5, left * 0.25));
-    const stopAt = left == null ? null : this.now() + (left - margin) * 60000;
+    const baseMargin = left == null ? 5 : Math.min(5, Math.max(1.5, left * 0.25));
+    const margin = left == null ? 5 : it.type === 'PI' ? Math.min(left, Math.max(4, baseMargin)) : baseMargin;
+    const computedStopAt = left == null ? null : this.now() + (left - margin) * 60000;
+    const stopAt = it.local?.workerStopAt ?? computedStopAt;
     return {
       checkoutRoot: worktreeRoot, folder: this.repository?.folder, matchRoot,
       appPath: this.appPath ? path.join(matchRoot, path.relative(this.matchRoot, this.appPath)) : matchRoot,
@@ -1353,7 +1423,7 @@ export class RuntimeSession {
       stackSkill: this.stackSkill ? path.resolve(this.teamWorkspace || this.checkoutRoot, '.agents', 'skills', this.stackSkill, 'SKILL.md') : null,
       evidenceSkill: path.resolve(this.teamWorkspace || this.checkoutRoot, '.agents', 'skills', 'evidence-and-answer', 'SKILL.md'),
       answer: answerPaths(matchRoot, it.id), checklistFile: path.join(matchRoot, 'answers', it.id, 'checklist.md'),
-      deadlineAt: it.deadlineAt ?? null, workerStopAt: stopAt, deadlineMarginMinutes: left == null ? 5 : Math.round(Math.min(5, Math.max(1.5, left * 0.25)) * 10) / 10,
+      deadlineAt: it.deadlineAt ?? null, workerStopAt: stopAt, deadlineMarginMinutes: Math.round(margin * 10) / 10,
       answerOnly: it.local?.answerOnly ?? answerOnly(it, this.readMaterial(it.id) || {}), classifiedBy: it.local?.classifiedBy ?? null,
       answerSource: !!it.local?.answerSource,
       integrationGate: integrationGate(it), remainingStep: it.local?.resume?.remainingStep ?? null,
@@ -1474,7 +1544,7 @@ export class RuntimeSession {
     it.local.answerOnly = classification.answerOnly; it.local.classifiedBy = classification.classifiedBy; it.local.classificationReason = classification.reason;
     // Optional company material must not hold the whole first dispatch for the old 90 s ceiling.
     // PI keeps the largest slice for production logs; answer-only and code get bounded discovery.
-    const materialBudgetMs = it.type === 'PI' ? 30000 : it.type === 'CR' ? 25000 : it.local.answerOnly ? 15000 : 12000;
+    const materialBudgetMs = it.type === 'PI' ? 60000 : it.type === 'CR' ? 25000 : it.local.answerOnly ? 15000 : 12000;
     material.mcpMaterial = this.readMaterial(id)?.mcpMaterial ?? await collectMcpMaterial({ ...it, startInstruction: material.startInstruction }, request => this.limitedMaterialMcp(request, it.type === 'PI' ? 0 : 1), materialBudgetMs);
     this.materialCache = { ...(this.materialCache || {}), [id]: material };
     if (this.stateDir) {
@@ -2081,6 +2151,7 @@ export class RuntimeSession {
     }
     if (previous.length) {
       this.state.envReady = { revision: head, requestId: wanted.requestId };
+      this.startPoller();
       const same = { schemaVersion: 1, status: 'SUBMITTED', backlogs: [], summary: oneLine(summary || `ENVIRONMENT_READY already logged for ${this.matchId} at ${head.slice(0, 12)}.`, 2000) };
       return { ok: true, revision: head, replay: true, final: same, reply: JSON.stringify(same), next: 'Readiness was already reported for this round. Reply with the `reply` JSON and end the turn.' };
     }
@@ -2088,6 +2159,7 @@ export class RuntimeSession {
     if (!ok) return { ok: false, error: 'LOG_APPEND_FAILED', message: 'ENVIRONMENT_READY was not written; mtm-player has NOT received readiness. Fix the log problem and call report_ready again.', alerts: this.view().alerts };
     this.state.envReady = { revision: head, requestId: this.prepareRequestId };
     this.saveState();
+    this.startPoller();
     const fin = { schemaVersion: 1, status: 'SUBMITTED', backlogs: [], summary: oneLine(summary || `ENVIRONMENT_READY logged for ${this.matchId} at ${head.slice(0, 12)}; waiting for mtm-player START_GAME input.`, 2000) };
     return { ok: true, revision: head, final: fin, reply: JSON.stringify(fin), next: 'Preparation done. Reply with exactly the `reply` JSON and end the turn; START_GAME input will arrive as a new message.' };
   }
@@ -2358,10 +2430,11 @@ export class RuntimeSession {
       // wait at most 20 s, then run anyway.
       const heavyWaitMs = it.type === 'PI' || it.deadlineAt != null ? Math.min(20000, this.adapter.parallel.heavyStepWaitMs || 120000) : (this.adapter.parallel.heavyStepWaitMs || 120000);
       const doEverything = `Do everything the item's requirements ask. If the item asks to change the application, make the change, run the relevant tests, and commit it with the answer. If the item names source paths or images, open them. In the STATUS block state SCOPE: answer or SCOPE: answer+code. `;
+      const piQueryGuide = it.type === 'PI' ? `Log queries: do not query a service marked complete in the digest; otherwise narrow with a timestamp prefix copied from a real entry, never a guessed ID, and use at most about 30 queries. ` : '';
       const entry = {
         id: r.id, type: it.type, answerOnly: !!c.answerOnly,
         taskName: `${r.id.toLowerCase().replace(/[^a-z0-9]/g, '')}${it.local.dispatches > 1 ? `r${it.local.dispatches}` : ''}`,
-        message: `${resumeText}${baselineFixText}${baselineWaitText}${doEverything}Item ${r.id} (${it.type}${c.answerOnly ? ', answer-first hint' : ''}).${c.answerOnly ? ` FAST PATH (points drop with every minute${it.type === 'PI' ? ', PI is ranked by submit order: every turn counts' : ''}). No preamble, no progress or send_message updates. 1) ${answerRead} 2) Decide every field (UTC-normalise mixed offsets, dedupe retries, keep corrected entries, ignore decoys), then write ${c.answer?.submitJson || 'submit.json'} in one edit, keeping every template key. 3) For SCOPE: answer run \`${c.finishAnswer || c.validateAnswer}\`${c.finishAnswer ? ' (validates the schema and commits the answer folder); on ANSWER INVALID fix and rerun' : ', then commit'}; for SCOPE: answer+code run the relevant tests and commit code, tests and answer together instead${it.type === 'PI' ? ' (PI: whatever the item asks for, such as a build, browser check or evidence, is done; beyond that run only the tests for the changed code, no full suite, full build or reinstall: the main gate re-checks)' : ''}. 4) Reply with the STATUS block including SCOPE. Only if your mtm-query command cannot answer, reply NEED_INFO: <what> (logs: service + narrowing word). No extra evidence or test.log unless requiredEvidence lists it; never install validators.` : `${c.brief?.digestPath ? ` Item text, KB articles, test data and logs: read ${c.brief.digestPath}, not the raw files/mcp/*.json.` : ''}${c.brief?.likelyFilesPath ? ` Code search: start from ${c.brief.likelyFilesPath} (files ranked by this item's words, with symbols, imports and related tests); confirm with \`rg -n -m 20 <term> <those paths>\` before any repo-wide search.` : ''}${queryCmd ? ` If a fact (KB rule, log line, test data) is missing, query it yourself with \`${queryCmd}\`; NEED_INFO only if the read tool cannot answer.` : ''} Check the answer with \`${c.validateAnswer}\` (no installs). Builds, full test suites and browser/e2e runs: \`node "${BUILD_LOCK}" --slots ${this.adapter.parallel.maxHeavySteps || 2} --max-wait-ms ${heavyWaitMs} -- <command>\` (takes a free slot itself; after ${Math.round(heavyWaitMs / 1000)} s it runs anyway; never ask the orchestrator for build_slot). Single test files run directly. Stop dev servers and browsers as soon as the evidence is captured. Redirect long output (builds, full suites, image tools such as sips) to a file under .mtm-notes/ and print only its last 20 lines.`} checkoutRoot = worktreeRoot = ${c.worktreeRoot}; folder ${c.folder}; matchRoot ${c.matchRoot}; briefFile ${c.brief?.briefFile}; filesDir ${c.brief?.filesDir}; answer ${c.answer?.submitJson || ''} (evidence in ${c.answer?.evidenceDir || ''}); ports dev=${c.ports?.dev} production=${c.ports?.production} (override fixed runner ports). ${c.answerOnly && c.brief?.digestPath ? 'Start with digestPath; if the requirements need app changes, then read briefFile and its code-lifecycle material.' : 'Read briefFile first: it has the commands, playbook, checklist and organizer files.'} Work only in this worktree. Stop and return by ${stop} (Game Master clock). Commit the complete item (code, tests, evidence, answer) and reply STATUS READY or PARKED with COMMIT <sha> and SCOPE. Never push, submit, delegate or call Game APIs.`,
+        message: `${resumeText}${baselineFixText}${baselineWaitText}${doEverything}${piQueryGuide}Item ${r.id} (${it.type}${c.answerOnly ? ', answer-first hint' : ''}).${c.answerOnly ? ` FAST PATH (points drop with every minute${it.type === 'PI' ? ', PI is ranked by submit order: every turn counts' : ''}). No preamble, no progress or send_message updates. 1) ${answerRead} 2) Decide every field (UTC-normalise mixed offsets, dedupe retries, keep corrected entries, ignore decoys), then write ${c.answer?.submitJson || 'submit.json'} in one edit, keeping every template key. 3) For SCOPE: answer run \`${c.finishAnswer || c.validateAnswer}\`${c.finishAnswer ? ' (validates the schema and commits the answer folder); on ANSWER INVALID fix and rerun' : ', then commit'}; for SCOPE: answer+code run the relevant tests and commit code, tests and answer together instead${it.type === 'PI' ? ' (PI: whatever the item asks for, such as a build, browser check or evidence, is done; beyond that run only the tests for the changed code, no full suite, full build or reinstall: the main gate re-checks)' : ''}. 4) Reply with the STATUS block including SCOPE. Only if your mtm-query command cannot answer, reply NEED_INFO: <what> (logs: service + narrowing word). No extra evidence or test.log unless requiredEvidence lists it; never install validators.` : `${c.brief?.digestPath ? ` Item text, KB articles, test data and logs: read ${c.brief.digestPath}, not the raw files/mcp/*.json.` : ''}${c.brief?.likelyFilesPath ? ` Code search: start from ${c.brief.likelyFilesPath} (files ranked by this item's words, with symbols, imports and related tests); confirm with \`rg -n -m 20 <term> <those paths>\` before any repo-wide search.` : ''}${queryCmd ? ` If a fact (KB rule, log line, test data) is missing, query it yourself with \`${queryCmd}\`; NEED_INFO only if the read tool cannot answer.` : ''} Check the answer with \`${c.validateAnswer}\` (no installs). Builds, full test suites and browser/e2e runs: \`node "${BUILD_LOCK}" --slots ${this.adapter.parallel.maxHeavySteps || 2} --max-wait-ms ${heavyWaitMs} -- <command>\` (takes a free slot itself; after ${Math.round(heavyWaitMs / 1000)} s it runs anyway; never ask the orchestrator for build_slot). Single test files run directly. Stop dev servers and browsers as soon as the evidence is captured. Redirect long output (builds, full suites, image tools such as sips) to a file under .mtm-notes/ and print only its last 20 lines.`} checkoutRoot = worktreeRoot = ${c.worktreeRoot}; folder ${c.folder}; matchRoot ${c.matchRoot}; briefFile ${c.brief?.briefFile}; filesDir ${c.brief?.filesDir}; answer ${c.answer?.submitJson || ''} (evidence in ${c.answer?.evidenceDir || ''}); ports dev=${c.ports?.dev} production=${c.ports?.production} (override fixed runner ports). ${c.answerOnly && c.brief?.digestPath ? 'Start with digestPath; if the requirements need app changes, then read briefFile and its code-lifecycle material.' : 'Read briefFile first: it has the commands, playbook, checklist and organizer files.'} Work only in this worktree. Stop and return by ${stop} (Game Master clock). Commit the complete item (code, tests, evidence, answer) and reply STATUS READY or PARKED with COMMIT <sha> and SCOPE. Never push, submit, delegate or call Game APIs.`,
       };
       entry.reasoningEffort = this.workerEffort(it, c);
       const model = this.workerModel(it, c);
@@ -2511,7 +2584,7 @@ export class RuntimeSession {
     this.saveState();
     const leftTxt = leftNow == null ? '' : ` (${leftNow.toFixed(1)}m left)`;
     const next = verdict === 'GREEN' ? `Gate GREEN${preExisting ? ` (only pre-existing baseline failures: ${preExisting.join('; ').slice(0, 200)})` : ''}: push now, then submit_work ${id} immediately${leftTxt}.`
-      : verdict === 'INTERRUPTED' ? `Gate INTERRUPTED for a deadline-ready item. Do not roll back ${id}; ship the urgent deadline item now, then rerun this gate.`
+      : verdict === 'INTERRUPTED' ? `Gate INTERRUPTED for a higher-priority READY item. Do not roll back ${id}; ship that item now, then rerun this gate.`
       : verdict === 'CODE_FAILURE' ? `Failing assertions/type errors: worktree rollback ${id}, send the worker .mtm-notes/gate-${id}-*.log and the main SHA for a fix-up.`
       : leftNow != null && leftNow <= 3 ? `ENVIRONMENT problem, not a code failure${leftTxt}: do NOT roll back. Push and submit_work ${id} NOW with the worker-verified commit.`
       : `ENVIRONMENT problem (timeout/hang/tool exit without a failing test), not a code failure: do NOT roll back. Call gate ${id} once more; if it repeats, push and submit_work (the worker already passed MVS + suite on its worktree).`;
@@ -2534,9 +2607,14 @@ export class RuntimeSession {
   async ship(args = {}) {
     const incoming = this.items.get(String(args.backlogItemKey || '').trim());
     const left = incoming ? effectiveLeft(incoming, this.now(), this.match.endsAt).left : null;
-    if (incoming?.deadlineAt != null && left != null && left <= 3 && this.activeGate && this.activeGate.id !== incoming.id) {
+    const urgentDeadline = incoming?.deadlineAt != null && left != null && left <= 3;
+    const urgentPi = incoming?.type === 'PI' && incoming.local?.ready;
+    if ((urgentDeadline || urgentPi) && this.activeGate && this.activeGate.id !== incoming.id) {
       const running = this.items.get(this.activeGate.id);
-      if (running?.deadlineAt == null) this.activeGate.controller.abort();
+      // A deadline inside three minutes keeps priority even over PI. PI only interrupts ordinary work.
+      const runningLeft = running ? effectiveLeft(running, this.now(), this.match.endsAt).left : null;
+      const runningUrgent = running?.deadlineAt != null && runningLeft != null && runningLeft <= 3;
+      if (!runningUrgent && running?.type !== 'PI' && running?.deadlineAt == null) this.activeGate.controller.abort();
     }
     const go = async () => this.clean(await this.withAutoDispatch(await this.shipOne(args)));
     const run = this.shipChain.then(go, go);
@@ -2769,6 +2847,7 @@ export class RuntimeSession {
       const baseSha = it.local.worktree?.baseSha || await G.revParse(wtRoot, 'HEAD');
       it.local.worktree = { ...it.local.worktree, worktreeRoot: wtRoot, matchRoot: wtMatchRoot, branch: `mtm-wt/${id}`, baseSha, ports };
       const context = this.briefContext(it, wtRoot, wtMatchRoot);
+      it.local.workerStopAt ??= context.workerStopAt;
       const material = this.readMaterial(id);
       material.requiredEvidence ??= extractRequiredEvidence(it, material);
       material.mcpMaterial ??= await collectMcpMaterial({ ...it, startInstruction: material.startInstruction }, request => this.limitedMaterialMcp(request, it.type === 'PI' ? 0 : 1));

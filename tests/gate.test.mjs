@@ -113,6 +113,26 @@ test('an urgent deadline ship interrupts a running non-deadline gate without a c
   assert.ok(out.seconds < 5, JSON.stringify(out));
 });
 
+test('a READY PI interrupts a running ordinary gate, but not an imminent deadline gate', async t => {
+  const { s, mode } = fixture(t);
+  s.items.get('BUG-91').deadlineAt = null; mode('hang');
+  let running = s.gate({ backlogItemKey: 'BUG-91', budgetSec: 30 });
+  while (!s.activeGate) await new Promise(resolve => setImmediate(resolve));
+  s.items.set('PI-03', { id: 'PI-03', type: 'PI', local: { ready: true } });
+  s.phase = 'IDLE';
+  await s.ship({ backlogItemKey: 'PI-03' });
+  let out = await running;
+  assert.equal(out.verdict, 'INTERRUPTED');
+  assert.match(out.next, /higher-priority READY item/);
+
+  s.items.get('BUG-91').deadlineAt = Date.now() + 2 * 60000;
+  running = s.gate({ backlogItemKey: 'BUG-91', budgetSec: 1 });
+  while (!s.activeGate) await new Promise(resolve => setImmediate(resolve));
+  await s.ship({ backlogItemKey: 'PI-03' });
+  out = await running;
+  assert.notEqual(out.verdict, 'INTERRUPTED', 'a gate inside its own three-minute deadline is kept ahead of PI');
+});
+
 test('gate helpers', () => {
   assert.deepEqual(itemTestFiles(['assigned/src/tests/x.test.ts', 'assigned/src/lib/x.ts', 'other/y.test.ts', 'assigned/src/challenge/z.test.ts'], 'assigned/src'), ['tests/x.test.ts']);
   assert.equal(assertionFailure({ exit: 1, text: 'error TS2322: nope' }, 'types'), true);

@@ -128,9 +128,10 @@ export function answerDigest({ item, material, source = '' }) {
   for (const l of logs) {
     if (!l) continue;
     out.push(`## Production logs: ${l.unique} unique entries, UTC, oldest first`, '');
+    if (l.completeServices?.length) out.push(`Complete services: ${l.completeServices.join(', ')}. Do not query these services again.`, '');
     if (l.truncated?.length) {
       const missing = l.truncated.filter(t => t.reason).map(t => t.service);
-      if (missing.length) out.push(`MISSING: ${missing.join(', ')}. These services failed or timed out during collection.`, '');
+      if (missing.length) out.push(`MISSING: ${missing.join(', ')}. These services are incomplete; use a timestamp prefix from the visible entries if the answer depends on them.`, '');
       out.push(`Not complete for: ${l.truncated.map((t) => t.reason ? `${t.service} (${t.reason})` : `${t.service} (${t.fetched}/${t.total}${t.levelsOverLimit?.length ? `, over limit: ${t.levelsOverLimit.join('/')}` : ''})`).join('; ')}. Ask NEED_INFO with a narrowing word only if the answer depends on them.`, '');
     }
     out.push('Format: timestamp-UTC | level | service | requestId | message | other fields', '', '```text');

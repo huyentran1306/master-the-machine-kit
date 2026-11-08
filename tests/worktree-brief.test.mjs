@@ -378,6 +378,31 @@ test('worker queries survive a failed tool listing: MCP_BUSY, then the cached li
   assert.equal(listings, 2, 'the tool list is fetched once after it succeeds');
 });
 
+test('twenty worker queries for one item use at most two MCP calls and recover from a 429 burst', async t => {
+  const { s, create } = worktreeSession(t);
+  s.matchId = 'QUERY-RATE-LIMIT';
+  await create('PI-73', 'PI');
+  s.items.get('PI-73').local.queryToken = 'token-pi-73';
+  let attempts = 0; let active = 0; let peak = 0;
+  s.match_mcp = async req => {
+    if (req.action === 'tools') return { ok: true, tools: [{ name: 'search_logs', description: 'Search production logs', annotations: { readOnlyHint: true } }] };
+    attempts += 1; active += 1; peak = Math.max(peak, active);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    active -= 1;
+    if (attempts <= 5) return { ok: false, httpStatus: 429, error: 'HTTP 429' };
+    return { ok: true, raw: { content: [{ type: 'text', text: '{"entries":[]}' }] } };
+  };
+  const dir = s.queryQueueDir(); fs.mkdirSync(dir, { recursive: true });
+  for (let i = 0; i < 20; i += 1) fs.writeFileSync(path.join(dir, `burst-${i}.request.json`), JSON.stringify({ item: 'PI-73', token: 'token-pi-73', tool: 'search_logs', args: { query: String(i) } }));
+  for (let round = 0; round < 4 && fs.readdirSync(dir).some(f => f.endsWith('.request.json')); round += 1) await s.processQueryQueue();
+  const responses = fs.readdirSync(dir).filter(f => /^burst-.*\.response\.json$/.test(f)).map(f => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')));
+  assert.equal(responses.length, 20);
+  assert.ok(responses.every(r => r.ok || r.error === 'MCP_BUSY'), JSON.stringify(responses.filter(r => !r.ok)));
+  assert.ok(responses.filter(r => r.error === 'MCP_BUSY').length <= 2, 'only the calls that exhaust their own retry window ask the worker to retry');
+  assert.equal(responses.some(r => ['TOOL_NOT_READ_ONLY', 'ITEM_FORBIDDEN'].includes(r.error)), false);
+  assert.ok(peak <= 2, `peak active calls for one item: ${peak}`);
+});
+
 test('six code workers and uncapped PI get distinct persistent ports, private test DBs and remapped paths', async t => {
   const { s, args, create } = worktreeSession(t);
   const outputs = await Promise.all(['TASK-91', 'BUG-92', 'CR-93', 'BUG-97', 'CR-98', 'BUG-99'].map(id => create(id)));
@@ -501,6 +526,18 @@ test('late worker cutoff is in the past and unknown cutoff stays null', t => {
     assert.equal(context.workerStopAt, s.now() + (left - Math.min(5, Math.max(1.5, left / 4))) * 60000);
   }
   assert.equal(s.briefContext(args.item).workerStopAt, null);
+});
+
+test('a running PI gets a best-effort wrap-up at its cutoff and ships before ordinary READY work', () => {
+  const s = new RuntimeSession(); const now = Date.now();
+  s.phase = 'GAME'; s.match.status = 'IN_PROGRESS'; s.match.endsAt = now + 4 * 60000; s.now = () => now; s.freeMemory = () => 8 * 1024 ** 3;
+  s.items.set('PI-80', { id: 'PI-80', type: 'PI', maxPoints: 160, local: { startedAt: now - 10 * 60000, workerStopAt: now, worktree: {}, answerOnly: true } });
+  s.items.set('BUG-81', { id: 'BUG-81', type: 'BUG', maxPoints: 100, local: { startedAt: now - 5 * 60000, ready: true, worktree: {} } });
+  const view = s.view();
+  assert.match(view.alerts[0], /WRAP UP PI-80 NOW/);
+  assert.match(view.wrapUp[0].message, /best values/);
+  s.items.get('PI-80').local.ready = true;
+  assert.equal(rank([...s.items.values()], now, s.match.endsAt).ranked[0].id, 'PI-80');
 });
 
 test('RAM queues code worktrees and the global thread cap holds even for PI workers', async t => {

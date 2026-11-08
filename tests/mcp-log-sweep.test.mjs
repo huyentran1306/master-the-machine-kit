@@ -89,6 +89,49 @@ test('log sweep follows an advertised generic page contract until total is cover
   assert.deepEqual(merged.result.truncated, []);
 });
 
+test('log sweep narrows a capped no-pagination API by timestamp until all 755 entries are covered', async () => {
+  const all = Array.from({ length: 755 }, (_, i) => {
+    const timestamp = new Date(Date.UTC(2026, 9, 14, 0, i * 5)).toISOString().replace('Z', '+07:00');
+    return { ts: timestamp, level: 'INFO', message: 'rule.applied', transaction: `TX-${String(i).padStart(5, '0')}`, amount: i + 1 };
+  });
+  const advertised = [{ name: 'search_logs', description: 'Search production logs (services: rule-engine). Returns newest first, at most 20 per call.',
+    inputSchema: { properties: { query: { type: 'string' }, service: { type: 'string' } }, required: [] } }];
+  let calls = 0;
+  const entries = await collectMcpMaterial({ id: 'PI-755', type: 'PI', description: 'Investigate production logs.' }, async req => {
+    if (req.action === 'tools') return { ok: true, tools: advertised };
+    calls += 1;
+    const terms = String(req.args?.query || '').split(/\s+/).filter(Boolean);
+    const hit = all.filter(e => terms.every(term => JSON.stringify(e).includes(term)));
+    const newest = hit.slice().reverse().slice(0, 20);
+    assert.ok(newest.length <= 20);
+    return text({ total: hit.length, returned: newest.length, entries: newest });
+  }, 65000);
+  const merged = entries.find(e => e.tool === 'search_logs-merged');
+  assert.equal(merged.result.unique, all.length);
+  assert.deepEqual(merged.result.truncated, []);
+  assert.deepEqual(merged.result.completeServices, ['rule-engine']);
+  assert.ok(calls < 150, `calls: ${calls}`);
+  assert.equal(merged.result.entries[0].transaction, 'TX-00000');
+  assert.equal(merged.result.entries.at(-1).transaction, 'TX-00754');
+});
+
+test('log sweep detects a capped server that ignores timestamp prefixes without looping', async () => {
+  const all = Array.from({ length: 80 }, (_, i) => ({ ts: new Date(Date.UTC(2026, 9, 16, 0, i)).toISOString(), level: 'INFO', service: 'rule-engine', message: `entry-${i}` }));
+  const advertised = [{ name: 'search_logs', description: 'Search production logs (services: rule-engine). Returns at most 20 per call.',
+    inputSchema: { properties: { query: { type: 'string' }, service: { type: 'string' } }, required: [] } }];
+  let calls = 0;
+  const entries = await collectMcpMaterial({ id: 'PI-IGNORE', type: 'PI', description: 'Investigate production logs.' }, async req => {
+    if (req.action === 'tools') return { ok: true, tools: advertised };
+    calls += 1;
+    const newest = all.slice().reverse().slice(0, 20);
+    return text({ total: all.length, returned: newest.length, entries: newest });
+  }, 10000);
+  const merged = entries.find(e => e.tool === 'search_logs-merged');
+  assert.equal(merged.result.unique, 20);
+  assert.equal(merged.result.truncated[0].reason, 'NARROWING_UNSUPPORTED');
+  assert.ok(calls < 20, `calls: ${calls}`);
+});
+
 test('log sweep reports the exact missing count when no paging shape is advertised', async () => {
   const advertised = [{ name: 'search_logs', description: 'Search production logs.', inputSchema: { properties: {}, required: [] } }];
   const entries = await collectMcpMaterial({ id: 'PI-MISSING', type: 'PI', description: 'Investigate production logs.' }, async req => {

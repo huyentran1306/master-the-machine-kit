@@ -290,6 +290,30 @@ test('background pickup books new items once, only those dispatch would start no
   assert.ok(!started.includes('BUG-2'), 'nothing while paused');
 });
 
+test('a READY preparation auto-starts first-wave material before the later START call', async () => {
+  const s = new RuntimeSession({ adapter: { polling: { backgroundMs: 5000 }, parallel: { materialConcurrency: 4 } } });
+  const now = Date.now(); const material = {}; const started = [];
+  s.phase = 'PREPARATION'; s.matchId = 'AUTO1234'; s.playerSessionId = 'session-auto'; s.account = { username: 'u', password: 'p' };
+  s.state.envReady = { revision: 'abc', requestId: 'prepare-1' }; s.match.endsAt = now + 30 * 60000; s.now = () => now;
+  s.freeMemory = () => 8 * 1024 ** 3; s.saveState = () => {}; s.readMaterial = id => material[id] || null;
+  s.withLock = fn => fn();
+  s.doRefresh = async () => {
+    s.match.status = 'IN_PROGRESS'; s.match.lastRefreshAt = now;
+    s.items.set('PI-1', { id: 'PI-1', type: 'PI', local: {} });
+    s.items.set('BUG-1', { id: 'BUG-1', type: 'BUG', local: {} });
+    return { ok: true, events: [{ kind: 'NEW' }] };
+  };
+  s.start_work = async ({ backlogItemKey: id }) => { started.push(id); material[id] = { files: {} }; s.items.get(id).local.startedAt = now; return { ok: true }; };
+  await s.backgroundPoll();
+  assert.equal(s.phase, 'GAME');
+  assert.deepEqual(started.sort(), ['BUG-1', 'PI-1']);
+  s.loadState = () => {}; s.reconcileFromLog = () => {}; s.startPoller = () => {}; s.withAutoDispatch = async x => x;
+  const later = await s.applyDescriptor({ type: 'START_GAME', matchId: 'AUTO1234', playerSessionId: 'session-auto', requestId: 'start-1' });
+  assert.equal(later.sync, undefined, 'the already-synced first wave is not fetched a second time');
+  assert.deepEqual([...s.items].map(([id]) => id).sort(), ['BUG-1', 'PI-1']);
+  assert.deepEqual(started.sort(), ['BUG-1', 'PI-1']);
+});
+
 test('short START: paths and model policy omitted by the orchestrator are reused from the PREPARE session', async (t) => {
   const L = await import('./support/lifecycle-inputs.mjs');
   const fsMod = await import('node:fs'); const osMod = await import('node:os'); const pathMod = await import('node:path');

@@ -59,7 +59,14 @@ export function parseLogResult(result) {
   return null;
 }
 
-const stamp = e => { const t = Date.parse(e?.timestamp ?? e?.time ?? e?.ts ?? e?.at ?? ''); return Number.isNaN(t) ? Infinity : t; };
+const isoValue = e => {
+  if (!e || typeof e !== 'object') return null;
+  const preferred = [e.timestamp, e.time, e.ts, e.at];
+  const values = [...preferred, ...Object.values(e)];
+  return values.find(v => typeof v === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d/.test(v) && !Number.isNaN(Date.parse(v))) || null;
+};
+const stamp = e => { const t = Date.parse(isoValue(e) || ''); return Number.isNaN(t) ? Infinity : t; };
+const dayPrefix = ms => new Date(ms).toISOString().slice(0, 10);
 
 /**
  * Incident items are answered from production logs that only the orchestrator can query. The item-text
@@ -67,7 +74,7 @@ const stamp = e => { const t = Date.parse(e?.timestamp ?? e?.time ?? e?.ts ?? e?
  * searches through NEED_INFO and took 2.5 minutes. Sweep every service (and its levels when truncated)
  * up front and hand the worker one merged, deduplicated, oldest-first file.
  */
-async function sweepLogs(tool, fetchOnly, cutoff) {
+async function sweepLogs(tool, fetchOnly, cutoff, { callCap = 150 } = {}) {
   const props = tool.inputSchema?.properties || {};
   const required = tool.inputSchema?.required || [];
   const key = re => Object.keys(props).find(k => re.test(words(k)));
@@ -93,15 +100,28 @@ async function sweepLogs(tool, fetchOnly, cutoff) {
     return args;
   };
   const seen = new Map();
+  const scopedSeen = new Map();
   const truncated = [];
-  const run = async (service, query) => {
+  let calls = 0;
+  const fetch = request => {
+    if (calls >= callCap) return Promise.resolve({ ok: false, reason: 'CALL_CAP' });
+    calls += 1;
+    return fetchOnly(request, cutoff);
+  };
+  const remember = (service, level, e) => {
+    const json = JSON.stringify(e); seen.set(json, e);
+    const add = key => { if (!scopedSeen.has(key)) scopedSeen.set(key, new Set()); scopedSeen.get(key).add(json); };
+    add(`${service || '*'}|*`);
+    if (level) add(`${service || '*'}|${level}`);
+  };
+  const run = async (service, query, scopeLevel = null) => {
     const args = argsFor(service, query);
     if (!args) return { parsed: null, reason: 'FAILED' };
     if (Date.now() >= cutoff) return { parsed: null, reason: 'TIMEOUT' };
-    const entry = await fetchOnly({ action: 'call', name: tool.name, args }, cutoff);
+    const entry = await fetch({ action: 'call', name: tool.name, args });
     let parsed = entry.ok ? parseLogResult(entry.result) : null;
     const localSeen = new Set();
-    for (const e of parsed?.entries || []) { const k = JSON.stringify(e); localSeen.add(k); seen.set(k, e); }
+    for (const e of parsed?.entries || []) { const k = JSON.stringify(e); localSeen.add(k); remember(service, scopeLevel, e); }
     if (!parsed) return { parsed, reason: entry.reason || 'FAILED' };
 
     // Prefer the pagination contract advertised by the tool instead of guessing
@@ -119,10 +139,10 @@ async function sweepLogs(tool, fetchOnly, cutoff) {
       else if (cursorKey && cursor != null) paging[cursorKey] = cursor;
       else break;
       if (limitKey) paging[limitKey] = size;
-      const more = await fetchOnly({ action: 'call', name: tool.name, args: argsFor(service, query, paging) }, cutoff);
+      const more = await fetch({ action: 'call', name: tool.name, args: argsFor(service, query, paging) });
       const next = more.ok ? parseLogResult(more.result) : null;
       if (!next?.entries?.length) break;
-      for (const e of next.entries) { const k = JSON.stringify(e); localSeen.add(k); seen.set(k, e); }
+      for (const e of next.entries) { const k = JSON.stringify(e); localSeen.add(k); remember(service, scopeLevel, e); }
       fetched = localSeen.size;
       if (cursorKey) {
         if (next.nextCursor == null || next.nextCursor === cursor) break;
@@ -140,21 +160,87 @@ async function sweepLogs(tool, fetchOnly, cutoff) {
   }
   const levels = ['ERROR', 'WARN', 'INFO'];
   const deeper = services.filter((_, i) => top[i + 1]?.parsed && top[i + 1].parsed.total > top[i + 1].parsed.returned);
-  const split = await mapBounded(deeper.flatMap(service => levels.map(level => ({ service, level }))), 4, ({ service, level }) => run(service, level).then(r => ({ service, level, r: r.parsed })));
+  const split = await mapBounded(deeper.flatMap(service => levels.map(level => ({ service, level }))), 4, ({ service, level }) => run(service, level, level).then(r => ({ service, level, r: r.parsed })));
+
+  // Some log APIs expose total/returned but no page/cursor. Discover their filtering shape from the
+  // timestamps they returned: day -> hour -> ten-minute prefix, walking backwards from the oldest visible
+  // entry. No scenario nouns or guessed IDs. A server that ignores timestamp words is detected and left
+  // explicitly truncated instead of looping or pretending the newest page is complete.
+  const scopeCount = (service, level) => scopedSeen.get(`${service || '*'}|${level || '*'}`)?.size || 0;
+  const queryPrefix = async (service, level, prefix) => {
+    const r = await run(service, [level, prefix].filter(Boolean).join(' '), level);
+    const entries = r.parsed?.entries || [];
+    const supported = !entries.length || entries.every(e => String(isoValue(e) || '').startsWith(prefix)
+      && (!level || String(e?.level || '').toUpperCase() === level));
+    return { ...r, supported };
+  };
+  const collectPrefix = async (service, level, prefix, depth) => {
+    if (Date.now() >= cutoff || calls >= callCap) return { complete: false, reason: calls >= callCap ? 'CALL_CAP' : 'TIMEOUT', nonempty: false };
+    const r = await queryPrefix(service, level, prefix);
+    if (!r.parsed) return { complete: false, reason: r.reason || 'FAILED', nonempty: false };
+    if (!r.supported) return { complete: false, reason: 'NARROWING_UNSUPPORTED', nonempty: !!r.parsed.entries?.length };
+    if (!r.parsed.entries?.length) return { complete: true, nonempty: false };
+    if (r.parsed.total <= r.parsed.returned) return { complete: true, nonempty: true };
+    if (depth >= 2) return { complete: false, reason: 'NARROWING_UNSUPPORTED', nonempty: true };
+    const allChildren = depth === 0
+      ? Array.from({ length: 24 }, (_, n) => `${prefix}T${String(23 - n).padStart(2, '0')}`)
+      : Array.from({ length: 6 }, (_, n) => `${prefix}:${5 - n}`);
+    // Probe one child evidenced by the returned page before fanning out. An API that ignores the
+    // query is rejected after this single call instead of multiplying a bad prefix across 24 hours.
+    const evidenced = [...new Set(r.parsed.entries.map(e => {
+      const iso = String(isoValue(e) || '');
+      return depth === 0 ? iso.slice(0, 13) : iso.slice(0, 15);
+    }).filter(child => allChildren.includes(child)))];
+    const first = evidenced[0] || allChildren[0];
+    const probe = await collectPrefix(service, level, first, depth + 1);
+    if (!probe.complete) return probe;
+    const children = allChildren.filter(child => child !== first);
+    const parts = [probe, ...await mapBounded(children, 4, child => collectPrefix(service, level, child, depth + 1))];
+    const bad = parts.find(p => !p.complete);
+    return bad || { complete: true, nonempty: parts.some(p => p.nonempty) };
+  };
+  const narrow = async (service, level, parent) => {
+    if (!queryKey || pageKey || offsetKey || cursorKey || !parent?.entries?.length || parent.total <= parent.returned) return { complete: parent?.total <= parent?.returned };
+    const dated = parent.entries.map(e => ({ raw: isoValue(e), ms: stamp(e) })).filter(x => x.raw && Number.isFinite(x.ms)).sort((a, b) => a.ms - b.ms);
+    if (!dated.length) return { complete: false, reason: 'NARROWING_UNSUPPORTED' };
+    // Start from the timestamp's own calendar prefix. Converting +07:00 to UTC first can move it to
+    // the previous day, which a substring-matching server correctly treats as a different query.
+    const target = parent.total; let cursor = Date.parse(`${dated[0].raw.slice(0, 10)}T12:00:00Z`); let empties = 0; let attempted = 0;
+    while (scopeCount(service, level) < target && empties < 3 && Date.now() < cutoff && calls < callCap) {
+      const prefix = dayPrefix(cursor); const part = await collectPrefix(service, level, prefix, 0); attempted += 1;
+      if (!part.complete) return { complete: false, reason: part.reason || 'FAILED', attempted };
+      empties = part.nonempty ? 0 : empties + 1;
+      cursor -= 24 * 60 * 60 * 1000;
+    }
+    return { complete: scopeCount(service, level) >= target, reason: scopeCount(service, level) >= target ? null : calls >= callCap ? 'CALL_CAP' : Date.now() >= cutoff ? 'TIMEOUT' : 'NARROWING_UNSUPPORTED', attempted };
+  };
+  const cappedParts = split.filter(x => x.r && x.r.total > x.r.returned);
+  const narrowed = await mapBounded(cappedParts, 4, async x => ({ ...x, result: await narrow(x.service, x.level, x.r) }));
+  if (!services.length && top[0]?.parsed?.total > top[0].parsed.returned && queryKey && !pageKey && !offsetKey && !cursorKey) {
+    narrowed.push({ service: '*', level: null, r: top[0].parsed, result: await narrow(null, null, top[0].parsed) });
+  }
   for (let i = 0; i < services.length; i += 1) if (!top[i + 1]?.parsed) truncated.push({ service: services[i], reason: top[i + 1]?.reason || (Date.now() >= cutoff ? 'TIMEOUT' : 'FAILED') });
   for (const service of deeper) {
     const t = top[services.indexOf(service) + 1].parsed;
     const parts = split.filter(x => x.service === service);
-    const covered = parts.reduce((n, x) => n + (x.r?.returned || 0), 0);
-    if (covered < t.total) truncated.push({ service, total: t.total, fetched: Math.min(t.total, covered || t.returned), levelsOverLimit: parts.filter(x => x.r && x.r.total > x.r.returned).map(x => x.level) });
+    const covered = scopeCount(service, null);
+    if (covered < t.total) {
+      const incomplete = parts.filter(x => x.r && x.r.total > x.r.returned).map(x => ({ level: x.level, result: narrowed.find(n => n.service === service && n.level === x.level)?.result }));
+      const reason = incomplete.find(x => x.result?.reason)?.result?.reason;
+      truncated.push({ service, total: t.total, fetched: Math.min(t.total, covered || t.returned), ...(reason ? { reason } : {}), levelsOverLimit: incomplete.filter(x => !x.result?.complete).map(x => x.level) });
+    }
   }
-  if (top[0]?.parsed && top[0].parsed.total > top[0].parsed.returned && seen.size < top[0].parsed.total) truncated.push({ service: '*', total: top[0].parsed.total, fetched: Math.min(top[0].parsed.total, seen.size || top[0].parsed.returned) });
+  if (!services.length && top[0]?.parsed && top[0].parsed.total > top[0].parsed.returned && seen.size < top[0].parsed.total) {
+    const result = narrowed.find(n => n.service === '*')?.result;
+    truncated.push({ service: '*', total: top[0].parsed.total, fetched: Math.min(top[0].parsed.total, seen.size || top[0].parsed.returned), ...(result?.reason ? { reason: result.reason } : {}) });
+  }
   const entries = [...seen.values()].sort((a, b) => stamp(a) - stamp(b));
+  const completeServices = services.filter(service => !truncated.some(t => t.service === service));
   return {
     purpose: 'logs', tool: `${tool.name}-merged`, args: { services }, ok: true,
     result: {
       note: 'Every production log entry the kit could fetch, deduplicated, oldest first. Answer from this file; NEED_INFO only for a service in truncated (narrow it by a word such as an invoice number or requestId).',
-      unique: entries.length, services, truncated, entries,
+      unique: entries.length, services, completeServices, truncated, calls, entries,
     },
   };
 }
@@ -193,7 +279,8 @@ export async function collectMcpMaterial(item, call, budgetMs = 90000) {
         last = { ok: false, error: e.message };
         if (/deadline|timeout/i.test(e.message) || Date.now() >= cutoff) return { ...last, reason: 'TIMEOUT' };
       }
-      const delay = [300, 600, 1200][attempt] || 1200;
+      const base = [300, 600, 1200][attempt] || 1200;
+      const delay = base + Math.floor(Math.random() * Math.max(1, base * 0.25));
       if (Date.now() + delay >= cutoff) break;
       await sleep(delay);
     }
@@ -238,7 +325,7 @@ export async function collectMcpMaterial(item, call, budgetMs = 90000) {
   }
   const incident = item.type === 'PI' || /\b(incident|production logs?|observability)\b/i.test(String(item.description || ''));
   if (incident) {
-    const sweepCutoff = Math.min(deadline, Date.now() + 25000);
+    const sweepCutoff = Math.min(deadline, Date.now() + (item.type === 'PI' ? 60000 : 25000));
     const kb = selected.find(x => x.kind === 'search');
     const rules = kb && /\bincident report\b/i.test(String(item.description || '')) ? attempt(kb, sweepCutoff, false, { query: 'incident report rules' }) : null;
     for (const { tool } of selected.filter(x => x.kind === 'logs')) {

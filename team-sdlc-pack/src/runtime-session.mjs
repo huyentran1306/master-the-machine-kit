@@ -154,10 +154,12 @@ export class RuntimeSession {
   }
 
   async processQueryQueue() {
-    if (this.queryDrain) return this.queryDrain;
-    this.queryDrain = this.drainQueryQueue();
-    try { return await this.queryDrain; }
-    finally { this.queryDrain = null; }
+    // A drain stuck on one hung MCP call must not stop every later worker query: after 45 s start a new one.
+    if (this.queryDrain && Date.now() - (this.queryDrainAt || 0) < 45000) return this.queryDrain;
+    const drain = this.drainQueryQueue();
+    this.queryDrain = drain; this.queryDrainAt = Date.now();
+    try { return await drain; }
+    finally { if (this.queryDrain === drain) this.queryDrain = null; }
   }
 
   async drainQueryQueue() {
@@ -200,7 +202,11 @@ export class RuntimeSession {
         const tool = tools.find(t => t.name === q.tool);
         const kind = tool && materialPurpose(tool);
         if (!tool || !kind) throw Object.assign(new Error(`Only advertised read-only material tools are allowed (${tools.filter(t => materialPurpose(t)).map(t => t.name).join(', ') || 'none advertised'}).`), { code: 'TOOL_NOT_READ_ONLY' });
-        const result = await this.limitedMaterialMcp({ action: 'call', name: q.tool, args: q.args || {}, raw: true }, priority);
+        let timer;
+        const result = await Promise.race([
+          this.limitedMaterialMcp({ action: 'call', name: q.tool, args: q.args || {}, raw: true }, priority),
+          new Promise((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error('The match MCP did not answer within 25 s; retry the same command.'), { code: 'MCP_BUSY' })), 25000); timer.unref?.(); }),
+        ]).finally(() => clearTimeout(timer));
         // Follow-up query results must remain visible in the compact digest.  Raw
         // per-service log captures are otherwise intentionally elided there in
         // favour of the merged sweep result.

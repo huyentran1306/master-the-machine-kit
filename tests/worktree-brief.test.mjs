@@ -343,6 +343,39 @@ test('worker query queue enforces item token/read-only tools and rebuilds digest
   assert.equal((await ask('wrong-item', { item: 'PI-71', token: 'token-pi-70', tool: 'search_logs', args: {} })).error, 'ITEM_FORBIDDEN');
   assert.equal((await ask('write-tool', { item: 'PI-70', token: 'token-pi-70', tool: 'restart_service', args: {} })).error, 'TOOL_NOT_READ_ONLY');
   assert.ok(c.brief.digestPath);
+  // A14DI1HU: another mtm_minimal process on the same queue (a sub-agent's, never configured) must not claim
+  // PI-70's query and answer ITEM_FORBIDDEN; it leaves the request for the session that issued the token.
+  const stale = Object.create(Object.getPrototypeOf(s));
+  Object.assign(stale, { teamWorkspace: s.teamWorkspace, items: new Map(), queryDrain: null });
+  fs.writeFileSync(path.join(dir, 'foreign.request.json'), JSON.stringify({ item: 'PI-70', token: 'token-pi-70', tool: 'search_logs', args: { service: 'api' } }));
+  await stale.processQueryQueue();
+  assert.ok(fs.existsSync(path.join(dir, 'foreign.request.json')), 'a process that does not own the item leaves the request alone');
+  assert.ok(!fs.existsSync(path.join(dir, 'foreign.response.json')));
+  await s.processQueryQueue();
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'foreign.response.json'), 'utf8')).ok, true);
+});
+
+test('worker queries survive a failed tool listing: MCP_BUSY, then the cached list', async t => {
+  const { s, create } = worktreeSession(t);
+  s.matchId = 'QUERY-MATCH-2';
+  await create('PI-72', 'PI');
+  s.items.get('PI-72').local.queryToken = 'token-pi-72';
+  let listings = 0; let failList = true;
+  s.match_mcp = async req => {
+    if (req.action === 'tools') { listings += 1; return failList ? { ok: false, error: 'HTTP_429' } : { ok: true, tools: [{ name: 'search_logs', description: 'Search production logs', annotations: { readOnlyHint: true } }] }; }
+    return { ok: true, raw: { content: [{ type: 'text', text: '{"entries":[]}' }] } };
+  };
+  const dir = s.queryQueueDir(); fs.mkdirSync(dir, { recursive: true });
+  const ask = async (name) => {
+    fs.writeFileSync(path.join(dir, `${name}.request.json`), JSON.stringify({ item: 'PI-72', token: 'token-pi-72', tool: 'search_logs', args: {} }));
+    await s.processQueryQueue();
+    return JSON.parse(fs.readFileSync(path.join(dir, `${name}.response.json`), 'utf8'));
+  };
+  assert.equal((await ask('busy')).error, 'MCP_BUSY', 'a failed listing is reported as retryable, not as a write tool');
+  failList = false;
+  assert.equal((await ask('ok1')).ok, true);
+  assert.equal((await ask('ok2')).ok, true);
+  assert.equal(listings, 2, 'the tool list is fetched once after it succeeds');
 });
 
 test('six code workers and uncapped PI get distinct persistent ports, private test DBs and remapped paths', async t => {

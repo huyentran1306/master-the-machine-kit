@@ -133,6 +133,22 @@ export class RuntimeSession {
     });
   }
 
+  /**
+   * The match MCP tool list, fetched once and shared. A burst of worker queries used to list the tools once per
+   * query; when one listing failed, the query was refused as TOOL_NOT_READ_ONLY although the tool was fine.
+   */
+  async materialTools(priority = 1) {
+    if (this.materialToolList?.length) return this.materialToolList;
+    this.materialToolListing ||= this.limitedMaterialMcp({ action: 'tools', raw: true }, priority)
+      .finally(() => { this.materialToolListing = null; });
+    const listed = await this.materialToolListing;
+    if (!listed?.ok || !Array.isArray(listed.tools)) {
+      throw Object.assign(new Error(`The match MCP tool list is unavailable right now (${listed?.error || 'no answer'}); retry the same command in a few seconds.`), { code: 'MCP_BUSY' });
+    }
+    this.materialToolList = listed.tools;
+    return listed.tools;
+  }
+
   queryQueueDir() {
     return this.teamWorkspace ? path.join(this.teamWorkspace, 'team-sdlc-pack', 'query-queue') : null;
   }
@@ -165,6 +181,14 @@ export class RuntimeSession {
       const requestFile = path.join(dir, name);
       const claimedFile = requestFile.replace(/\.request\.json$/, '.processing.json');
       const responseFile = requestFile.replace(/\.request\.json$/, '.response.json');
+      // Every mtm_minimal process (orchestrator and each Codex sub-agent) runs this poller on the same queue.
+      // A14DI1HU: a process that never configured the match claimed PI-02's queries and answered
+      // ITEM_FORBIDDEN. Only the process that issued the item's token may claim its requests.
+      let peek = null; try { peek = JSON.parse(fs.readFileSync(requestFile, 'utf8')); } catch { /* claimed meanwhile or invalid: handled below */ }
+      if (peek) {
+        const owner = this.items.get(String(peek.item || ''));
+        if (!owner?.local?.queryToken) continue; // not ours: leave it for the session that owns the item
+      }
       try { fs.renameSync(requestFile, claimedFile); } catch { continue; } // atomic claim across pollers/processes
       let q; try { q = JSON.parse(fs.readFileSync(claimedFile, 'utf8')); }
       catch { writeJson(responseFile, { ok: false, error: 'QUERY_INVALID', message: 'Request JSON is invalid.' }); try { fs.unlinkSync(claimedFile); } catch { /* gone */ } continue; }
@@ -172,10 +196,10 @@ export class RuntimeSession {
         const it = this.items.get(String(q.item || ''));
         if (!it || !it.local?.queryToken || q.token !== it.local.queryToken) throw Object.assign(new Error('Token does not belong to this item.'), { code: 'ITEM_FORBIDDEN' });
         const priority = it.type === 'PI' ? 0 : 1;
-        const listed = await this.limitedMaterialMcp({ action: 'tools', raw: true }, priority);
-        const tool = (listed.tools || []).find(t => t.name === q.tool);
+        const tools = await this.materialTools(priority);
+        const tool = tools.find(t => t.name === q.tool);
         const kind = tool && materialPurpose(tool);
-        if (!tool || !kind) throw Object.assign(new Error('Only advertised read-only material tools are allowed.'), { code: 'TOOL_NOT_READ_ONLY' });
+        if (!tool || !kind) throw Object.assign(new Error(`Only advertised read-only material tools are allowed (${tools.filter(t => materialPurpose(t)).map(t => t.name).join(', ') || 'none advertised'}).`), { code: 'TOOL_NOT_READ_ONLY' });
         const result = await this.limitedMaterialMcp({ action: 'call', name: q.tool, args: q.args || {}, raw: true }, priority);
         // Follow-up query results must remain visible in the compact digest.  Raw
         // per-service log captures are otherwise intentionally elided there in
@@ -808,7 +832,7 @@ export class RuntimeSession {
       return { ok: false, error: 'ORIGIN_NOT_ALLOWED', message: `${originOf(url)} is not in the origins mtm-player allowed.` };
     }
     this.mcp ||= new McpHttpClient({ url, bearer: this.bearer, allowedOrigins: this.allowedOrigins(), log: this.mcpLogger('MATCH_MCP') });
-    if (this.mcp.url !== url) this.mcp = new McpHttpClient({ url, bearer: this.bearer, allowedOrigins: this.allowedOrigins(), log: this.mcpLogger('MATCH_MCP') });
+    if (this.mcp.url !== url) { this.mcp = new McpHttpClient({ url, bearer: this.bearer, allowedOrigins: this.allowedOrigins(), log: this.mcpLogger('MATCH_MCP') }); this.materialToolList = null; }
     if (this.bearer && this.mcp.bearer !== this.bearer) this.mcp.bearer = this.bearer;
     try {
       if (action === 'tools') {

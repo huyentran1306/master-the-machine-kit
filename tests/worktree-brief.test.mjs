@@ -644,6 +644,7 @@ test('dispatch_ready dispatches every open item in one call and respawns workers
   assert.match(task(first.spawn.find(sp => sp.id === 'BUG-31')), /query it yourself with `node ".*mtm-query\.mjs" --token-file ".*query-token\.json" --item BUG-31/, 'code workers can read KB/logs themselves');
   assert.equal(first.spawn.find(sp => sp.id === 'PI-33').reasoningEffort, 'medium');
   assert.match(task(first.spawn.find(sp => sp.id === 'BUG-31')), /Redirect long output .* print only its last 20 lines/);
+  assert.match(task(first.spawn.find(sp => sp.id === 'PI-33')), /PI: only the tests for the changed code; no full suite/);
   assert.match(task(first.spawn.find(sp => sp.id === 'BUG-31')), /Item text, KB articles, test data and logs: read .*digest\.md, not the raw files\/mcp\/\*\.json\./, 'code workers read the digest');
   assert.match(first.next, /reasoning_effort/);
   assert.match(first.next, /model = entry\.model/);
@@ -688,4 +689,27 @@ test('dispatch_ready leaves a labelled heavy item unstarted until ordinary items
   assert.deepEqual(started, ['CR-HEAVY']);
   assert.equal(second.spawn[0].reasoningEffort, 'medium');
   assert.match(fs.readFileSync(second.spawn[0].taskFile, 'utf8'), /HEAVY item: deliver the highest-value part first/);
+});
+
+test('workspace monorepo: worktree node_modules is mirrored so workspace packages resolve inside the worktree', async t => {
+  const { worktreeSession } = { worktreeSession: null };
+  const src = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-src-')); const dst = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-dst-'));
+  t.after(() => { fs.rmSync(src, { recursive: true, force: true }); fs.rmSync(dst, { recursive: true, force: true }); });
+  for (const root of [src, dst]) { fs.mkdirSync(path.join(root, 'packages', 'core'), { recursive: true }); fs.writeFileSync(path.join(root, 'packages', 'core', 'index.js'), root === src ? 'main' : 'worktree'); }
+  fs.mkdirSync(path.join(src, 'node_modules', '@acme'), { recursive: true });
+  fs.mkdirSync(path.join(src, 'node_modules', 'dep')); fs.writeFileSync(path.join(src, 'node_modules', 'dep', 'index.js'), 'dep');
+  fs.symlinkSync('../../packages/core', path.join(src, 'node_modules', '@acme', 'core'));
+  fs.mkdirSync(path.join(src, 'node_modules', '.bin')); fs.symlinkSync('../dep/index.js', path.join(src, 'node_modules', '.bin', 'dep'));
+  fs.mkdirSync(path.join(src, 'plain', 'node_modules', 'x'), { recursive: true }); fs.mkdirSync(path.join(dst, 'plain'));
+  const { __test } = await import('../team-sdlc-pack/src/runtime-session.mjs');
+  const linked = __test.linkDependencies(src, dst);
+  assert.ok(linked.some(l => /node_modules \(mirrored/.test(l)), JSON.stringify(linked));
+  assert.equal(fs.readFileSync(path.join(dst, 'node_modules', '@acme', 'core', 'index.js'), 'utf8'), 'worktree', 'workspace package resolves into the worktree');
+  assert.equal(fs.realpathSync(path.join(dst, 'node_modules', 'dep')), fs.realpathSync(path.join(src, 'node_modules', 'dep')), 'external deps are shared with main');
+  assert.equal(fs.readFileSync(path.join(dst, 'node_modules', '.bin', 'dep'), 'utf8'), 'dep');
+  assert.ok(fs.lstatSync(path.join(dst, 'plain', 'node_modules')).isSymbolicLink(), 'a node_modules without workspace links is still linked whole');
+  __test.unlinkDependencies(dst);
+  assert.equal(fs.existsSync(path.join(dst, 'node_modules')), false); assert.equal(fs.existsSync(path.join(dst, 'plain', 'node_modules')), false);
+  assert.equal(fs.readFileSync(path.join(src, 'node_modules', 'dep', 'index.js'), 'utf8'), 'dep', 'main checkout untouched');
+  assert.equal(fs.readFileSync(path.join(src, 'packages', 'core', 'index.js'), 'utf8'), 'main');
 });

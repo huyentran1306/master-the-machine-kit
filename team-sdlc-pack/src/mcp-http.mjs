@@ -52,10 +52,14 @@ export class McpHttpClient {
 
   async send(method, params, options = {}) {
     const read = ['tools/list', 'resources/list', 'resources/read'].includes(method) || options.readOnly;
+    // 41B6BCM3: five HTTP 429 from the match MCP during log sweeps, twice back to back, because the single retry was
+    // immediate. Reads now retry twice more with a short backoff (0.8 s, then 2 s); writes are never retried.
     for (let attempt = 0; ; attempt++) {
       try { return await this.sendOnce(method, params, options); }
       catch (e) {
-        if (!read || attempt !== 0 || !/^(?:TIMEOUT|NETWORK|MCP_HTTP_(?:408|429|500|502|503|504))$/.test(e.code || '')) throw e;
+        const retryable = /^(?:TIMEOUT|NETWORK|MCP_HTTP_(?:408|429|500|502|503|504))$/.test(e.code || '');
+        if (!read || !retryable || attempt >= (e.code === 'MCP_HTTP_429' ? 2 : 1)) throw e;
+        if (e.code === 'MCP_HTTP_429') await new Promise((r) => setTimeout(r, this.retryDelayMs?.[attempt] ?? (attempt ? 2000 : 800)));
       }
     }
   }

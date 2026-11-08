@@ -35,3 +35,16 @@ test('MCP reads retry once; unannotated mutation calls never replay', async () =
   await assert.rejects(client.call('search_logs'));
   assert.equal(calls, 2);
 });
+
+test('MCP reads back off on HTTP 429 (two more tries); a 429 on a mutation is not replayed', async () => {
+  const client = new McpHttpClient({ url: 'https://synthetic.invalid' });
+  client.retryDelayMs = [5, 5];
+  let calls = 0;
+  client.sendOnce = async () => { calls++; if (calls < 3) throw Object.assign(new Error('rate'), { code: 'MCP_HTTP_429' }); return { ok: true }; };
+  assert.deepEqual(await client.send('tools/list', {}), { ok: true });
+  assert.equal(calls, 3, 'third try succeeds');
+  calls = 0; client.sendOnce = async () => { calls++; throw Object.assign(new Error('rate'), { code: 'MCP_HTTP_429' }); };
+  await assert.rejects(client.send('tools/list', {})); assert.equal(calls, 3, 'bounded');
+  calls = 0; client.ready = true; client.toolCatalog = [{ name: 'restart_service' }];
+  await assert.rejects(client.call('restart_service')); assert.equal(calls, 1);
+});

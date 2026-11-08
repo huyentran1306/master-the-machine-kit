@@ -2284,11 +2284,14 @@ export class RuntimeSession {
         : it.local.answerSource
         ? `Read ${c.brief?.digestPath || c.brief?.briefFile} first; it contains relevant issued source. Verify any missing function directly under ${c.appPath || c.matchRoot}; answer from code, never infer accounting or UI behavior.`
         : `Read ONLY ${c.brief?.digestPath || `${c.brief?.briefFile} and files/`}${c.brief?.digestPath ? ' (item text, answer template, KB articles, test data and every production log line in UTC, oldest first); do not open brief.json, repo-map, baseline, skills, checklist or raw files/mcp/*.json unless the digest says a part is missing' : ''}.${queryCmd ? ` If a fact is missing, query it yourself with \`${queryCmd}\`; NEED_INFO only if the read tool cannot answer.` : ''}`;
+      // 41B6BCM3: CR-07 (deadline) waited 96 s for a heavy slot held by ordinary full suites. PI and deadline items
+      // wait at most 20 s, then run anyway.
+      const heavyWaitMs = it.type === 'PI' || it.deadlineAt != null ? Math.min(20000, this.adapter.parallel.heavyStepWaitMs || 120000) : (this.adapter.parallel.heavyStepWaitMs || 120000);
       const doEverything = `Do everything the item's requirements ask. If the item asks to change the application, make the change, run the relevant tests, and commit it with the answer. If the item names source paths or images, open them. In the STATUS block state SCOPE: answer or SCOPE: answer+code. `;
       const entry = {
         id: r.id, type: it.type, answerOnly: !!c.answerOnly,
         taskName: `${r.id.toLowerCase().replace(/[^a-z0-9]/g, '')}${it.local.dispatches > 1 ? `r${it.local.dispatches}` : ''}`,
-        message: `${resumeText}${baselineFixText}${baselineWaitText}${doEverything}Item ${r.id} (${it.type}${c.answerOnly ? ', answer-first hint' : ''}).${c.answerOnly ? ` FAST PATH (points drop with every minute${it.type === 'PI' ? ', PI is ranked by submit order: every turn counts' : ''}). No preamble, no progress or send_message updates. 1) ${answerRead} 2) Decide every field (UTC-normalise mixed offsets, dedupe retries, keep corrected entries, ignore decoys), then write ${c.answer?.submitJson || 'submit.json'} in one edit, keeping every template key. 3) For SCOPE: answer run \`${c.finishAnswer || c.validateAnswer}\`${c.finishAnswer ? ' (validates the schema and commits the answer folder); on ANSWER INVALID fix and rerun' : ', then commit'}; for SCOPE: answer+code run the relevant tests and commit code, tests and answer together instead. 4) Reply with the STATUS block including SCOPE. Only if your mtm-query command cannot answer, reply NEED_INFO: <what> (logs: service + narrowing word). No extra evidence or test.log unless requiredEvidence lists it; never install validators.` : `${c.brief?.digestPath ? ` Item text, KB articles, test data and logs: read ${c.brief.digestPath}, not the raw files/mcp/*.json.` : ''}${c.brief?.likelyFilesPath ? ` Code search: start from ${c.brief.likelyFilesPath} (files ranked by this item's words, with symbols, imports and related tests); confirm with \`rg -n -m 20 <term> <those paths>\` before any repo-wide search.` : ''}${queryCmd ? ` If a fact (KB rule, log line, test data) is missing, query it yourself with \`${queryCmd}\`; NEED_INFO only if the read tool cannot answer.` : ''} Check the answer with \`${c.validateAnswer}\` (no installs). Builds, full test suites and browser/e2e runs: \`node "${BUILD_LOCK}" --slots ${this.adapter.parallel.maxHeavySteps || 2} --max-wait-ms ${this.adapter.parallel.heavyStepWaitMs || 120000} -- <command>\` (takes a free slot itself; after ${Math.round((this.adapter.parallel.heavyStepWaitMs || 120000) / 1000)} s it runs anyway; never ask the orchestrator for build_slot). Single test files run directly. Stop dev servers and browsers as soon as the evidence is captured. Redirect long output (builds, full suites, image tools such as sips) to a file under .mtm-notes/ and print only its last 20 lines.`} checkoutRoot = worktreeRoot = ${c.worktreeRoot}; folder ${c.folder}; matchRoot ${c.matchRoot}; briefFile ${c.brief?.briefFile}; filesDir ${c.brief?.filesDir}; answer ${c.answer?.submitJson || ''} (evidence in ${c.answer?.evidenceDir || ''}); ports dev=${c.ports?.dev} production=${c.ports?.production} (override fixed runner ports). ${c.answerOnly && c.brief?.digestPath ? 'Start with digestPath; if the requirements need app changes, then read briefFile and its code-lifecycle material.' : 'Read briefFile first: it has the commands, playbook, checklist and organizer files.'} Work only in this worktree. Stop and return by ${stop} (Game Master clock). Commit the complete item (code, tests, evidence, answer) and reply STATUS READY or PARKED with COMMIT <sha> and SCOPE. Never push, submit, delegate or call Game APIs.`,
+        message: `${resumeText}${baselineFixText}${baselineWaitText}${doEverything}Item ${r.id} (${it.type}${c.answerOnly ? ', answer-first hint' : ''}).${c.answerOnly ? ` FAST PATH (points drop with every minute${it.type === 'PI' ? ', PI is ranked by submit order: every turn counts' : ''}). No preamble, no progress or send_message updates. 1) ${answerRead} 2) Decide every field (UTC-normalise mixed offsets, dedupe retries, keep corrected entries, ignore decoys), then write ${c.answer?.submitJson || 'submit.json'} in one edit, keeping every template key. 3) For SCOPE: answer run \`${c.finishAnswer || c.validateAnswer}\`${c.finishAnswer ? ' (validates the schema and commits the answer folder); on ANSWER INVALID fix and rerun' : ', then commit'}; for SCOPE: answer+code run the relevant tests and commit code, tests and answer together instead${it.type === 'PI' ? ' (PI: only the tests for the changed code; no full suite, full build or reinstall: the main gate re-checks)' : ''}. 4) Reply with the STATUS block including SCOPE. Only if your mtm-query command cannot answer, reply NEED_INFO: <what> (logs: service + narrowing word). No extra evidence or test.log unless requiredEvidence lists it; never install validators.` : `${c.brief?.digestPath ? ` Item text, KB articles, test data and logs: read ${c.brief.digestPath}, not the raw files/mcp/*.json.` : ''}${c.brief?.likelyFilesPath ? ` Code search: start from ${c.brief.likelyFilesPath} (files ranked by this item's words, with symbols, imports and related tests); confirm with \`rg -n -m 20 <term> <those paths>\` before any repo-wide search.` : ''}${queryCmd ? ` If a fact (KB rule, log line, test data) is missing, query it yourself with \`${queryCmd}\`; NEED_INFO only if the read tool cannot answer.` : ''} Check the answer with \`${c.validateAnswer}\` (no installs). Builds, full test suites and browser/e2e runs: \`node "${BUILD_LOCK}" --slots ${this.adapter.parallel.maxHeavySteps || 2} --max-wait-ms ${heavyWaitMs} -- <command>\` (takes a free slot itself; after ${Math.round(heavyWaitMs / 1000)} s it runs anyway; never ask the orchestrator for build_slot). Single test files run directly. Stop dev servers and browsers as soon as the evidence is captured. Redirect long output (builds, full suites, image tools such as sips) to a file under .mtm-notes/ and print only its last 20 lines.`} checkoutRoot = worktreeRoot = ${c.worktreeRoot}; folder ${c.folder}; matchRoot ${c.matchRoot}; briefFile ${c.brief?.briefFile}; filesDir ${c.brief?.filesDir}; answer ${c.answer?.submitJson || ''} (evidence in ${c.answer?.evidenceDir || ''}); ports dev=${c.ports?.dev} production=${c.ports?.production} (override fixed runner ports). ${c.answerOnly && c.brief?.digestPath ? 'Start with digestPath; if the requirements need app changes, then read briefFile and its code-lifecycle material.' : 'Read briefFile first: it has the commands, playbook, checklist and organizer files.'} Work only in this worktree. Stop and return by ${stop} (Game Master clock). Commit the complete item (code, tests, evidence, answer) and reply STATUS READY or PARKED with COMMIT <sha> and SCOPE. Never push, submit, delegate or call Game APIs.`,
       };
       entry.reasoningEffort = this.workerEffort(it, c);
       const model = this.workerModel(it, c);
@@ -2360,11 +2363,19 @@ export class RuntimeSession {
     const appRel = path.relative(this.checkoutRoot, appDir).split(path.sep).join('/');
     const own = itemTestFiles(changeScope.changed, appRel).filter((f) => fs.existsSync(path.join(appDir, f)));
     const openBaselineFix = !this.state.baselineDefectsResolved && this.baselineDefects().some(d => d.likelyOwner === 'BASELINE-FIX');
-    const scope = !full && !openBaselineFix && (it.deadlineAt != null || leftMin < 8) && own.length ? 'item' : 'full';
+    let baselineText = ''; try { baselineText = fs.readFileSync(path.join(this.checkoutRoot, '.mtm-notes', 'test.log'), 'utf8'); } catch { /* no baseline */ }
+    // Ship is serialized. 41B6BCM3: the loot-core suite takes 104-119 s, so a full gate per code item would hold every
+    // READY item (PI included) ~2 min behind it, and the 90 s budget would cut it off as ENVIRONMENT. The worker already
+    // ran that suite on its worktree; the main gate then runs the item's own tests + typecheck. A PI always takes the
+    // item scope (ranked by submit order). An open baseline fix still gets the full suite, with a budget it can finish in.
+    const suiteSec = Math.max(0, ...[...baselineText.matchAll(/^\s*Duration\s+([\d.]+)\s*s\b/gm)].map((m) => Number(m[1]) || 0));
+    const longSuite = suiteSec > 60;
+    const scope = !full && !openBaselineFix && (it.deadlineAt != null || leftMin < 8 || it.type === 'PI' || longSuite) && own.length ? 'item' : 'full';
     const { test, types } = gateCommands(appDir, { files: scope === 'item' ? own : [], recon: this.commands || {} });
-    let baselineText = ''; try { baselineText = fs.readFileSync(path.join(this.checkoutRoot, '.mtm-notes', 'test.log'), 'utf8').slice(0, 20000); } catch { /* no baseline */ }
+    baselineText = baselineText.slice(0, 20000);
     const projectSpecs = test?.cmd ? projectTestSpecs(appDir, { files: scope === 'item' ? own : [], codeFiles: changeScope.codeFiles, appRel, baselineText }) : null;
-    const budgetSec = forcedBudget || Math.round(Math.max(20, Math.min(90, leftMin * 60 - 60))); // forcedBudget: tests only (not in the tool schema)
+    const fullCap = scope === 'full' && suiteSec ? Math.max(90, Math.round(suiteSec * 1.5)) : 90;
+    const budgetSec = forcedBudget || Math.round(Math.max(20, Math.min(fullCap, leftMin * 60 - 60))); // forcedBudget: tests only (not in the tool schema)
     const notes = path.join(this.checkoutRoot, '.mtm-notes');
     fs.mkdirSync(notes, { recursive: true });
     G.ensureExcluded(this.checkoutRoot, '/.mtm-notes/');
@@ -2393,9 +2404,17 @@ export class RuntimeSession {
       if (heavySlot) releaseHeavySlot(heavySlot);
       if (this.activeGate === active) this.activeGate = null;
     }
+    // A repository-wide typecheck (project references) also reports errors that were there before this item: they
+    // count against the item only when an error names a file the item changed.
+    let typesNotOurs = null;
+    if (types?.shell && /\(project references\)/.test(types.label || '') && assertionFailure(ty, 'types')) {
+      const errFiles = [...String(ty.text || '').matchAll(/([\w./@-]+\.[cm]?[jt]sx?)[(:]\d+/g)].map((m) => path.basename(m[1]));
+      const touched = new Set(changeScope.codeFiles.map((f) => path.basename(f)));
+      if (errFiles.length && !errFiles.some((f) => touched.has(f))) typesNotOurs = [...new Set(errFiles)].slice(0, 5);
+    }
     // Nothing runnable found is not a green gate: treat it like an environment problem.
-    const green = !!(tr || ty) && (!tr || tr.exit === 0) && (!ty || ty.exit === 0);
-    let code = assertionFailure(tr, 'tests') || assertionFailure(ty, 'types');
+    const green = !!(tr || ty) && (!tr || tr.exit === 0) && (!ty || ty.exit === 0 || !!typesNotOurs);
+    let code = assertionFailure(tr, 'tests') || (!typesNotOurs && assertionFailure(ty, 'types'));
     // A failure the preparation baseline already had is not this item's: in EFMN62ZO BUG-01's gate failed only on
     // BUG-03's red accounting test, was rolled back as CODE_FAILURE and reached Game Master 5 minutes later.
     let preExisting = null;
@@ -2412,7 +2431,7 @@ export class RuntimeSession {
     if (gateDb.TEST_DATABASE_URL) dropGateDatabase(appDir, gateDb.TEST_DATABASE_URL);
     const leftNow = effectiveLeft(it, this.now(), this.match.endsAt).left;
     const part = (r, label) => r ? { command: label, exit: r.exit, timedOut: r.timedOut, seconds: Math.round(r.ms / 100) / 10, summary: testSummary(r.text), tail: r.tail.slice(-6) } : { command: null, note: 'no runner found' };
-    it.local.gate = { verdict, at: this.now(), scope, codeChanged: true, ...(preExisting ? { preExisting } : {}) };
+    it.local.gate = { verdict, at: this.now(), scope, codeChanged: true, ...(preExisting ? { preExisting } : {}), ...(typesNotOurs ? { typesNotOurs } : {}) };
     this.saveState();
     const leftTxt = leftNow == null ? '' : ` (${leftNow.toFixed(1)}m left)`;
     const next = verdict === 'GREEN' ? `Gate GREEN${preExisting ? ` (only pre-existing baseline failures: ${preExisting.join('; ').slice(0, 200)})` : ''}: push now, then submit_work ${id} immediately${leftTxt}.`
@@ -2891,9 +2910,49 @@ export function freshGateDatabaseEnv(appDir, suffix) {
   return {};
 }
 
+const MIRROR_MARK = '.mtm-mirror';
+/**
+ * Workspace monorepos (yarn/npm/pnpm workspaces) keep links like node_modules/@scope/core -> ../../packages/core.
+ * Linking the whole node_modules made those resolve into the MAIN checkout, so a worker's edits to one package were
+ * invisible to the others (41B6BCM3: TASK-08 and PI-02 each spent minutes on a private install to work around it).
+ * Such a node_modules is mirrored instead: a real directory whose workspace links are recreated (so they point into the
+ * worktree) and whose other entries link to the main checkout's copies. Plain node_modules are still linked whole.
+ */
+function workspaceLinkIn(srcReal, file) {
+  try {
+    if (!fs.lstatSync(file).isSymbolicLink()) return false;
+    const rel = path.relative(srcReal, fs.realpathSync(file));
+    return !!rel && !rel.startsWith('..') && !path.isAbsolute(rel) && !rel.split(path.sep).includes('node_modules');
+  } catch { return false; }
+}
+function hasWorkspaceLinks(srcReal, nm) {
+  let ents = []; try { ents = fs.readdirSync(nm, { withFileTypes: true }); } catch { return false; }
+  return ents.some((e) => workspaceLinkIn(srcReal, path.join(nm, e.name))
+    || (e.name.startsWith('@') && e.isDirectory() && (() => { try { return fs.readdirSync(path.join(nm, e.name)).some((x) => workspaceLinkIn(srcReal, path.join(nm, e.name, x))); } catch { return false; } })()));
+}
+function mirrorNodeModules(srcReal, dstRoot, src, dst, top = true) {
+  fs.mkdirSync(dst, { recursive: true });
+  if (top) fs.writeFileSync(path.join(dst, MIRROR_MARK), 'node_modules mirrored by the team runtime; removed with the worktree\n');
+  for (const e of fs.readdirSync(src, { withFileTypes: true })) {
+    const s = path.join(src, e.name); const d = path.join(dst, e.name);
+    if (fs.existsSync(d) || e.name === MIRROR_MARK) continue;
+    if (e.isSymbolicLink()) {
+      const target = fs.readlinkSync(s);
+      let to = target;
+      if (path.isAbsolute(target)) { const rel = path.relative(srcReal, target); if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) to = path.join(dstRoot, rel); }
+      fs.symlinkSync(to, d); // a relative link keeps its text, so it now resolves inside the worktree
+    } else if (e.isDirectory() && e.name.startsWith('@') && fs.readdirSync(s).some((x) => workspaceLinkIn(srcReal, path.join(s, x)))) {
+      mirrorNodeModules(srcReal, dstRoot, s, d, false);
+    } else {
+      fs.symlinkSync(s, d, e.isDirectory() ? 'dir' : 'file');
+    }
+  }
+}
+
 /** Junction/symlink node_modules (ignored by Git) from the main checkout into a worktree. */
 function linkDependencies(srcRoot, dstRoot, { envSuffix } = {}) {
   const linked = [];
+  let srcReal = srcRoot; try { srcReal = fs.realpathSync(srcRoot); } catch { /* keep as given */ }
   const visit = (rel, depth) => {
     if (depth > 3) return;
     const dir = path.join(srcRoot, rel);
@@ -2910,8 +2969,13 @@ function linkDependencies(srcRoot, dstRoot, { envSuffix } = {}) {
         const target = path.join(dstRoot, r);
         if (!fs.existsSync(target) && fs.existsSync(path.dirname(target))) {
           try {
-            fs.symlinkSync(path.join(srcRoot, r), target, process.platform === 'win32' ? 'junction' : 'dir');
-            linked.push(r);
+            if (process.platform !== 'win32' && hasWorkspaceLinks(srcReal, path.join(srcRoot, r))) {
+              mirrorNodeModules(srcReal, path.resolve(dstRoot), path.join(srcRoot, r), target);
+              linked.push(`${r} (mirrored: workspace packages point into this worktree)`);
+            } else {
+              fs.symlinkSync(path.join(srcRoot, r), target, process.platform === 'win32' ? 'junction' : 'dir');
+              linked.push(r);
+            }
           } catch { /* ignore */ }
         }
         continue;
@@ -2958,8 +3022,13 @@ function unlinkDependencies(root) {
         } catch {
           try { fs.rmdirSync(p); } catch { /* ignore */ }
         }
+      } else if (e.isDirectory() && e.name === 'node_modules' && fs.existsSync(path.join(p, MIRROR_MARK))) {
+        try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* ignore */ } // links only; targets are not followed
       } else if (e.isDirectory() && e.name !== 'node_modules' && e.name !== '.git') visit(p, depth + 1);
     }
   };
   visit(root, 0);
 }
+
+// Test-only access to module-private helpers.
+export const __test = { linkDependencies, unlinkDependencies };

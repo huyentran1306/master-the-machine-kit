@@ -233,3 +233,27 @@ test('monorepo gate: a root vitest config with projects runs each affected proje
   fs.writeFileSync(path.join(root, 'vitest.config.ts'), 'export default { test: {} };');
   assert.equal(projectTestSpecs(root, { codeFiles: ['packages/core/src/a.ts'] }), null, 'not a projects monorepo: keep the single root command');
 });
+
+test('long suites: the main gate runs the item tests; PI always item scope; repo-wide type errors in other files are not the item\'s', async t => {
+  const { solutionTsconfig, withRepoYarn } = await import('../team-sdlc-pack/src/gate.mjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tsref-')); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(dir, 'tsconfig.json'), '{\n  // comment\n  "references": [{ "path": "./packages/a" }],\n  "include": ["bin/*.mts"]\n}');
+  assert.equal(solutionTsconfig(dir), true);
+  fs.mkdirSync(path.join(dir, '.yarn', 'releases'), { recursive: true }); fs.writeFileSync(path.join(dir, '.yarn', 'releases', 'yarn-9.cjs'), '');
+  fs.writeFileSync(path.join(dir, '.yarnrc.yml'), 'yarnPath: .yarn/releases/yarn-9.cjs\n');
+  assert.match(withRepoYarn(dir, 'yarn typecheck'), /yarn-9\.cjs" typecheck$/);
+  assert.equal(withRepoYarn(dir, 'pnpm test'), 'pnpm test');
+});
+
+test('gate scope: a baseline suite over 60 s runs the item tests on main; PI always item scope; otherwise full', async t => {
+  const { s, mode } = fixture(t); mode('green');
+  const it = s.items.get('BUG-91'); it.deadlineAt = null;
+  const notes = path.join(s.checkoutRoot, '.mtm-notes'); fs.mkdirSync(notes, { recursive: true });
+  fs.writeFileSync(path.join(notes, 'test.log'), ' Test Files  88 passed\n      Tests  1385 passed\n   Duration  20.5s (setup 80%)\n');
+  assert.equal((await s.gate({ backlogItemKey: 'BUG-91' })).scope, 'full', 'short suite, no deadline: full');
+  it.type = 'PI';
+  assert.equal((await s.gate({ backlogItemKey: 'BUG-91' })).scope, 'item', 'PI: item scope');
+  it.type = 'BUG';
+  fs.writeFileSync(path.join(notes, 'test.log'), ' Test Files  88 passed\n      Tests  1385 passed\n   Duration  104.07s (setup 83%)\n');
+  assert.equal((await s.gate({ backlogItemKey: 'BUG-91' })).scope, 'item', 'long suite: the worker ran it already');
+});

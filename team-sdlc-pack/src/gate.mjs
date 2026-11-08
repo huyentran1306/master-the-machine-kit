@@ -20,16 +20,40 @@ export function itemTestFiles(changed, appRel) {
     .map((f) => f.slice(pre.length)).filter((f) => !/(^|\/)(node_modules|\.mtm-briefs|challenge)\//.test(f));
 }
 
+/** `yarn …` through the repository's own Yarn release (.yarnrc.yml yarnPath) when one is bundled: no global yarn needed. */
+export function withRepoYarn(appDir, command) {
+  if (!command || !/^yarn(?:\s|$)/.test(command)) return command;
+  try {
+    const rc = fs.readFileSync(path.join(appDir, '.yarnrc.yml'), 'utf8').match(/^\s*yarnPath:\s*["']?([^"'\n]+?)["']?\s*$/m);
+    const bin = rc && path.resolve(appDir, rc[1]);
+    if (bin && fs.existsSync(bin)) return `"${process.execPath}" "${bin}"${command.slice(4)}`;
+  } catch { /* no rc */ }
+  return command;
+}
+
+/**
+ * A root tsconfig with project `references` checks only its own few files: `tsc --noEmit` there passed in 0.4 s in
+ * 41B6BCM3 without checking a single package (a false green). Use the repository's typecheck script instead.
+ */
+export function solutionTsconfig(appDir) {
+  try {
+    const text = fs.readFileSync(path.join(appDir, 'tsconfig.json'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    return /"references"\s*:\s*\[\s*\{/.test(text);
+  } catch { return false; }
+}
+
 /** Direct binaries when installed; the recon command with pnpm made safe otherwise. */
 export function gateCommands(appDir, { files = [], recon = {} } = {}) {
   const vitest = path.join(appDir, 'node_modules', 'vitest', 'vitest.mjs');
   const tsc = path.join(appDir, 'node_modules', 'typescript', 'bin', 'tsc');
   const jest = path.join(appDir, 'node_modules', 'jest', 'bin', 'jest.js');
+  const reconTest = withRepoYarn(appDir, recon.test); const reconTypes = withRepoYarn(appDir, recon.typecheck);
   const test = fs.existsSync(vitest) ? { cmd: process.execPath, args: [vitest, 'run', ...files], label: `vitest run ${files.join(' ') || '(full suite)'}` }
     : fs.existsSync(jest) ? { cmd: process.execPath, args: [jest, ...files], label: `jest ${files.join(' ') || '(full suite)'}` }
-    : recon.test ? { shell: `${recon.test} ${files.join(' ')}`.trim(), label: recon.test } : null;
-  const types = fs.existsSync(tsc) && fs.existsSync(path.join(appDir, 'tsconfig.json')) ? { cmd: process.execPath, args: [tsc, '--noEmit'], label: 'tsc --noEmit' }
-    : recon.typecheck ? { shell: recon.typecheck, label: recon.typecheck } : null;
+    : reconTest ? { shell: `${reconTest} ${files.join(' ')}`.trim(), label: recon.test } : null;
+  const types = reconTypes && solutionTsconfig(appDir) ? { shell: reconTypes, label: `${recon.typecheck} (project references)` }
+    : fs.existsSync(tsc) && fs.existsSync(path.join(appDir, 'tsconfig.json')) ? { cmd: process.execPath, args: [tsc, '--noEmit'], label: 'tsc --noEmit' }
+    : reconTypes ? { shell: reconTypes, label: recon.typecheck } : null;
   return { test, types };
 }
 

@@ -35,7 +35,7 @@
   "polling": {
     "successMs": 5000,
     "errorMs": 10000,
-    "backgroundMs": 20000,
+    "backgroundMs": 5000,
     "maxWaitMs": 55000
   },
   "submit": {

@@ -8,7 +8,7 @@ import os from 'node:os';
 import { answerOnly, answerClassification, dispatchPolicy, integrationGate, mapBounded, BuildQueue, availableMemory } from './dispatch.mjs';
 import { acquire as acquireHeavySlot, release as releaseHeavySlot, slotDirFor } from './build-lock.mjs';
 import { stopWorktreeProcesses } from './process-cleanup.mjs';
-import { PNPM_SAFE_ENV, itemTestFiles, gateCommands, runBounded, assertionFailure, testSummary, failingTests } from './gate.mjs';
+import { PNPM_SAFE_ENV, itemTestFiles, gateCommands, runBounded, runProjects, projectTestSpecs, assertionFailure, testSummary, failingTests } from './gate.mjs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 const VALIDATE_ANSWER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'validate-answer.mjs');
@@ -63,7 +63,7 @@ export const DEFAULT_ADAPTER = {
   // maxWaitMs is a ceiling, not a sleep: wait_for_update returns the moment the page changes,
   // so a longer ceiling costs no reaction time and removes agent turns. Each idle turn re-reads
   // the whole conversation, which is where this match's tokens actually go.
-  polling: { successMs: 5000, errorMs: 10000, backgroundMs: 20000, maxWaitMs: 55000 },
+  polling: { successMs: 5000, errorMs: 10000, backgroundMs: 5000, maxWaitMs: 55000 },
   submit: { acceptedStatuses: ['ACCEPTED', 'RECEIVED'], retryBudgetMs: SUBMIT_LIMITS.retryMs },
   planner: {},
   heavyTask: { mode: 'last', startAfter: 'othersDispatched', minMinutesLeft: 0, maxParallel: 2, minPoints: 200, minDescriptionChars: 6000, minCriteria: 12 },
@@ -450,7 +450,16 @@ export class RuntimeSession {
     if (modelPolicy) this.modelPolicy = modelPolicy;
     const results = [];
     for (const input of inputs) {
-      const d = input.descriptor;
+      let d = input.descriptor;
+      // Short START: the orchestrator retyped the whole START_GAME_V4 frame plus the model policy (~1,600 output
+      // tokens, ~30 s in 41B6BCM3). In the session that already ran PREPARE for this match, paths it omits are
+      // taken from that session; the model policy is kept when the START text has none. Credentials, requestId and
+      // hostAuthorization still come only from the START text and are validated as before.
+      if (['START_GAME', 'RESUME_GAME'].includes(d?.type) && this.matchId && d.matchId === this.matchId && d.playerSessionId === this.playerSessionId) {
+        const known = { checkoutRoot: this.checkoutRoot, matchRoot: this.matchRoot, progressLogFile: this.progressLogFile, teamWorkspace: this.teamWorkspace };
+        const filled = Object.keys(known).filter((k) => d[k] == null && known[k]);
+        if (filled.length) { d = { ...d, ...Object.fromEntries(filled.map((k) => [k, known[k]])) }; warnings.push(`reused from PREPARE: ${filled.join(', ')}`); }
+      }
       const v = validateDescriptor(d, { teamWorkspace: this.teamWorkspace, teamId: this.identity?.teamId, session: this.matchId ? { playerSessionId: this.playerSessionId, matchId: this.matchId, repository: this.repository } : null });
       warnings.push(...v.warnings);
       if (v.errors.length) {
@@ -1175,10 +1184,45 @@ export class RuntimeSession {
     if (!ms || ms < 3000) return;
     this.poller = setInterval(() => {
       if (this.phase !== 'GAME') return;
-      if (this.match.lastRefreshAt && this.now() - this.match.lastRefreshAt < ms - 500) return;
-      this.withLock(() => this.doRefresh()).catch(() => {});
+      if (this.match.lastRefreshAt && this.now() - this.match.lastRefreshAt < ms - 500) { this.prestartNew().catch(() => {}); return; }
+      this.withLock(() => this.doRefresh()).then(() => this.prestartNew()).catch(() => {});
     }, ms);
     this.poller.unref?.();
+  }
+
+  /**
+   * Background pickup, from the poller every ~5 s: book and fetch material for newly revealed items while the
+   * orchestrator sits in wait_agent (up to 20 s), so its next wake-up only creates worktrees and spawns.
+   * 41B6BCM3 wave 2: reveal -> first spawn took ~35 s, ~20 s of it start_work + MCP material inside
+   * wait_for_update. Only items dispatch_ready would start now (same rank, heavy and capacity rules), never
+   * worktrees or spawn entries; startOnce() keeps a concurrent dispatch_ready from starting an item twice.
+   */
+  async prestartNew() {
+    if (this.prestartRunning || this.phase !== 'GAME' || this.match.status !== 'IN_PROGRESS') return;
+    this.prestartRunning = true;
+    try {
+      this.refreshHeavyFlags();
+      const items = [...this.items.values()];
+      const live = items.filter(i => !isSubmitted(i));
+      const limit = Math.max(1, Math.floor(Number(this.adapter.parallel.materialConcurrency) || 4));
+      const ids = rank(items, this.now(), this.match.endsAt, this.plannerOpts()).ranked
+        .filter(r => r.action !== 'submit').map(r => this.items.get(r.id))
+        .filter(it => it && !it.local?.worktree && (!it.local?.startedAt || !this.readMaterial(it.id)) && (it.local?.startRefusals || 0) < 2)
+        .filter(it => this.heavyDispatchDecision(it, items).allowed && dispatchPolicy(it, live, this.adapter.parallel, this.freeMemory()).allowed)
+        .slice(0, limit).map(it => it.id);
+      if (!ids.length) return;
+      await mapBounded(ids, limit, id => this.startOnce(id));
+      this.state.prestarted = (this.state.prestarted || 0) + ids.length;
+      this.saveState();
+    } catch { /* dispatch_ready still starts it */ } finally { this.prestartRunning = false; }
+  }
+
+  startOnce(id) {
+    this.startPromises ||= new Map();
+    if (this.startPromises.has(id)) return this.startPromises.get(id);
+    const p = Promise.resolve().then(() => this.start_work({ backlogItemKey: id, compact: true })).finally(() => this.startPromises.delete(id));
+    this.startPromises.set(id, p);
+    return p;
   }
 
   stopPoller() {
@@ -2186,7 +2230,7 @@ export class RuntimeSession {
     const needStart = [...starting];
     const startErrors = {};
     if (needStart.length) {
-      const res = await mapBounded(needStart, this.adapter.parallel.materialConcurrency, id => this.start_work({ backlogItemKey: id, compact: true }));
+      const res = await mapBounded(needStart, this.adapter.parallel.materialConcurrency, id => this.startOnce(id));
       res.forEach((r, i) => { if (!r?.ok) startErrors[needStart[i]] = r?.error || 'START_FAILED'; });
     }
     // A shared baseline repair is valuable to every later submission, but must
@@ -2318,6 +2362,8 @@ export class RuntimeSession {
     const openBaselineFix = !this.state.baselineDefectsResolved && this.baselineDefects().some(d => d.likelyOwner === 'BASELINE-FIX');
     const scope = !full && !openBaselineFix && (it.deadlineAt != null || leftMin < 8) && own.length ? 'item' : 'full';
     const { test, types } = gateCommands(appDir, { files: scope === 'item' ? own : [], recon: this.commands || {} });
+    let baselineText = ''; try { baselineText = fs.readFileSync(path.join(this.checkoutRoot, '.mtm-notes', 'test.log'), 'utf8').slice(0, 20000); } catch { /* no baseline */ }
+    const projectSpecs = test?.cmd ? projectTestSpecs(appDir, { files: scope === 'item' ? own : [], codeFiles: changeScope.codeFiles, appRel, baselineText }) : null;
     const budgetSec = forcedBudget || Math.round(Math.max(20, Math.min(90, leftMin * 60 - 60))); // forcedBudget: tests only (not in the tool schema)
     const notes = path.join(this.checkoutRoot, '.mtm-notes');
     fs.mkdirSync(notes, { recursive: true });
@@ -2339,7 +2385,8 @@ export class RuntimeSession {
     let tr; let ty;
     try {
       [tr, ty] = await Promise.all([
-        test ? runBounded(test, { cwd: appDir, env, timeoutMs: budgetSec * 1000, logFile: path.join(notes, `gate-${id}-tests.log`), signal: controller.signal }) : null,
+        projectSpecs?.length ? runProjects(projectSpecs, { env, timeoutMs: budgetSec * 1000, logFile: path.join(notes, `gate-${id}-tests.log`), signal: controller.signal })
+          : test ? runBounded(test, { cwd: appDir, env, timeoutMs: budgetSec * 1000, logFile: path.join(notes, `gate-${id}-tests.log`), signal: controller.signal }) : null,
         types ? runBounded(types, { cwd: appDir, env, timeoutMs: budgetSec * 1000, logFile: path.join(notes, `gate-${id}-types.log`), signal: controller.signal }) : null,
       ]);
     } finally {
@@ -2378,7 +2425,7 @@ export class RuntimeSession {
     return this.clean({ ok: verdict === 'GREEN', verdict, scope, codeChanged: true, codeFiles: changeScope.codeFiles, preExisting: preExisting || undefined,
       baselineDefectOpen: baselineDefectOpen.length ? baselineDefectOpen : undefined,
       testDatabase: Object.keys(gateDb).length ? 'fresh isolated database' : 'no TEST_DATABASE_URL discovered',
-      files: scope === 'item' ? own : 'full suite', budgetSec, seconds: Math.round((Date.now() - t0) / 100) / 10, tests: part(tr, test?.label), types: part(ty, types?.label),
+      files: scope === 'item' ? own : 'full suite', budgetSec, seconds: Math.round((Date.now() - t0) / 100) / 10, tests: part(tr, projectSpecs?.length ? projectSpecs.map(x => x.spec.label).join(' + ') : test?.label), types: part(ty, types?.label),
       next: baselineDefectOpen.length ? `BASELINE_DEFECT_OPEN: ${baselineDefectOpen.map(d => d.test).join('; ')}. Fix it in this item's revision (code or a new migration) before submission: the grader reruns the whole suite; never weaken the original test. ${next}` : next });
   }
 

@@ -208,3 +208,28 @@ test('validate-answer catches the preflight refusals seen in rehearsal set3 befo
   assert.ok(p.some((x) => /relative to answers\/BUG-01/.test(x)), p.join('\n'));
   assert.ok(p.some((x) => /REQUIRED_EVIDENCE_UNREFERENCED/.test(x)));
 });
+
+test('monorepo gate: a root vitest config with projects runs each affected project from its own folder', async (t) => {
+  const { projectTestSpecs, runProjects } = await import('../team-sdlc-pack/src/gate.mjs');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mono-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const w = (rel, text) => { fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true }); fs.writeFileSync(path.join(root, rel), text); };
+  w('vitest.config.ts', "export default { test: { projects: ['packages/*/vitest.config.ts'] } };");
+  w('packages/core/vitest.config.ts', 'export default {};');
+  w('packages/core/package.json', JSON.stringify({ scripts: { 'test:web': 'ENV=web vitest --run -c vitest.web.config.ts', 'test:node': 'ENV=node vitest --run' } }));
+  w('packages/core/src/a.ts', 'export const a = 1;'); w('packages/core/src/a.test.ts', '');
+  w('packages/sync/vitest.config.ts', 'export default {};'); w('packages/sync/src/b.ts', '');
+  w('packages/web/src/c.tsx', '');
+  // a fake vitest binary that prints its cwd, args and ENV
+  w('node_modules/vitest/vitest.mjs', "console.log('RAN', process.cwd().split('/').pop(), process.argv.slice(2).join(' '), process.env.ENV || '-'); console.log(' Test Files  1 passed (1)'); console.log('      Tests  3 passed (3)');");
+  const full = projectTestSpecs(root, { codeFiles: ['app/packages/core/src/a.ts', 'app/packages/web/src/c.tsx'], appRel: 'app', baselineText: ` RUN  v5.0.4 ${path.join(root, 'packages', 'sync')}\n` });
+  assert.deepEqual(full.map(s => [path.basename(s.cwd), s.env, s.spec.args.slice(1)]), [['core', { ENV: 'node' }, ['run']], ['sync', {}, ['run']]], 'changed project + baseline project; web has no project');
+  const item = projectTestSpecs(root, { files: ['packages/core/src/a.test.ts'] });
+  assert.deepEqual(item.map(s => [path.basename(s.cwd), s.spec.args.slice(1)]), [['core', ['run', 'src/a.test.ts']]]);
+  const log = path.join(root, 'gate.log');
+  const r = await runProjects(full, { env: { ...process.env, ENV: '' }, timeoutMs: 20000, logFile: log });
+  assert.equal(r.exit, 0); assert.match(r.text, /RAN core run node/); assert.match(r.text, /RAN sync run -/);
+  assert.ok(fs.existsSync(log) && !fs.existsSync(`${log}.0`));
+  fs.writeFileSync(path.join(root, 'vitest.config.ts'), 'export default { test: {} };');
+  assert.equal(projectTestSpecs(root, { codeFiles: ['packages/core/src/a.ts'] }), null, 'not a projects monorepo: keep the single root command');
+});

@@ -33,6 +33,72 @@ export function gateCommands(appDir, { files = [], recon = {} } = {}) {
   return { test, types };
 }
 
+const VITEST_CONFIGS = ['vitest.config.ts', 'vitest.config.mts', 'vitest.config.js', 'vitest.config.mjs', 'vitest.config.cts', 'vitest.config.cjs'];
+
+/**
+ * Monorepo with a root vitest config that lists `projects` (or a vitest.workspace file): a root `vitest run`
+ * can die before running anything (UDLWEWFR and 41B6BCM3: "Projects ... have different 'maxWorkers' but
+ * same 'sequence.groupOrder'"), so every code gate there ended as ENVIRONMENT and shipped unchecked.
+ * Run each affected project from its own folder instead: the projects of the changed code files (item scope:
+ * of the item's test files) plus the folder the preparation baseline ran in (`RUN vX <dir>` in test.log).
+ * The env prefix of the project's own vitest script (e.g. "test:node": "ENV=node vitest --run") is reused.
+ * Returns null when the app is not such a monorepo; the single root command then stays as before.
+ */
+export function projectTestSpecs(appDir, { files = [], codeFiles = [], appRel = '', baselineText = '' } = {}) {
+  const root = path.resolve(appDir);
+  const rootCfg = VITEST_CONFIGS.map((n) => path.join(root, n)).find((f) => fs.existsSync(f));
+  const workspace = fs.readdirSync(root).some((n) => /^vitest\.workspace\.(?:[cm]?[jt]s|json)$/.test(n));
+  let projects = workspace;
+  if (!projects && rootCfg) { try { projects = /\b(?:projects|workspace)\s*:/.test(fs.readFileSync(rootCfg, 'utf8')); } catch { /* unreadable */ } }
+  if (!projects) return null;
+  const projectOf = (abs) => {
+    for (let dir = path.dirname(abs); dir.startsWith(root + path.sep); dir = path.dirname(dir)) {
+      if (VITEST_CONFIGS.some((n) => fs.existsSync(path.join(dir, n)))) return dir;
+    }
+    return null;
+  };
+  const pre = appRel && appRel !== '.' ? `${appRel.replace(/\/$/, '')}/` : '';
+  const rel = (f) => { const x = String(f).replace(/\\/g, '/'); return pre && x.startsWith(pre) ? x.slice(pre.length) : x; };
+  const groups = new Map();
+  const add = (dir, file) => { if (!dir) return; if (!groups.has(dir)) groups.set(dir, []); if (file) groups.get(dir).push(path.relative(dir, file).split(path.sep).join('/')); };
+  if (files.length) for (const f of files) add(projectOf(path.join(root, rel(f))), path.join(root, rel(f)));
+  else {
+    for (const f of codeFiles) add(projectOf(path.join(root, rel(f))), null);
+    const m = String(baselineText).match(/^\s*RUN\s+v[\d.]+\s+(.+?)\s*$/m);
+    if (m) { const dir = path.resolve(m[1].trim()); if (dir.startsWith(root + path.sep) && fs.existsSync(dir)) add(dir, null); }
+  }
+  if (!groups.size) return null;
+  const vitestBin = (dir) => [path.join(dir, 'node_modules', 'vitest', 'vitest.mjs'), path.join(root, 'node_modules', 'vitest', 'vitest.mjs')].find((f) => fs.existsSync(f));
+  const envOf = (dir) => {
+    let scripts = {}; try { scripts = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8')).scripts || {}; } catch { /* none */ }
+    for (const cmd of Object.values(scripts)) {
+      const m = String(cmd).match(/^((?:[A-Z_][A-Z0-9_]*=\S+\s+)*)vitest\b(.*)$/);
+      if (!m || /(?:^|\s)(?:-c|--config)\b/.test(m[2])) continue;
+      return Object.fromEntries([...m[1].matchAll(/([A-Z_][A-Z0-9_]*)=(\S+)/g)].map((x) => [x[1], x[2].replace(/^['"]|['"]$/g, '')]));
+    }
+    return {};
+  };
+  return [...groups].map(([dir, list]) => {
+    const bin = vitestBin(dir); if (!bin) return null;
+    const label = `vitest run ${list.join(' ') || '(project suite)'} [${path.relative(root, dir).split(path.sep).join('/')}]`;
+    return { cwd: dir, env: envOf(dir), spec: { cmd: process.execPath, args: [bin, 'run', ...list], label } };
+  }).filter(Boolean);
+}
+
+/** Runs project specs one after another inside one budget and merges them into one runBounded-like result. */
+export async function runProjects(specs, { env, timeoutMs, logFile, signal }) {
+  const t0 = Date.now(); const parts = [];
+  for (const [i, s] of specs.entries()) {
+    const left = timeoutMs - (Date.now() - t0); if (left < 1000) { parts.push({ exit: 1, timedOut: true, interrupted: false, ms: 0, text: `$ ${s.spec.label}\n(skipped: gate budget used up)\n`, tail: [] }); break; }
+    parts.push(await runBounded(s.spec, { cwd: s.cwd, env: { ...env, ...s.env }, timeoutMs: left, logFile: `${logFile}.${i}`, signal }));
+    if (parts.at(-1).interrupted) break;
+  }
+  const text = parts.map((p) => p.text).join('\n');
+  try { fs.writeFileSync(logFile, text); for (const [i] of parts.entries()) fs.rmSync(`${logFile}.${i}`, { force: true }); } catch { /* best effort */ }
+  return { exit: parts.reduce((m, p) => Math.max(m, p.exit || 0), 0), timedOut: parts.some((p) => p.timedOut), interrupted: parts.some((p) => p.interrupted),
+    ms: Date.now() - t0, text, tail: text.split('\n').filter((l) => l.trim()).slice(-12) };
+}
+
 function killTree(child) {
   if (!child?.pid) return;
   try {

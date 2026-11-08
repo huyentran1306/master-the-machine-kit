@@ -264,3 +264,52 @@ test('a queued item comes back by itself: RAM recovers or a thread frees, and th
   const r = await s.wait_for_update({ timeoutMs: 2000 });
   assert.equal(dispatched, true, JSON.stringify(r).slice(0, 200)); assert.equal(polls, 2);
 });
+
+test('background pickup books new items once, only those dispatch would start now', async () => {
+  const s = new RuntimeSession({ adapter: { parallel: { maxWorkerThreads: 10, materialConcurrency: 4 } } });
+  const now = Date.now();
+  s.phase = 'GAME'; s.match.status = 'IN_PROGRESS'; s.match.endsAt = now + 30 * 60000; s.now = () => now; s.saveState = () => {};
+  let ram = 8 * 1024 ** 3; s.freeMemory = () => ram;
+  const started = []; const material = {};
+  s.readMaterial = id => material[id] || null;
+  s.start_work = async ({ backlogItemKey: id }) => { started.push(id); await new Promise(r => setTimeout(r, 20)); material[id] = { files: {} }; s.items.get(id).local.startedAt = now; return { ok: true }; };
+  s.items.set('PI-1', { id: 'PI-1', type: 'PI', title: 'Incident', local: {} });
+  s.items.set('BUG-1', { id: 'BUG-1', type: 'BUG', title: 'Bug', local: {} });
+  s.items.set('CR-H', { id: 'CR-H', type: 'CR', title: '[Heavy Task] big', local: {} });
+  s.items.set('TASK-W', { id: 'TASK-W', type: 'TASK', title: 'Has a worker', local: { worktree: {}, startedAt: now } });
+  await Promise.all([s.prestartNew(), s.startOnce('BUG-1')]);
+  assert.deepEqual(started.sort(), ['BUG-1', 'PI-1'], 'heavy waits for PI; an item with a worker is skipped; BUG-1 started once');
+  await s.prestartNew();
+  assert.deepEqual(started.sort(), ['BUG-1', 'PI-1'], 'already booked items are not started again');
+  ram = 0.5 * 1024 ** 3;
+  s.items.set('BUG-2', { id: 'BUG-2', type: 'BUG', title: 'Bug 2', local: {} });
+  await s.prestartNew();
+  assert.ok(!started.includes('BUG-2'), 'LOW_RAM: no booking for an item that cannot get a worker');
+  s.match.status = 'PAUSED'; ram = 8 * 1024 ** 3;
+  await s.prestartNew();
+  assert.ok(!started.includes('BUG-2'), 'nothing while paused');
+});
+
+test('short START: paths and model policy omitted by the orchestrator are reused from the PREPARE session', async (t) => {
+  const L = await import('./support/lifecycle-inputs.mjs');
+  const fsMod = await import('node:fs'); const osMod = await import('node:os'); const pathMod = await import('node:path');
+  const ws = fsMod.mkdtempSync(pathMod.join(osMod.tmpdir(), 'short-start-'));
+  t.after(() => fsMod.rmSync(ws, { recursive: true, force: true }));
+  const meta = { workspace: ws, folder: 'ABCD1234', teamId: 'BAK', teamName: 'T', repoUrl: 'https://github.com/x/y.git', branch: 'main' };
+  const o = { playerSessionId: 'session-1', origin: 'https://gm.example.test', apiKey: 'k'.repeat(40), teamUuid: '22222222-2222-4222-8222-222222222222', environmentRevision: 'abc' };
+  const full = L.startGame(meta, o);
+  const s = new RuntimeSession();
+  s.teamWorkspace = ws; s.matchId = 'ABCD1234'; s.playerSessionId = 'session-1';
+  s.checkoutRoot = full.checkoutRoot; s.matchRoot = full.matchRoot; s.progressLogFile = full.progressLogFile;
+  s.modelPolicy = { orchestratorModel: 'gpt-6.1-sol', allowedModels: ['gpt-6.1-sol'] };
+  let applied = null; s.applyDescriptor = async d => { applied = d; return { ok: true }; };
+  const short = { ...full }; for (const k of ['checkoutRoot', 'matchRoot', 'progressLogFile', 'teamWorkspace', 'teamSdlcPackWorkspace', 'challengeWorkspace']) delete short[k];
+  const r = await s.configure({ raw: `START_GAME_V4\n${JSON.stringify(short)}` });
+  assert.equal(r.ok, true, JSON.stringify(r.results));
+  assert.equal(applied.checkoutRoot, full.checkoutRoot); assert.equal(applied.apiKeySecret, full.apiKeySecret);
+  assert.ok(r.warnings.some(w => /reused from PREPARE/.test(w)));
+  assert.equal(s.modelPolicy.orchestratorModel, 'gpt-6.1-sol', 'policy kept when the START text has none');
+  s.matchId = 'OTHER123';
+  const other = await s.configure({ raw: `START_GAME_V4\n${JSON.stringify(short)}` });
+  assert.equal(other.ok, false, 'another match: nothing is borrowed, the full input is required');
+});

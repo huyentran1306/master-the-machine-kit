@@ -6,7 +6,7 @@ const key = { type: 'string', description: 'Backlog ID exactly as on /match, e.g
 export const TOOLS = [
   {
     name: 'configure_session',
-    description: 'Give the helper the mtm-player lifecycle input. Pass `raw` = the full input text INCLUDING its marker line (PREPARE_GAME_V2, START_GAME_V4, RESUME_PREPARATION_V1, RESUME_GAME_V1, MATCH_PAUSED_V1, MATCH_ENDED_V1) and the MTM_MODEL_POLICY_V1 part. Credentials stay in helper memory. Logs ORCHESTRATOR_STARTED/RESTARTED; on START/RESUME_GAME also runs BACKLOG_SYNC and returns the backlog view.',
+    description: 'Give the helper the mtm-player lifecycle input. Pass `raw` = the full input text INCLUDING its marker line (PREPARE_GAME_V2, START_GAME_V4, RESUME_PREPARATION_V1, RESUME_GAME_V1, MATCH_PAUSED_V1, MATCH_ENDED_V1) and the MTM_MODEL_POLICY_V1 part. Credentials stay in helper memory. Logs ORCHESTRATOR_STARTED/RESTARTED; on START/RESUME_GAME also runs BACKLOG_SYNC and returns the backlog view. Faster START: when this session already ran PREPARE_GAME_V2 for the same match, raw may be only the START_GAME_V4 marker line and its JSON without checkoutRoot, matchRoot, progressLogFile, teamWorkspace, teamSdlcPackWorkspace and challengeWorkspace, and without the MTM_MODEL_POLICY_V1 part; the helper reuses them. Copy every other field exactly.',
     inputSchema: obj({ raw: { type: 'string' }, descriptor: { type: 'object' }, modelPolicy: { type: 'object' } }),
     handler: (s, a) => s.configure(a),
   },

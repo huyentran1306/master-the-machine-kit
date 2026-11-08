@@ -313,3 +313,13 @@ test('short START: paths and model policy omitted by the orchestrator are reused
   const other = await s.configure({ raw: `START_GAME_V4\n${JSON.stringify(short)}` });
   assert.equal(other.ok, false, 'another match: nothing is borrowed, the full input is required');
 });
+
+test('time alerts never stop new work: last minutes still dispatch, over budget is a note', async () => {
+  const { alerts } = await import('../team-sdlc-pack/src/planner.mjs');
+  const now = Date.now();
+  const late = alerts([], now, now + 4 * 60000);
+  assert.ok(late.some(a => /still dispatch every newly revealed item/.test(a)) && !late.some(a => /start nothing new/.test(a)));
+  const slow = alerts([{ id: 'TASK-8', type: 'TASK', local: { startedAt: now - 20 * 60000 } }], now, now + 20 * 60000);
+  assert.ok(slow.some(a => /^note: OVER BUDGET TASK-8: .*Keep it running/.test(a)), JSON.stringify(slow));
+  assert.ok(!slow.some(a => /take NEXT/.test(a)));
+});

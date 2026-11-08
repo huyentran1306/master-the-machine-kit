@@ -20,7 +20,7 @@ For brief.answerOnly (target <= 4 minutes): read brief.json and every file under
 5. Run the repro + the affected module's tests; run the full suite; record any timeout as NOT_RUN, never green. Build/typecheck once. Return real test counts to the orchestrator.
 6. Answer: incident summary, root cause with file:line + the commit that introduced it, impact, fix, verification, prevention note. Evidence: `<ID>-repro.md` (before -> after) + `<ID>-regression.md`.
 7. Self-review the checklist inline; commit code, tests, evidence and answer (`<ID>: fix <symptom>`). Return READY/PARKED; never push or submit.
-- `!! PI SPRINT` = stop expanding scope and ship the verified fix now.
+- `!! PI SPRINT` = stop expanding scope: finish what the item requires, skip extra checks and return READY.
 
 Before searching for an item, read the brief's likelyFilesPath (likely-files.md: files ranked by this item's words, with symbols, imports and related tests) to pick candidate files, then confirm with `rg`. Open repoMapPath (repo-map.md) only for app layout and commands, or when likely-files.md has no fitting file. Both are preparation snapshots and may be stale after edits. If unavailable, use scoped `rg`.
 

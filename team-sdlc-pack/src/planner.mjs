@@ -111,7 +111,9 @@ export function alerts(items, now, endsAt, { current, paused, status } = {}, opt
   if (paused || status === 'PAUSED') out.push('!! MATCH PAUSED: no start/submit; keep local work safe; wait_for_update until IN_PROGRESS.');
   if (endsAt) {
     const m = (endsAt - now) / 60000;
-    if (m <= 6 && m > 0) out.push(`!! ${m.toFixed(1)}m left in the match: ship what is tested now; start nothing new that cannot finish.`);
+    // Waves come whenever the organizers release them, also in the last minutes: never tell the orchestrator to stop
+    // starting work. An answer item finishes in 1-3 min; workerStopAt already bounds each worker.
+    if (m <= 6 && m > 0) out.push(`!! ${m.toFixed(1)}m left in the match: ship every READY item now and still dispatch every newly revealed item at once; workers return by their workerStopAt.`);
   }
   for (const it of items) {
     const l = it.local || {};
@@ -139,8 +141,10 @@ export function alerts(items, now, endsAt, { current, paused, status } = {}, opt
     if (l.startedAt) {
       const spent = (now - l.startedAt) / 60000;
       const estM = o.estMinutes[it.type] ?? 10;
-      if (it.type === 'PI' && spent > estM) out.push(`!! PI SPRINT ${it.id}: ${spent.toFixed(1)}m spent (target ${estM}m). Ship the verified fix now.`);
-      else if (it.type !== 'PI' && spent > estM * o.budgetFactor) out.push(`!! OVER BUDGET ${it.id}: ${spent.toFixed(1)}m spent (budget ${(estM * o.budgetFactor).toFixed(0)}m). Submit what passes now, or park its worker and take NEXT.`);
+      if (it.type === 'PI' && spent > estM) out.push(`!! PI SPRINT ${it.id}: ${spent.toFixed(1)}m spent (target ${estM}m). Tell its worker to finish what the item requires, skip extra checks and return READY.`);
+      // Workers run in parallel: parking a slow but progressing item only throws its points away. It is a note, and
+      // parking is right only when another item is waiting for that worker's slot.
+      else if (it.type !== 'PI' && spent > estM * o.budgetFactor) out.push(`note: OVER BUDGET ${it.id}: ${spent.toFixed(1)}m spent (estimate ${(estM * o.budgetFactor).toFixed(0)}m). Keep it running while it progresses; its workerStopAt still applies. Park it only if an item is queued for its slot.`);
     }
   }
   return out;

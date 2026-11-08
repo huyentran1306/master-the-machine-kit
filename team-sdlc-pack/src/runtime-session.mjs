@@ -1127,10 +1127,20 @@ export class RuntimeSession {
     return this.clean({ ok: r.ok, error: r.error, view: this.view({ includeEvents: true, pageText: needText }) });
   }
 
-  wrapUpCandidates(now = this.now()) {
+  wrapUpCandidates(now = this.now(), { wakeOnly = false } = {}) {
     return [...this.items.values()].filter(it => it.local?.worktree && it.local?.startedAt && !it.local?.ready && !it.local?.parked
-      && !isSubmitted(it) && Number.isFinite(it.local?.workerStopAt) && now >= it.local.workerStopAt)
+      && !isSubmitted(it) && Number.isFinite(it.local?.workerStopAt) && now >= it.local.workerStopAt
+      // Wake the orchestrator once per item (again after 3 min if still not READY). Without this every
+      // wait_for_update returned at once until the worker finished: a busy loop of orchestrator turns and
+      // approval reviews, each re-sending ~60k tokens of context.
+      && (!wakeOnly || !it.local.wrapUpNotifiedAt || now - it.local.wrapUpNotifiedAt >= 180000))
       .sort((a, b) => (a.type === 'PI' ? 0 : 1) - (b.type === 'PI' ? 0 : 1) || (b.maxPoints || 0) - (a.maxPoints || 0));
+  }
+
+  markWrapUpNotified(now = this.now()) {
+    const due = this.wrapUpCandidates(now, { wakeOnly: true });
+    for (const it of due) it.local.wrapUpNotifiedAt = now;
+    if (due.length) this.saveState();
   }
 
   /** Compact state for the model; every tool result carries alerts and NEXT. */
@@ -1156,7 +1166,7 @@ export class RuntimeSession {
     }).filter(Boolean);
     const baselineDefects = this.state.baselineDefectsResolved ? [] : this.baselineDefects();
     const current = this.state.current;
-    const wrapUp = this.wrapUpCandidates(now);
+    const wrapUp = this.wrapUpCandidates(now, { wakeOnly: true }); // tell once (again after 3 min), not on every view
     const undispatched = ranked.filter(r => r.action !== 'submit').map((r) => {
       const it = this.items.get(r.id);
       return `${r.id}${it?.revealedAt ? ` (open ${Math.max(0, (now - it.revealedAt) / 60000).toFixed(1)}m)` : ''}`;
@@ -1247,15 +1257,19 @@ export class RuntimeSession {
     const max = Math.min(Number(timeoutMs) || ceiling, ceiling);
     const until = Date.now() + max;
     let lastErr = null;
-    if (this.pendingEvents.length || this.hasDispatchAction() || this.wrapUpCandidates().length) return this.clean(await this.withAutoDispatch({ ok: true, changed: true, view: this.view({ includeEvents: true }) }));
+    if (this.pendingEvents.length || this.hasDispatchAction() || this.wrapUpCandidates(undefined, { wakeOnly: true }).length) {
+      const out = this.clean(await this.withAutoDispatch({ ok: true, changed: true, view: this.view({ includeEvents: true }) }));
+      this.markWrapUpNotified(); return out;
+    }
     const startStatus = this.match.status;
     while (Date.now() < until) {
       const r = await this.withLock(() => this.doRefresh());
       lastErr = r.ok ? null : r.error;
       const changed = r.ok && !!r.events?.some((e) => e.kind !== 'RESULT'); // grading results do not wake the agent
       const newlyPaused = this.match.status === 'PAUSED' && startStatus !== 'PAUSED'; // a pause that persists is waited out, not spun on
-      if (changed || this.hasDispatchAction() || this.wrapUpCandidates().length || this.match.status === 'FINISHED' || newlyPaused || this.phase !== 'GAME' && this.phase !== 'PREPARATION') {
-        return this.clean(await this.withAutoDispatch({ ok: true, changed, view: this.view({ includeEvents: true, pageText: !!r.events?.some((e) => e.kind === 'NEW' || e.kind === 'EDITED') && !this.lastParse?.structured }) }));
+      if (changed || this.hasDispatchAction() || this.wrapUpCandidates(undefined, { wakeOnly: true }).length || this.match.status === 'FINISHED' || newlyPaused || this.phase !== 'GAME' && this.phase !== 'PREPARATION') {
+        const out = this.clean(await this.withAutoDispatch({ ok: true, changed, view: this.view({ includeEvents: true, pageText: !!r.events?.some((e) => e.kind === 'NEW' || e.kind === 'EDITED') && !this.lastParse?.structured }) }));
+        this.markWrapUpNotified(); return out;
       }
       const wait = r.ok ? this.adapter.polling.successMs : this.adapter.polling.errorMs;
       if (Date.now() + wait >= until) break;

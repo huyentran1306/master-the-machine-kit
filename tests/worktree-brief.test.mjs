@@ -536,6 +536,14 @@ test('a running PI gets a best-effort wrap-up at its cutoff and ships before ord
   const view = s.view();
   assert.match(view.alerts[0], /WRAP UP PI-80 NOW/);
   assert.match(view.wrapUp[0].message, /best values/);
+  // Wake once, not on every wait_for_update (a busy loop of orchestrator turns and approval reviews).
+  assert.equal(s.wrapUpCandidates(now, { wakeOnly: true }).length, 1);
+  s.markWrapUpNotified(now);
+  assert.equal(s.wrapUpCandidates(now, { wakeOnly: true }).length, 0);
+  assert.ok(!s.view().alerts.some(a => /WRAP UP PI-80 NOW/.test(a)), 'the alert is not repeated in every view');
+  s.now = () => now + 180000;
+  assert.equal(s.wrapUpCandidates(s.now(), { wakeOnly: true }).length, 1, 'reminded again after 3 minutes if still not READY');
+  s.now = () => now;
   s.items.get('PI-80').local.ready = true;
   assert.equal(rank([...s.items.values()], now, s.match.endsAt).ranked[0].id, 'PI-80');
 });

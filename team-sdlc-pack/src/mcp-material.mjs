@@ -74,7 +74,14 @@ const dayPrefix = ms => new Date(ms).toISOString().slice(0, 10);
  * searches through NEED_INFO and took 2.5 minutes. Sweep every service (and its levels when truncated)
  * up front and hand the worker one merged, deduplicated, oldest-first file.
  */
-async function sweepLogs(tool, fetchOnly, cutoff, { callCap = 150 } = {}) {
+async function sweepLogs(tool, fetchOnly, cutoff, { callCap: baseCap = 150, focusText = '' } = {}) {
+  // A14DI1HU: ten services were over the 20-entry cap. In service order the call cap went to api-gateway,
+  // sync-server, web... before rule-engine, the one the incident named ("The rule engine ... log to ...").
+  // Services the item text names (rule-engine ~ "rule engine") are narrowed first, whole (no level split,
+  // which only doubles the calls), each with its own 150-call budget; the rest share the base budget.
+  const norm = v => ` ${String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()} `;
+  const focus = norm(focusText);
+  const named = service => !!service && norm(service).trim().length > 2 && focus.includes(norm(service));
   const props = tool.inputSchema?.properties || {};
   const required = tool.inputSchema?.required || [];
   const key = re => Object.keys(props).find(k => re.test(words(k)));
@@ -87,6 +94,7 @@ async function sweepLogs(tool, fetchOnly, cutoff, { callCap = 150 } = {}) {
   const pagingKeys = new Set([pageKey, offsetKey, cursorKey, limitKey].filter(Boolean));
   if (required.some(k => k !== queryKey && k !== serviceKey && !pagingKeys.has(k))) return null;
   const services = serviceKey ? logServices(tool) : [];
+  let callCap = baseCap + Math.min(2, services.filter(named).length) * 150;
   const argsFor = (service, query, paging = {}) => {
     const args = {};
     if (service && serviceKey) args[serviceKey] = service;
@@ -160,7 +168,7 @@ async function sweepLogs(tool, fetchOnly, cutoff, { callCap = 150 } = {}) {
   }
   const levels = ['ERROR', 'WARN', 'INFO'];
   const deeper = services.filter((_, i) => top[i + 1]?.parsed && top[i + 1].parsed.total > top[i + 1].parsed.returned);
-  const split = await mapBounded(deeper.flatMap(service => levels.map(level => ({ service, level }))), 4, ({ service, level }) => run(service, level, level).then(r => ({ service, level, r: r.parsed })));
+  const split = await mapBounded(deeper.filter(service => !named(service)).flatMap(service => levels.map(level => ({ service, level }))), 4, ({ service, level }) => run(service, level, level).then(r => ({ service, level, r: r.parsed })));
 
   // Some log APIs expose total/returned but no page/cursor. Discover their filtering shape from the
   // timestamps they returned: day -> hour -> ten-minute prefix, walking backwards from the oldest visible
@@ -215,7 +223,18 @@ async function sweepLogs(tool, fetchOnly, cutoff, { callCap = 150 } = {}) {
     return { complete: scopeCount(service, level) >= target, reason: scopeCount(service, level) >= target ? null : calls >= callCap ? 'CALL_CAP' : Date.now() >= cutoff ? 'TIMEOUT' : 'NARROWING_UNSUPPORTED', attempted };
   };
   const cappedParts = split.filter(x => x.r && x.r.total > x.r.returned);
-  const narrowed = await mapBounded(cappedParts, 4, async x => ({ ...x, result: await narrow(x.service, x.level, x.r) }));
+  // A level split that failed (429/timeout) must not drop the service from narrowing: narrow it unsplit.
+  for (const service of deeper) {
+    if (!split.some(x => x.service === service && x.r)) cappedParts.push({ service, level: null, r: top[services.indexOf(service) + 1].parsed });
+  }
+  const focused = cappedParts.filter(x => named(x.service));
+  const rest = cappedParts.filter(x => !named(x.service));
+  const narrowOne = async x => ({ ...x, result: await narrow(x.service, x.level, x.r) });
+  const beforeFocus = calls;
+  const narrowedFocus = await mapBounded(focused, 4, narrowOne);
+  // Services the item does not name only get what is left of the base budget, never the named ones' extra.
+  callCap = Math.min(callCap, calls + Math.max(0, baseCap - beforeFocus));
+  const narrowed = [...narrowedFocus, ...await mapBounded(rest, 4, narrowOne)];
   if (!services.length && top[0]?.parsed?.total > top[0].parsed.returned && queryKey && !pageKey && !offsetKey && !cursorKey) {
     narrowed.push({ service: '*', level: null, r: top[0].parsed, result: await narrow(null, null, top[0].parsed) });
   }
@@ -226,7 +245,7 @@ async function sweepLogs(tool, fetchOnly, cutoff, { callCap = 150 } = {}) {
     const covered = scopeCount(service, null);
     if (covered < t.total) {
       const incomplete = parts.filter(x => x.r && x.r.total > x.r.returned).map(x => ({ level: x.level, result: narrowed.find(n => n.service === service && n.level === x.level)?.result }));
-      const reason = incomplete.find(x => x.result?.reason)?.result?.reason;
+      const reason = incomplete.find(x => x.result?.reason)?.result?.reason || narrowed.find(n => n.service === service && n.level == null)?.result?.reason;
       truncated.push({ service, total: t.total, fetched: Math.min(t.total, covered || t.returned), ...(reason ? { reason } : {}), levelsOverLimit: incomplete.filter(x => !x.result?.complete).map(x => x.level) });
     }
   }
@@ -329,7 +348,7 @@ export async function collectMcpMaterial(item, call, budgetMs = 90000) {
     const kb = selected.find(x => x.kind === 'search');
     const rules = kb && /\bincident report\b/i.test(String(item.description || '')) ? attempt(kb, sweepCutoff, false, { query: 'incident report rules' }) : null;
     for (const { tool } of selected.filter(x => x.kind === 'logs')) {
-      try { const merged = await sweepLogs(tool, fetchOnly, sweepCutoff); if (merged) entries.push(merged); }
+      try { const merged = await sweepLogs(tool, fetchOnly, sweepCutoff, { focusText: `${item.title || ''}\n${item.description || ''}` }); if (merged) entries.push(merged); }
       catch (e) { entries.push({ purpose: 'logs', tool: `${tool.name}-merged`, ok: false, error: e.message }); }
     }
     await rules;

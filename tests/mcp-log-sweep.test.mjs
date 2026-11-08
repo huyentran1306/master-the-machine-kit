@@ -141,3 +141,26 @@ test('log sweep reports the exact missing count when no paging shape is advertis
   const merged = entries.find(e => e.tool === 'search_logs-merged');
   assert.deepEqual(merged.result.truncated, [{ service: '*', total: 57, fetched: 20 }]);
 });
+
+test('A14DI1HU shape: ten capped services, the call cap goes to the service the incident names first', async () => {
+  const names = ['api-gateway', 'sync-server', 'web', 'payments', 'import', 'rules', 'rule-engine', 'schedules', 'status-cache', 'deploy'];
+  const sizes = { 'api-gateway': 435, 'sync-server': 563, web: 408, payments: 409, import: 441, rules: 296, 'rule-engine': 755, schedules: 60, 'status-cache': 40, deploy: 13 };
+  const all = names.flatMap(service => Array.from({ length: sizes[service] }, (_, i) => ({
+    ts: new Date(Date.UTC(2025, 9, 15, 0, i * 7)).toISOString(), service, level: i % 9 ? 'INFO' : 'WARN', message: `${service}.event`, context: { seq: i, txnId: `TX-${String(i).padStart(5, '0')}` },
+  })));
+  const advertised = [{ name: 'search_logs', description: `Search production logs (services include ${names.join(', ')}). Returns the newest matching entries first, at most 20 per call, with the total number of matches.`,
+    inputSchema: { properties: { query: { type: 'string' }, service: { type: 'string' } }, required: [] } }];
+  const entries = await collectMcpMaterial({ id: 'PI-02', type: 'PI', title: 'Transactions land in the wrong category',
+    description: 'The rule engine and the deploy pipeline log to the company\'s production observability logs.' }, async req => {
+    if (req.action === 'tools') return { ok: true, tools: advertised };
+    const terms = String(req.args?.query || '').split(/\s+/).filter(Boolean);
+    const hit = all.filter(e => (!req.args.service || e.service === req.args.service) && terms.every(term => JSON.stringify(e).includes(term)));
+    const newest = hit.slice().reverse().slice(0, 20);
+    return text({ total: hit.length, returned: newest.length, entries: newest });
+  }, 65000);
+  const merged = entries.find(e => e.tool === 'search_logs-merged');
+  assert.ok(merged.result.completeServices.includes('rule-engine'), JSON.stringify(merged.result.truncated.find(t => t.service === 'rule-engine')));
+  assert.equal(merged.result.entries.filter(e => e.service === 'rule-engine').length, 755);
+  assert.ok(merged.result.calls <= 300, `calls: ${merged.result.calls}`);
+  assert.ok(merged.result.truncated.some(t => t.service === 'api-gateway'), 'unnamed services stay honestly truncated when the base budget is spent');
+});

@@ -26,5 +26,6 @@ Hard rules:
 - Heavy items are runtime-deferred as HEAVY_DEFERRED. Do not treat that as an error, call start_work yourself, or wait on it; spawn it only when a helper result returns its spawn entry.
 - When view.wrapUp is present, send its stop message immediately (PI first), then ship the worker's best verified honest commit as soon as it returns READY.
 - Never wait for information no tool provides: state the assumption in the answer and ship.
+- Usage is the scarce resource (the 5-hour window): every tool call re-sends your whole context. Wait for long shell commands (baseline suite, build) with yield_time_ms of at least 30000, never 1-second polls; prefer wait_agent/wait_for_update over repeated short checks. On USAGE CRITICAL ship every READY item first.
 - Be terse. No narration, plans or recaps in messages: Codex credits break ties.
 """

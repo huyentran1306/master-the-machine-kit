@@ -81,14 +81,36 @@
     "minFreeRamGBAll": 1.5,
     "materialConcurrency": 4,
     "portBase": 3100,
-    "workerEffort": { "answerOnly": "low", "pi": "medium", "code": "medium", "retry": "high" },
+    "workerEffort": {
+      "answerOnly": "low",
+      "pi": "medium",
+      "code": "medium",
+      "retry": "high"
+    },
     "workerModels": {
-      "pi": ["gpt-6.1-sol"],
-      "cr": ["gpt-6.1-sol"],
-      "answerOnly": ["gpt-6.1-sol"],
-      "answerOnlySource": ["gpt-6.1-sol"],
-      "code": ["gpt-6.1-sol"],
-      "retry": ["gpt-6.1-sol"]
+      "pi": [
+        "gpt-6.1-sol"
+      ],
+      "cr": [
+        "gpt-6.1-sol"
+      ],
+      "answerOnly": [
+        "gpt-6.1-terra",
+        "gpt-6.1-sol"
+      ],
+      "answerOnlySource": [
+        "gpt-6.1-sol"
+      ],
+      "code": [
+        "gpt-6.1-sol"
+      ],
+      "retry": [
+        "gpt-6.1-sol"
+      ]
     }
+  },
+  "usageBudget": {
+    "softPct": 85,
+    "hardPct": 92
   }
 }

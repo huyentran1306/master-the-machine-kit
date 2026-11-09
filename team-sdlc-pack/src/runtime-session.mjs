@@ -34,6 +34,7 @@ import { writeItemBrief, answerNeedsSource, answerNeedsImage } from './item-brie
 import { extractRequiredEvidence, evidenceArrayRefs, unscorableAnswer } from './required-evidence.mjs';
 import { collectMcpMaterial, purpose as materialPurpose } from './mcp-material.mjs';
 import { until, SUBMIT_LIMITS } from './deadline.mjs';
+import { readCodexUsage, usageTier } from './usage-budget.mjs';
 import {
   oneLine, safeId, uuid, sleep, readJson, writeJson, loggableOrigin, loggablePath, originOf, redact, truncate, minutes, SHA_RE, ITEM_KEY_RE, sha256, isInside, nowIso, repoKey,
 } from './util.mjs';
@@ -49,10 +50,21 @@ const MAX_RESPAWNS = 2;
 const DEFAULT_WORKER_MODELS = {
   pi: ['gpt-6.1-sol'],
   cr: ['gpt-6.1-sol'],
-  answerOnly: ['gpt-6.1-sol'],
+  answerOnly: ['gpt-6.1-terra', 'gpt-6.1-sol'],
   answerOnlySource: ['gpt-6.1-sol'],
   code: ['gpt-6.1-sol'],
   retry: ['gpt-6.1-sol'],
+};
+// Usage-budget tiers (see usage-budget.mjs): when the 5-hour window is projected past ~85% by the end of the match,
+// new workers move to cheaper models; past ~92% everything but PI goes to the cheapest. PI keeps the stronger model
+// longest: its points are ranked by submit order and every field is exact-match.
+const TIGHT_WORKER_MODELS = {
+  pi: ['gpt-6.1-sol'], cr: ['gpt-6.1-terra', 'gpt-6.1-sol'], code: ['gpt-6.1-terra', 'gpt-6.1-sol'], retry: ['gpt-6.1-terra', 'gpt-6.1-sol'],
+  answerOnlySource: ['gpt-6.1-terra', 'gpt-6.1-sol'], answerOnly: ['gpt-6-luna', 'gpt-6.1-terra'],
+};
+const CRITICAL_WORKER_MODELS = {
+  pi: ['gpt-6.1-terra', 'gpt-6.1-sol'], cr: ['gpt-6-luna', 'gpt-6.1-terra'], code: ['gpt-6-luna', 'gpt-6.1-terra'], retry: ['gpt-6-luna', 'gpt-6.1-terra'],
+  answerOnlySource: ['gpt-6-luna', 'gpt-6.1-terra'], answerOnly: ['gpt-6-luna', 'gpt-6.1-terra'],
 };
 
 export const retryablePushRace = (r) => /cannot lock ref|remote rejected|failed to update ref|fetch first|non-fast-forward|stale info/i.test(`${r?.stderr || ''}\n${r?.stdout || ''}`);
@@ -1174,7 +1186,10 @@ export class RuntimeSession {
       const it = this.items.get(r.id);
       return `${r.id}${it?.revealedAt ? ` (open ${Math.max(0, (now - it.revealedAt) / 60000).toFixed(1)}m)` : ''}`;
     });
+    const budget = this.phase === 'GAME' ? this.usageBudget(now) : { tier: 0 };
     const al = [
+      ...(budget.tier === 2 ? [`!! USAGE CRITICAL: ${budget.reason}. Ship every READY item now, before the account is blocked; new workers use the cheapest allowed models.`]
+        : budget.tier === 1 ? [`note: USAGE TIGHT: ${budget.reason}. New workers use cheaper models; keep tool calls few (no 1-second polling, no full-file reads).`] : []),
       ...wrapUp.map(i => `!! WRAP UP ${i.id} NOW${i.type === 'PI' ? ' (PI — strongest priority)' : ''}: tell the worker to keep its fix, write the best values it can verify now, set status honestly, commit and return READY. Ship it immediately; do not spend another time box collecting.`),
       ...(undispatched.length && this.phase === 'GAME' && !['PAUSED', 'FINISHED'].includes(this.match.status)
         ? [`!! DISPATCH NOW: ${undispatched.join(', ')} have no worker. Call dispatch_ready and spawn every returned worker in this same turn, before servicing READY/messages.`] : []),
@@ -2283,12 +2298,37 @@ export class RuntimeSession {
     return cfg.code;
   }
 
+  /**
+   * Codex 5-hour window, read from Codex's own rollout files (no model call), cached 15 s. The first sample taken in the
+   * game is the baseline for the burn rate; a window that resets lowers the reading and restarts the baseline.
+   */
+  usageBudget(now = this.match ? this.now() : Date.now()) {
+    if (this.usageCache && Date.now() - this.usageCache.at < 15000) return this.usageCache.value;
+    this.state ??= {};
+    let usage = null;
+    try { usage = (this.readUsage || readCodexUsage)({ now: Date.now() }); } catch { usage = null; }
+    if (usage && this.phase === 'GAME') {
+      const b = this.state.usageBase;
+      if (!b || usage.usedPercent < b.pct) this.state.usageBase = { pct: usage.usedPercent, at: now };
+    }
+    const value = usageTier({ usage, base: this.state.usageBase, now, endsAt: this.match?.endsAt,
+      softPct: this.adapter?.usageBudget?.softPct ?? 85, hardPct: this.adapter?.usageBudget?.hardPct ?? 92 });
+    value.usedPercent = usage?.usedPercent ?? null; value.weekPercent = usage?.weekPercent ?? null;
+    if (usage) { this.state.usageLast = { pct: usage.usedPercent, week: usage.weekPercent, projected: value.projected, tier: value.tier, at: now };
+      this.state.usageMaxTier = Math.max(this.state.usageMaxTier || 0, value.tier); }
+    this.usageCache = { at: Date.now(), value };
+    return value;
+  }
+
   /** Explicit worker model by risk lane, constrained to the organizer-provided allowedModels. */
   workerModel(it, c = {}) {
     const rawAllowed = Array.isArray(this.modelPolicy?.allowedModels) ? this.modelPolicy.allowedModels : [];
     const allowed = [...new Set(rawAllowed.filter((m) => typeof m === 'string' && m.trim()).map((m) => m.trim()))];
     if (!allowed.length) return undefined;
-    const cfg = { ...DEFAULT_WORKER_MODELS, ...(this.adapter.parallel?.workerModels || {}) };
+    const tier = this.usageBudget().tier;
+    const base = { ...DEFAULT_WORKER_MODELS, ...(this.adapter.parallel?.workerModels || {}) };
+    const cfg = tier === 2 ? { ...base, ...CRITICAL_WORKER_MODELS, ...(this.adapter.parallel?.workerModelsCritical || {}) }
+      : tier === 1 ? { ...base, ...TIGHT_WORKER_MODELS, ...(this.adapter.parallel?.workerModelsTight || {}) } : base;
     const lane = it.local?.heavy && cfg.heavy ? 'heavy' : (it.local?.dispatches || 0) > 1 ? 'retry' : it.type === 'PI' ? 'pi' : it.type === 'CR' ? 'cr' : c.answerOnly && it.local?.answerSource ? 'answerOnlySource' : c.answerOnly ? 'answerOnly' : 'code';
     const preferred = Array.isArray(cfg[lane]) ? cfg[lane] : [cfg[lane]];
     for (const wanted of preferred.filter((m) => typeof m === 'string' && m)) {
@@ -2452,11 +2492,14 @@ export class RuntimeSession {
       const mutationGuide = /\b(broken builds?|builds? that (?:each )?break|mutants?|mutation|detection share|fails? on (?:applications|builds))\b/i.test(`${it.description || ''}`)
         ? 'GRADED BY DETECTION: your tests are run against builds that each break one rule, and every break your suite misses is lost points. Write at least two cases per specification rule: every outcome the rule states, a multi-item variant (several lines/transactions in one call) and a boundary, and assert every observable effect (amounts, links, counts, totals), not only that the call succeeds. Never assert behaviour the specification leaves free. '
         : '';
+      // 0OD2WHNM: 24% of all tool calls were 1-second polls of a running suite/build and 20% were whole-file cats; every
+      // such call is a model turn that re-sends ~60k tokens of context. Usage, not reasoning, ran the account out.
+      const frugal = 'Usage: start long commands (builds, suites, e2e) with yield_time_ms of at least 30000 and wait with the same; the call returns as soon as the command ends, so never poll every second. Read large files with rg or sed -n ranges and a max_output_tokens cap; cat only the task and digest files named here. ';
       const piQueryGuide = it.type === 'PI' ? `Log queries: do not query a service marked complete in the digest; otherwise narrow with a timestamp prefix copied from a real entry, never a guessed ID, and use at most about 30 queries. ` : '';
       const entry = {
         id: r.id, type: it.type, answerOnly: !!c.answerOnly,
         taskName: `${r.id.toLowerCase().replace(/[^a-z0-9]/g, '')}${it.local.dispatches > 1 ? `r${it.local.dispatches}` : ''}`,
-        message: `${resumeText}${baselineFixText}${baselineWaitText}${doEverything}${mutationGuide}${piQueryGuide}Item ${r.id} (${it.type}${c.answerOnly ? ', answer-first hint' : ''}).${c.answerOnly ? ` FAST PATH (points drop with every minute${it.type === 'PI' ? ', PI is ranked by submit order: every turn counts' : ''}). No preamble, no progress or send_message updates. 1) ${answerRead} 2) Decide every field (UTC-normalise mixed offsets, dedupe retries, keep corrected entries, ignore decoys), then write ${c.answer?.submitJson || 'submit.json'} in one edit, keeping every template key. 3) For SCOPE: answer run \`${c.finishAnswer || c.validateAnswer}\`${c.finishAnswer ? ' (validates the schema and commits the answer folder); on ANSWER INVALID fix and rerun' : ', then commit'}; for SCOPE: answer+code run the relevant tests and commit code, tests and answer together instead${it.type === 'PI' ? ' (PI: whatever the item asks for, such as a build, browser check or evidence, is done; beyond that run only the tests for the changed code, no full suite, full build or reinstall: the main gate re-checks)' : ''}. 4) Reply with the STATUS block including SCOPE. Only if your mtm-query command cannot answer, reply NEED_INFO: <what> (logs: service + narrowing word). No extra evidence or test.log unless requiredEvidence lists it; never install validators.` : `${c.brief?.digestPath ? ` Item text, KB articles, test data and logs: read ${c.brief.digestPath}, not the raw files/mcp/*.json.` : ''}${c.brief?.likelyFilesPath ? ` Code search: start from ${c.brief.likelyFilesPath} (files ranked by this item's words, with symbols, imports and related tests); confirm with \`rg -n -m 20 <term> <those paths>\` before any repo-wide search.` : ''}${queryCmd ? ` If a fact (KB rule, log line, test data) is missing, query it yourself with \`${queryCmd}\`; NEED_INFO only if the read tool cannot answer.` : ''} Check the answer with \`${c.validateAnswer}\` (no installs). Builds, full test suites and browser/e2e runs: \`node "${BUILD_LOCK}" --slots ${this.adapter.parallel.maxHeavySteps || 2} --max-wait-ms ${heavyWaitMs} -- <command>\` (takes a free slot itself; after ${Math.round(heavyWaitMs / 1000)} s it runs anyway; never ask the orchestrator for build_slot). Single test files run directly. Stop dev servers and browsers as soon as the evidence is captured. Redirect long output (builds, full suites, image tools such as sips) to a file under .mtm-notes/ and print only its last 20 lines.`} checkoutRoot = worktreeRoot = ${c.worktreeRoot}; folder ${c.folder}; matchRoot ${c.matchRoot}; briefFile ${c.brief?.briefFile}; filesDir ${c.brief?.filesDir}; answer ${c.answer?.submitJson || ''} (evidence in ${c.answer?.evidenceDir || ''}); ports dev=${c.ports?.dev} production=${c.ports?.production} (override fixed runner ports). ${c.answerOnly && c.brief?.digestPath ? 'Start with digestPath; if the requirements need app changes, then read briefFile and its code-lifecycle material.' : 'Read briefFile first: it has the commands, playbook, checklist and organizer files.'} Work only in this worktree. Stop and return by ${stop} (Game Master clock). Commit the complete item (code, tests, evidence, answer) and reply STATUS READY or PARKED with COMMIT <sha> and SCOPE. Never push, submit, delegate or call Game APIs.`,
+        message: `${resumeText}${baselineFixText}${baselineWaitText}${doEverything}${mutationGuide}${piQueryGuide}${frugal}Item ${r.id} (${it.type}${c.answerOnly ? ', answer-first hint' : ''}).${c.answerOnly ? ` FAST PATH (points drop with every minute${it.type === 'PI' ? ', PI is ranked by submit order: every turn counts' : ''}). No preamble, no progress or send_message updates. 1) ${answerRead} 2) Decide every field (UTC-normalise mixed offsets, dedupe retries, keep corrected entries, ignore decoys), then write ${c.answer?.submitJson || 'submit.json'} in one edit, keeping every template key. 3) For SCOPE: answer run \`${c.finishAnswer || c.validateAnswer}\`${c.finishAnswer ? ' (validates the schema and commits the answer folder); on ANSWER INVALID fix and rerun' : ', then commit'}; for SCOPE: answer+code run the relevant tests and commit code, tests and answer together instead${it.type === 'PI' ? ' (PI: whatever the item asks for, such as a build, browser check or evidence, is done; beyond that run only the tests for the changed code, no full suite, full build or reinstall: the main gate re-checks)' : ''}. 4) Reply with the STATUS block including SCOPE. Only if your mtm-query command cannot answer, reply NEED_INFO: <what> (logs: service + narrowing word). No extra evidence or test.log unless requiredEvidence lists it; never install validators.` : `${c.brief?.digestPath ? ` Item text, KB articles, test data and logs: read ${c.brief.digestPath}, not the raw files/mcp/*.json.` : ''}${c.brief?.likelyFilesPath ? ` Code search: start from ${c.brief.likelyFilesPath} (files ranked by this item's words, with symbols, imports and related tests); confirm with \`rg -n -m 20 <term> <those paths>\` before any repo-wide search.` : ''}${queryCmd ? ` If a fact (KB rule, log line, test data) is missing, query it yourself with \`${queryCmd}\`; NEED_INFO only if the read tool cannot answer.` : ''} Check the answer with \`${c.validateAnswer}\` (no installs). Builds, full test suites and browser/e2e runs: \`node "${BUILD_LOCK}" --slots ${this.adapter.parallel.maxHeavySteps || 2} --max-wait-ms ${heavyWaitMs} -- <command>\` (takes a free slot itself; after ${Math.round(heavyWaitMs / 1000)} s it runs anyway; never ask the orchestrator for build_slot). Single test files run directly. Stop dev servers and browsers as soon as the evidence is captured. Redirect long output (builds, full suites, image tools such as sips) to a file under .mtm-notes/ and print only its last 20 lines.`} checkoutRoot = worktreeRoot = ${c.worktreeRoot}; folder ${c.folder}; matchRoot ${c.matchRoot}; briefFile ${c.brief?.briefFile}; filesDir ${c.brief?.filesDir}; answer ${c.answer?.submitJson || ''} (evidence in ${c.answer?.evidenceDir || ''}); ports dev=${c.ports?.dev} production=${c.ports?.production} (override fixed runner ports). ${c.answerOnly && c.brief?.digestPath ? 'Start with digestPath; if the requirements need app changes, then read briefFile and its code-lifecycle material.' : 'Read briefFile first: it has the commands, playbook, checklist and organizer files.'} Work only in this worktree. Stop and return by ${stop} (Game Master clock). Commit the complete item (code, tests, evidence, answer) and reply STATUS READY or PARKED with COMMIT <sha> and SCOPE. Never push, submit, delegate or call Game APIs.`,
       };
       entry.reasoningEffort = this.workerEffort(it, c);
       const model = this.workerModel(it, c);

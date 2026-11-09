@@ -77,7 +77,7 @@ export const TOOLS = [
   },
   {
     name: 'ship',
-    description: 'READY -> SUBMITTED in ONE call: integrate (if needed) -> gate -> BACKLOG_TESTS from the gate run -> git push (fast-forward only) -> submit_work -> worktree remove. Calls are serialized. Stops and returns {stage, error, next} on any refusal: CONFLICT/MAIN_DIRTY at integrate, CODE_FAILURE at gate (roll back + worker fix-up), ENVIRONMENT at gate (retry, or force:true to submit the worker-verified commit), push rejection, submit preflight errors. Use it for every READY item instead of the separate steps.',
+    description: 'READY -> SUBMITTED in ONE call: integrate (if needed) -> gate -> BACKLOG_TESTS from the gate run -> git push (fast-forward only) -> submit_work -> worktree remove. Calls are serialized. Stops and returns {stage, error, next} on any refusal: CONFLICT/MAIN_DIRTY at integrate, CODE_FAILURE at gate (roll back + worker fix-up), ENVIRONMENT at gate (retry, or force:true to submit the worker-verified commit), push rejection, submit preflight errors. Use it for every READY item instead of the separate steps. A ship still running after ~20 s returns stage:"shipping" and continues in the background (its result comes as a SHIP_RESULT event from wait_for_update), so you can ship other READY items meanwhile; a PI or a deadline within 5 min interrupts an ordinary gate.',
     inputSchema: obj({ backlogItemKey: key, force: { type: 'boolean', description: 'Only after an ENVIRONMENT gate verdict: submit the worker-verified commit anyway.' } }, ['backlogItemKey']),
     handler: (s, a) => s.ship(a),
   },

@@ -74,7 +74,7 @@ test('ship force:true after an ENVIRONMENT gate submits with allowUntested inste
   let args;
   s.submit_work = async (a) => { args = a; const pf = await s.preflight(a.backlogItemKey, a.gitRevision, { allowUntested: a.allowUntested, reason: a.reason }); return { ok: !pf.errors.length, errors: pf.errors, warnings: pf.warnings }; };
   await mk('BUG-72', 1.4); mode('hang');
-  const r = await s.ship({ backlogItemKey: 'BUG-72', force: true });
+  const r = await s.ship({ backlogItemKey: 'BUG-72', force: true, waitMs: 600000 }); // a hung gate outlives the inline wait
   assert.equal(args.allowUntested, true);
   assert.match(args.reason, /ENVIRONMENT/);
   assert.ok(!(r.errors || []).some((e) => /no test run reported/.test(e)), JSON.stringify(r.errors));

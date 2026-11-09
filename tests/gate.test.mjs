@@ -310,3 +310,31 @@ test('a worker full-suite log older than its last code edit is not proof', async
   fs.utimesSync(log, new Date(), new Date());
   assert.equal((await s.gate({ backlogItemKey: 'BUG-91' })).scope, 'item');
 });
+
+test('0OD2WHNM: a long ship goes to the background; an urgent PI interrupts it and the interrupted item ships again', async () => {
+  const s = new RuntimeSession(); s.phase = 'IDLE'; s.match.endsAt = Date.now() + 30 * 60000;
+  s.items.set('TASK-08', { id: 'TASK-08', type: 'TASK', local: {} });
+  s.items.set('PI-02', { id: 'PI-02', type: 'PI', deadlineAt: Date.now() + 2 * 60000, local: {} });
+  const order = []; const calls = {};
+  s.withAutoDispatch = async r => r;
+  s.shipOne = async ({ backlogItemKey: id }) => {
+    calls[id] = (calls[id] || 0) + 1; order.push(id);
+    if (id === 'TASK-08' && calls[id] === 1) {
+      const controller = new AbortController(); s.activeGate = { id, controller };
+      await new Promise(done => controller.signal.addEventListener('abort', done));
+      s.activeGate = null;
+      return { ok: false, stage: 'gate', verdict: 'INTERRUPTED', next: 'rerun' };
+    }
+    return { ok: true, stage: 'submitted', next: 'done' };
+  };
+  const first = await s.ship({ backlogItemKey: 'TASK-08', waitMs: 50 });
+  assert.equal(first.background, true, 'the orchestrator is not blocked by a long gate');
+  assert.equal((await s.ship({ backlogItemKey: 'TASK-08', waitMs: 50 })).stage, 'shipping', 'no second queue entry for the same item');
+  const pi = await s.ship({ backlogItemKey: 'PI-02', waitMs: 5000 });
+  assert.equal(pi.ok, true);
+  for (let i = 0; i < 200 && !s.pendingEvents.some(e => e.kind === 'SHIP_RESULT' && e.id === 'TASK-08'); i += 1) await new Promise(done => setTimeout(done, 10));
+  assert.deepEqual(order, ['TASK-08', 'PI-02', 'TASK-08']);
+  const ev = s.pendingEvents.find(e => e.kind === 'SHIP_RESULT' && e.id === 'TASK-08');
+  assert.equal(ev.result.ok, true);
+  assert.ok(!s.pendingEvents.some(e => e.kind === 'SHIP_RESULT' && /INTERRUPTED/.test(e.text)), 'an interruption is re-queued, not reported');
+});

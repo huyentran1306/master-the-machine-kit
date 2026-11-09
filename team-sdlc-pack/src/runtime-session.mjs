@@ -76,6 +76,9 @@ function deepMerge(a, b) {
   return out;
 }
 
+// A deadline this close counts as urgent: its ship interrupts ordinary gates (and is never interrupted by them).
+const URGENT_DEADLINE_MIN = 5;
+
 export class RuntimeSession {
   /** Failing test rounds on one item before the helper tells the agent to change approach. */
   static STUCK_AFTER = 3;
@@ -1267,7 +1270,7 @@ export class RuntimeSession {
       lastErr = r.ok ? null : r.error;
       const changed = r.ok && !!r.events?.some((e) => e.kind !== 'RESULT'); // grading results do not wake the agent
       const newlyPaused = this.match.status === 'PAUSED' && startStatus !== 'PAUSED'; // a pause that persists is waited out, not spun on
-      if (changed || this.hasDispatchAction() || this.wrapUpCandidates(undefined, { wakeOnly: true }).length || this.match.status === 'FINISHED' || newlyPaused || this.phase !== 'GAME' && this.phase !== 'PREPARATION') {
+      if (changed || this.pendingEvents.some(e => e.kind === 'SHIP_RESULT') || this.hasDispatchAction() || this.wrapUpCandidates(undefined, { wakeOnly: true }).length || this.match.status === 'FINISHED' || newlyPaused || this.phase !== 'GAME' && this.phase !== 'PREPARATION') {
         const out = this.clean(await this.withAutoDispatch({ ok: true, changed, view: this.view({ includeEvents: true, pageText: !!r.events?.some((e) => e.kind === 'NEW' || e.kind === 'EDITED') && !this.lastParse?.structured }) }));
         this.markWrapUpNotified(); return out;
       }
@@ -2619,21 +2622,56 @@ export class RuntimeSession {
    * nothing is forced: on any refusal ship stops and returns the step and its next action.
    */
   async ship(args = {}) {
-    const incoming = this.items.get(String(args.backlogItemKey || '').trim());
-    const left = incoming ? effectiveLeft(incoming, this.now(), this.match.endsAt).left : null;
-    const urgentDeadline = incoming?.deadlineAt != null && left != null && left <= 3;
-    const urgentPi = incoming?.type === 'PI' && incoming.local?.ready;
-    if ((urgentDeadline || urgentPi) && this.activeGate && this.activeGate.id !== incoming.id) {
-      const running = this.items.get(this.activeGate.id);
-      // A deadline inside three minutes keeps priority even over PI. PI only interrupts ordinary work.
-      const runningLeft = running ? effectiveLeft(running, this.now(), this.match.endsAt).left : null;
-      const runningUrgent = running?.deadlineAt != null && runningLeft != null && runningLeft <= 3;
-      if (!runningUrgent && running?.type !== 'PI' && running?.deadlineAt == null) this.activeGate.controller.abort();
+    const id = String(args.backlogItemKey || '').trim();
+    const incoming = this.items.get(id);
+    const urgent = (item) => {
+      if (!item) return false;
+      if (item.type === 'PI') return true; // ranked by submit order; ship() is only called once its worker is READY
+      const l = effectiveLeft(item, this.now(), this.match.endsAt).left;
+      return item.deadlineAt != null && l != null && l <= URGENT_DEADLINE_MIN;
+    };
+    // 0OD2WHNM: PI-02 (10-min deadline) was READY at 20:54 while the orchestrator sat inside a blocking
+    // ship(TASK-08) whose full-suite gate ran until 20:55:57; PI-02 shipped at 20:57:31, after its deadline.
+    // An urgent item now interrupts any gate that is not itself urgent (no rollback; it ships again after).
+    if (urgent(incoming) && this.activeGate && this.activeGate.id !== id && !urgent(this.items.get(this.activeGate.id))) {
+      this.activeGate.controller.abort();
+    }
+    this.backgroundShips ||= new Map();
+    if (this.backgroundShips.has(id)) {
+      return this.clean({ ok: true, stage: 'shipping', backlogItemKey: id, background: true,
+        next: `${id} is already shipping in the background; its SHIP_RESULT arrives through wait_for_update. Service other workers meanwhile.` });
     }
     const go = async () => this.clean(await this.withAutoDispatch(await this.shipOne(args)));
     const run = this.shipChain.then(go, go);
     this.shipChain = run.catch(() => {});
-    return run;
+    // Short ships (answer-only, small gates) still return their result in this call. A long one keeps going in the
+    // background so the orchestrator can ship a PI or deadline item meanwhile instead of being blocked for minutes.
+    const inlineMs = Math.max(0, Number(args.waitMs ?? this.adapter.parallel?.shipInlineMs ?? 20000));
+    let settled = null;
+    const tracked = run.then(r => { settled = { r }; return r; }, e => { settled = { e }; throw e; });
+    let timer;
+    await Promise.race([tracked.catch(() => {}), new Promise(done => { timer = setTimeout(done, inlineMs); })]);
+    clearTimeout(timer);
+    if (settled) { if (settled.e) throw settled.e; return settled.r; }
+    this.backgroundShips.set(id, this.now());
+    const report = r => {
+      const brief = { ok: r?.ok, stage: r?.stage, verdict: r?.verdict ?? null, error: r?.error ?? null, receipt: r?.receipt?.status ?? r?.receiptStatus ?? null };
+      this.pendingEvents.push({ kind: 'SHIP_RESULT', id, text: oneLine(`${id}: ${r?.ok ? 'shipped' : `ship stopped at ${r?.stage || 'unknown'}${r?.verdict ? ` (${r.verdict})` : ''}${r?.error ? ` ${r.error}` : ''}`}. ${r?.next || ''}`, 600), result: brief });
+    };
+    tracked.then(r => {
+      this.backgroundShips.delete(id);
+      // Interrupted for an urgent item: queue it again behind that item instead of asking the orchestrator.
+      if (r?.verdict === 'INTERRUPTED' && !isSubmitted(this.items.get(id))) {
+        this.ship({ backlogItemKey: id, waitMs: 0 }).then(again => { if (!again?.background) report(again); }, () => {});
+        return;
+      }
+      report(r);
+    }, e => {
+      this.backgroundShips.delete(id);
+      this.pendingEvents.push({ kind: 'SHIP_RESULT', id, text: oneLine(`${id}: ship failed: ${e?.message || e}. Call ship ${id} again.`, 600), result: { ok: false, error: e?.message || String(e) } });
+    });
+    return this.clean({ ok: true, stage: 'shipping', backlogItemKey: id, background: true,
+      next: `${id} is still in its gate and keeps shipping in the background. Do not wait for it: service workers, and ship any other READY item now (a PI or a deadline within ${URGENT_DEADLINE_MIN} min interrupts this gate). Its SHIP_RESULT arrives through wait_for_update.` });
   }
 
   async shipOne({ backlogItemKey, force = false } = {}) {

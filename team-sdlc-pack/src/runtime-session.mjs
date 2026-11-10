@@ -2589,7 +2589,10 @@ export class RuntimeSession {
     const fullRunByWorker = longSuite ? await this.workerFullSuiteRun(it, baselineText, wt) : null;
     const fullFits = !suiteSec || leftMin * 60 - 60 >= suiteSec * 1.3;
     const itemOk = it.deadlineAt != null || leftMin < 8 || it.type === 'PI' || (longSuite && (fullRunByWorker?.ok || !fullFits));
-    const scope = !full && !openBaselineFix && itemOk && own.length ? 'item' : 'full';
+    // APBLZN38: while TASK-08 still owned the open baseline fix, PI-02 (deadline 09:10) got a full-suite gate with one
+    // minute left and timed out. Only the item carrying the baseline fix needs the full suite for it.
+    const baselineOwner = openBaselineFix && (!this.state.baselineFixAssigned || this.state.baselineFixAssigned === id);
+    const scope = !full && !baselineOwner && itemOk && own.length ? 'item' : 'full';
     const { test, types } = gateCommands(appDir, { files: scope === 'item' ? own : [], recon: this.commands || {} });
     baselineText = baselineText.slice(0, 20000);
     const projectSpecs = test?.cmd ? projectTestSpecs(appDir, { files: scope === 'item' ? own : [], codeFiles: changeScope.codeFiles, appRel, baselineText }) : null;

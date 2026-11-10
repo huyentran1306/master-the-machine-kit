@@ -347,3 +347,11 @@ test('time alerts never stop new work: last minutes still dispatch, over budget 
   assert.ok(slow.some(a => /^note: OVER BUDGET TASK-8: .*Keep it running/.test(a)), JSON.stringify(slow));
   assert.ok(!slow.some(a => /take NEXT/.test(a)));
 });
+
+test('APBLZN38: workers whose commit is already integrated in main do not hold code-worker slots', () => {
+  const live = Array.from({ length: 6 }, (_, i) => ({ id: `BUG-${i}`, type: 'BUG', local: { worktree: { integratedSha: i < 3 ? 'abc' : undefined }, answerOnly: false } }));
+  const next = { id: 'BUG-12', type: 'BUG', local: { answerOnly: false } };
+  const r = dispatchPolicy(next, [...live, next], { maxCodeWorkers: 6, maxWorkerThreads: 10 }, 8 * 1024 ** 3);
+  assert.equal(r.allowed, true, JSON.stringify(r));
+  assert.equal(r.codeWorkers, 3);
+});

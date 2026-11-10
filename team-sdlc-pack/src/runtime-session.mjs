@@ -1787,7 +1787,11 @@ export class RuntimeSession {
           }
           const unscorable = unscorableAnswer(answer);
           if (unscorable) {
+            // APBLZN38 PI-02: a fixed bug plus a partial answer was refused 2.5 min before its deadline and then lost entirely.
+            // Inside the last 3 minutes of an item a partial submission scores; refusing it scores nothing.
+            const leftNow = it ? effectiveLeft(it, this.now(), this.match.endsAt).left : null;
             if (opts.allowBlocked === true && typeof opts.reason === 'string' && opts.reason.trim()) warnings.push(`allowBlocked: ${opts.reason.trim()} (${unscorable})`);
+            else if (leftNow != null && leftNow <= 3) warnings.push(`DEADLINE_PARTIAL: ${unscorable}; submitted anyway with ${Math.max(0, leftNow).toFixed(1)} min left`);
             else errors.push(`UNSCORABLE_ANSWER: ${unscorable}; read brief.json and all files/, request NEED_INFO, then commit real results. Only in the last minutes use allowBlocked:true with a nonempty reason.`);
           }
         }
@@ -2592,8 +2596,11 @@ export class RuntimeSession {
     // APBLZN38: while TASK-08 still owned the open baseline fix, PI-02 (deadline 09:10) got a full-suite gate with one
     // minute left and timed out. Only the item carrying the baseline fix needs the full suite for it.
     const baselineOwner = openBaselineFix && (!this.state.baselineFixAssigned || this.state.baselineFixAssigned === id);
-    const scope = !full && !baselineOwner && itemOk && own.length ? 'item' : 'full';
-    const { test, types } = gateCommands(appDir, { files: scope === 'item' ? own : [], recon: this.commands || {} });
+    // APBLZN38 TASK-07/CR-08: deadline items with no test files of their own fell back to the full suite (~2 min) and timed
+    // out at their deadline. With item scope allowed, such a diff gets typecheck only (the worker ran its checks).
+    const scope = !full && !baselineOwner && itemOk ? (own.length ? 'item' : 'types') : 'full';
+    const cmds = gateCommands(appDir, { files: scope === 'item' ? own : [], recon: this.commands || {} });
+    const { types } = cmds; const test = scope === 'types' ? null : cmds.test;
     baselineText = baselineText.slice(0, 20000);
     const projectSpecs = test?.cmd ? projectTestSpecs(appDir, { files: scope === 'item' ? own : [], codeFiles: changeScope.codeFiles, appRel, baselineText }) : null;
     const fullCap = scope === 'full' && suiteSec ? Math.max(90, Math.round(suiteSec * 1.5)) : 90;
@@ -2666,7 +2673,7 @@ export class RuntimeSession {
     return this.clean({ ok: verdict === 'GREEN', verdict, scope, codeChanged: true, codeFiles: changeScope.codeFiles, preExisting: preExisting || undefined,
       baselineDefectOpen: baselineDefectOpen.length ? baselineDefectOpen : undefined,
       testDatabase: Object.keys(gateDb).length ? 'fresh isolated database' : 'no TEST_DATABASE_URL discovered',
-      files: scope === 'item' ? own : 'full suite', budgetSec, seconds: Math.round((Date.now() - t0) / 100) / 10, tests: part(tr, projectSpecs?.length ? projectSpecs.map(x => x.spec.label).join(' + ') : test?.label), types: part(ty, types?.label),
+      files: scope === 'item' ? own : scope === 'types' ? 'typecheck only' : 'full suite', budgetSec, seconds: Math.round((Date.now() - t0) / 100) / 10, tests: part(tr, projectSpecs?.length ? projectSpecs.map(x => x.spec.label).join(' + ') : test?.label), types: part(ty, types?.label),
       next: baselineDefectOpen.length ? `BASELINE_DEFECT_OPEN: ${baselineDefectOpen.map(d => d.test).join('; ')}. Fix it in this item's revision (code or a new migration) before submission: the grader reruns the whole suite; never weaken the original test. ${next}` : next });
   }
 

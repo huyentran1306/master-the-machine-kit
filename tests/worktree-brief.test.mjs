@@ -791,3 +791,13 @@ test('workspace monorepo: worktree node_modules is mirrored so workspace package
   assert.equal(fs.readFileSync(path.join(src, 'node_modules', 'dep', 'index.js'), 'utf8'), 'dep', 'main checkout untouched');
   assert.equal(fs.readFileSync(path.join(src, 'packages', 'core', 'index.js'), 'utf8'), 'main');
 });
+
+test('deadline items falling due together stop their workers earlier so the serialized ships fit', t => {
+  const s = new RuntimeSession({ teamWorkspace: '/tmp/tw' }); s.checkoutRoot = '/tmp/tw/m'; s.matchRoot = '/tmp/tw/m/X'; const now = 1_000_000; s.now = () => now; s.match.endsAt = now + 40 * 60000;
+  const mk = (id, type, dl) => ({ id, type, deadlineAt: now + dl * 60000, local: {} });
+  s.items.set('CR-07', mk('CR-07', 'CR', 15));
+  const alone = s.briefContext(s.items.get('CR-07')).workerStopAt;
+  s.items.set('PI-02', mk('PI-02', 'PI', 14)); s.items.set('CR-08', mk('CR-08', 'CR', 16));
+  const crowded = s.briefContext(s.items.get('CR-07')).workerStopAt;
+  assert.equal(alone - crowded, 60000, 'two peers due within 3 min: one minute earlier');
+});

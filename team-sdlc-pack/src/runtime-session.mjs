@@ -1445,7 +1445,12 @@ export class RuntimeSession {
     const { left } = effectiveLeft(it, this.now(), this.match.endsAt);
     // Keep time to integrate and submit, but a fixed 5 minutes would leave an 8-minute item 3.
     const baseMargin = left == null ? 5 : Math.min(5, Math.max(1.5, left * 0.25));
-    const margin = left == null ? 5 : it.type === 'PI' ? Math.min(left, Math.max(4, baseMargin)) : baseMargin;
+    // Ships are serialized (~40-60 s each). When other deadline items fall due within 3 minutes of this one, they queue
+    // for the same gate: stop each worker 30 s earlier per such item (at most 2 extra minutes).
+    const peers = it.deadlineAt == null ? 0 : [...this.items.values()].filter(o => o.id !== it.id && o.deadlineAt != null && !isSubmitted(o)
+      && Math.abs(o.deadlineAt - it.deadlineAt) <= 3 * 60000).length;
+    const queueMargin = Math.min(2, peers * 0.5);
+    const margin = left == null ? 5 : (it.type === 'PI' ? Math.min(left, Math.max(4, baseMargin)) : baseMargin) + queueMargin;
     const computedStopAt = left == null ? null : this.now() + (left - margin) * 60000;
     const stopAt = it.local?.workerStopAt ?? computedStopAt;
     return {
@@ -2685,6 +2690,40 @@ export class RuntimeSession {
    * the separate steps still applies (integrate guards, gate verdicts, push refusal, submit preflight);
    * nothing is forced: on any refusal ship stops and returns the step and its next action.
    */
+  /**
+   * Ships run one at a time (shared main checkout), but the next one is the most urgent waiting, not the oldest:
+   * PI and deadline items first, nearest deadline first. A PI and two deadline CRs READY together used to go in the
+   * order the orchestrator happened to call ship.
+   */
+  shipPriority(id) {
+    const it = this.items.get(id);
+    if (!it) return [3, Infinity];
+    const left = effectiveLeft(it, this.now(), this.match.endsAt).left;
+    if (it.deadlineAt != null) return [0, left ?? Infinity];
+    if (it.type === 'PI') return [1, left ?? Infinity];
+    return [2, Infinity];
+  }
+
+  enqueueShip(id, work) {
+    this.shipQueue ||= [];
+    const job = { id, work, at: Date.now() };
+    const p = new Promise((resolve, reject) => { job.resolve = resolve; job.reject = reject; });
+    this.shipQueue.push(job);
+    const pump = async () => {
+      if (this.shipRunning) return;
+      this.shipRunning = true;
+      try {
+        while (this.shipQueue.length) {
+          this.shipQueue.sort((a, b) => { const x = this.shipPriority(a.id), y = this.shipPriority(b.id); return x[0] - y[0] || x[1] - y[1] || a.at - b.at; });
+          const next = this.shipQueue.shift();
+          try { next.resolve(await next.work()); } catch (e) { next.reject(e); }
+        }
+      } finally { this.shipRunning = false; }
+    };
+    this.shipChain = Promise.resolve().then(pump);
+    return p;
+  }
+
   async ship(args = {}) {
     const id = String(args.backlogItemKey || '').trim();
     const incoming = this.items.get(id);
@@ -2706,8 +2745,7 @@ export class RuntimeSession {
         next: `${id} is already shipping in the background; its SHIP_RESULT arrives through wait_for_update. Service other workers meanwhile.` });
     }
     const go = async () => this.clean(await this.withAutoDispatch(await this.shipOne(args)));
-    const run = this.shipChain.then(go, go);
-    this.shipChain = run.catch(() => {});
+    const run = this.enqueueShip(id, go);
     // Short ships (answer-only, small gates) still return their result in this call. A long one keeps going in the
     // background so the orchestrator can ship a PI or deadline item meanwhile instead of being blocked for minutes.
     const inlineMs = Math.max(0, Number(args.waitMs ?? this.adapter.parallel?.shipInlineMs ?? 20000));
@@ -2758,7 +2796,12 @@ export class RuntimeSession {
       if (!r.ok) return this.clean({ ok: false, stage: 'integrate', error: r.error, message: r.message, conflicts: r.conflicts, steps, next: r.next || 'Resolve as the integrate result says, then ship again.' });
     }
     const wt = it.local.worktree;
-    const g = await this.gate({ backlogItemKey: id });
+    // Under ~90 s to an item deadline a gate (~20-40 s) plus push and submit no longer fits: submit the worker-verified
+    // commit untested instead of missing the deadline inside the gate (APBLZN38 PI-02/TASK-07/CR-08).
+    const leftAtGate = effectiveLeft(it, this.now(), this.match.endsAt).left;
+    const g = it.deadlineAt != null && leftAtGate != null && leftAtGate <= 1.5
+      ? { verdict: 'ENVIRONMENT', codeChanged: true, skipped: true, scope: 'skipped', next: `Gate skipped: ${Math.max(0, leftAtGate * 60).toFixed(0)} s to the deadline.` }
+      : await this.gate({ backlogItemKey: id });
     steps.push({ step: 'gate', verdict: g.verdict, seconds: g.seconds ?? null });
     const leftNow = effectiveLeft(it, this.now(), this.match.endsAt).left;
     if (g.verdict === 'INTERRUPTED') return this.clean({ ok: false, stage: 'gate', verdict: g.verdict, steps, interrupted: true, rolledBack: false, next: g.next });

@@ -338,3 +338,34 @@ test('0OD2WHNM: a long ship goes to the background; an urgent PI interrupts it a
   assert.equal(ev.result.ok, true);
   assert.ok(!s.pendingEvents.some(e => e.kind === 'SHIP_RESULT' && /INTERRUPTED/.test(e.text)), 'an interruption is re-queued, not reported');
 });
+
+test('PI and deadline items READY together ship nearest deadline first, then PI, then ordinary work', async () => {
+  const s = new RuntimeSession(); s.phase = 'IDLE'; const now = Date.now(); s.match.endsAt = now + 30 * 60000;
+  s.items.set('TASK-01', { id: 'TASK-01', type: 'TASK', local: {} });
+  s.items.set('CR-07', { id: 'CR-07', type: 'CR', deadlineAt: now + 6 * 60000, local: {} });
+  s.items.set('PI-02', { id: 'PI-02', type: 'PI', deadlineAt: now + 3 * 60000, local: {} });
+  s.items.set('PI-09', { id: 'PI-09', type: 'PI', local: {} });
+  s.items.set('BUG-11', { id: 'BUG-11', type: 'BUG', local: {} });
+  const order = []; let release; const first = new Promise(done => { release = done; });
+  s.withAutoDispatch = async r => r;
+  s.shipOne = async ({ backlogItemKey: id }) => { order.push(id); if (id === 'TASK-01') await first; return { ok: true, stage: 'submitted' }; };
+  const running = s.ship({ backlogItemKey: 'TASK-01', waitMs: 600000 });
+  await new Promise(done => setTimeout(done, 10));
+  const queued = ['BUG-11', 'PI-09', 'CR-07', 'PI-02'].map(id => s.ship({ backlogItemKey: id, waitMs: 600000 }));
+  await new Promise(done => setTimeout(done, 10));
+  release();
+  await Promise.all([running, ...queued]);
+  assert.deepEqual(order, ['TASK-01', 'PI-02', 'CR-07', 'PI-09', 'BUG-11']);
+});
+
+test('a deadline under 90 s skips the gate and submits the worker-verified commit', async () => {
+  const s = new RuntimeSession(); const now = Date.now(); s.now = () => now; s.match.endsAt = now + 20 * 60000;
+  s.items.set('CR-08', { id: 'CR-08', type: 'CR', deadlineAt: now + 60000, local: { worktree: { worktreeRoot: '/x' } } });
+  s.worktree = async () => ({ ok: true });
+  let gated = false; s.gate = async () => { gated = true; return { verdict: 'GREEN' }; };
+  s.report_progress = async () => ({ ok: true });
+  s.repository = { branch: 'main', folder: 'X' }; s.checkoutRoot = '/nonexistent-checkout';
+  const r = await s.shipOne({ backlogItemKey: 'CR-08' }).catch(e => ({ error: e.message }));
+  assert.equal(gated, false, 'no gate inside the last 90 s');
+  assert.equal(r.steps?.find(x => x.step === 'gate')?.verdict, 'ENVIRONMENT', JSON.stringify(r).slice(0, 300));
+});

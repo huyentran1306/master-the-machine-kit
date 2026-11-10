@@ -175,16 +175,21 @@ async function sweepLogs(tool, fetchOnly, cutoff, { callCap: baseCap = 150, focu
   // entry. No scenario nouns or guessed IDs. A server that ignores timestamp words is detected and left
   // explicitly truncated instead of looping or pretending the newest page is complete.
   const scopeCount = (service, level) => scopedSeen.get(`${service || '*'}|${level || '*'}`)?.size || 0;
-  const queryPrefix = async (service, level, prefix) => {
+  const queryPrefix = async (service, level, prefix, parentTotal) => {
     const r = await run(service, [level, prefix].filter(Boolean).join(' '), level);
     const entries = r.parsed?.entries || [];
-    const supported = !entries.length || entries.every(e => String(isoValue(e) || '').startsWith(prefix)
-      && (!level || String(e?.level || '').toUpperCase() === level));
+    // TMNXWBA9 PI-03: entries carry other dates in their context (scheduled dates), so a day word also matches some
+    // entries from other days. Requiring every entry to start with the prefix marked all ten services unsupported.
+    // Supported = the prefix query returns entries of that window; extra matches are kept (deduplicated) anyway.
+    // Also supported when the server visibly filtered (fewer matches than the parent window), even if the newest page
+    // happens to be other-day entries that only mention the date.
+    const filtered = Number.isFinite(parentTotal) && Number.isFinite(r.parsed?.total) && r.parsed.total < parentTotal;
+    const supported = !entries.length || filtered || entries.some(e => String(isoValue(e) || '').startsWith(prefix));
     return { ...r, supported };
   };
-  const collectPrefix = async (service, level, prefix, depth) => {
+  const collectPrefix = async (service, level, prefix, depth, parentTotal) => {
     if (Date.now() >= cutoff || calls >= callCap) return { complete: false, reason: calls >= callCap ? 'CALL_CAP' : 'TIMEOUT', nonempty: false };
-    const r = await queryPrefix(service, level, prefix);
+    const r = await queryPrefix(service, level, prefix, parentTotal);
     if (!r.parsed) return { complete: false, reason: r.reason || 'FAILED', nonempty: false };
     if (!r.supported) return { complete: false, reason: 'NARROWING_UNSUPPORTED', nonempty: !!r.parsed.entries?.length };
     if (!r.parsed.entries?.length) return { complete: true, nonempty: false };
@@ -200,10 +205,10 @@ async function sweepLogs(tool, fetchOnly, cutoff, { callCap: baseCap = 150, focu
       return depth === 0 ? iso.slice(0, 13) : iso.slice(0, 15);
     }).filter(child => allChildren.includes(child)))];
     const first = evidenced[0] || allChildren[0];
-    const probe = await collectPrefix(service, level, first, depth + 1);
+    const probe = await collectPrefix(service, level, first, depth + 1, r.parsed.total);
     if (!probe.complete) return probe;
     const children = allChildren.filter(child => child !== first);
-    const parts = [probe, ...await mapBounded(children, 4, child => collectPrefix(service, level, child, depth + 1))];
+    const parts = [probe, ...await mapBounded(children, 4, child => collectPrefix(service, level, child, depth + 1, r.parsed.total))];
     const bad = parts.find(p => !p.complete);
     return bad || { complete: true, nonempty: parts.some(p => p.nonempty) };
   };
@@ -215,7 +220,7 @@ async function sweepLogs(tool, fetchOnly, cutoff, { callCap: baseCap = 150, focu
     // the previous day, which a substring-matching server correctly treats as a different query.
     const target = parent.total; let cursor = Date.parse(`${dated[0].raw.slice(0, 10)}T12:00:00Z`); let empties = 0; let attempted = 0;
     while (scopeCount(service, level) < target && empties < 3 && Date.now() < cutoff && calls < callCap) {
-      const prefix = dayPrefix(cursor); const part = await collectPrefix(service, level, prefix, 0); attempted += 1;
+      const prefix = dayPrefix(cursor); const part = await collectPrefix(service, level, prefix, 0, target); attempted += 1;
       if (!part.complete) return { complete: false, reason: part.reason || 'FAILED', attempted };
       empties = part.nonempty ? 0 : empties + 1;
       cursor -= 24 * 60 * 60 * 1000;
@@ -320,6 +325,15 @@ export async function collectMcpMaterial(item, call, budgetMs = 90000) {
       await invoke({ action: 'call', name: tool.name, args }, kind, cutoff);
     } catch (e) { entries.push({ purpose: kind, tool: tool.name, ok: false, error: e.message }); }
   };
+  // TMNXWBA9 PI-02: the log sweep ran after discovery, data, KB search, retries and KB follow-ups, all on the same
+  // deadline; on a slow server nothing was left and every service came back TIMEOUT (0 entries). For incidents the
+  // sweep now starts first, in parallel, with its own cutoff.
+  const incident = item.type === 'PI' || /\b(incident|production logs?|observability)\b/i.test(String(item.description || ''));
+  const sweepCutoff = Date.now() + (item.type === 'PI' ? 60000 : 25000);
+  const sweep = incident ? Promise.all(selected.filter(x => x.kind === 'logs').map(async ({ tool }) => {
+    try { return await sweepLogs(tool, fetchOnly, sweepCutoff, { focusText: `${item.title || ''}\n${item.description || ''}` }); }
+    catch (e) { return { purpose: 'logs', tool: `${tool.name}-merged`, ok: false, error: e.message }; }
+  })) : Promise.resolve([]);
   const needed = ['data', 'search', 'logs'].map(kind => selected.find(x => x.kind === kind)).filter(Boolean);
   // First data/docs/log reads overlap; each keeps the whole remaining read budget.
   await mapBounded(needed, 3, candidate => attempt(candidate));
@@ -342,15 +356,10 @@ export async function collectMcpMaterial(item, call, budgetMs = 90000) {
       await mapBounded(ids, 3, id => attempt(kb, deadline, false, { query: id }));
     }
   }
-  const incident = item.type === 'PI' || /\b(incident|production logs?|observability)\b/i.test(String(item.description || ''));
   if (incident) {
-    const sweepCutoff = Math.min(deadline, Date.now() + (item.type === 'PI' ? 60000 : 25000));
-    const kb = selected.find(x => x.kind === 'search');
-    const rules = kb && /\bincident report\b/i.test(String(item.description || '')) ? attempt(kb, sweepCutoff, false, { query: 'incident report rules' }) : null;
-    for (const { tool } of selected.filter(x => x.kind === 'logs')) {
-      try { const merged = await sweepLogs(tool, fetchOnly, sweepCutoff, { focusText: `${item.title || ''}\n${item.description || ''}` }); if (merged) entries.push(merged); }
-      catch (e) { entries.push({ purpose: 'logs', tool: `${tool.name}-merged`, ok: false, error: e.message }); }
-    }
+    const kb2 = selected.find(x => x.kind === 'search');
+    const rules = kb2 && /\bincident report\b/i.test(String(item.description || '')) ? attempt(kb2, Math.max(deadline, sweepCutoff), false, { query: 'incident report rules' }) : null;
+    for (const merged of await sweep) if (merged) entries.push(merged);
     await rules;
   }
   const optionalDeadline = Math.min(deadline, Date.now() + 2000);

@@ -164,3 +164,21 @@ test('A14DI1HU shape: ten capped services, the call cap goes to the service the 
   assert.ok(merged.result.calls <= 300, `calls: ${merged.result.calls}`);
   assert.ok(merged.result.truncated.some(t => t.service === 'api-gateway'), 'unnamed services stay honestly truncated when the base budget is spent');
 });
+
+test('TMNXWBA9: entries that mention other dates in their context still narrow by timestamp', async () => {
+  const all = Array.from({ length: 300 }, (_, i) => ({
+    ts: new Date(Date.UTC(2025, 10, 3, 0, i * 15)).toISOString(), service: 'schedules', level: 'INFO', message: 'schedule.posted',
+    context: { scheduleId: `S-${i % 40}`, nextDate: new Date(Date.UTC(2025, 10, 3 + (i % 5))).toISOString().slice(0, 10) },
+  }));
+  const advertised = [{ name: 'search_logs', description: 'Search production logs (services include schedules, deploy). Returns the newest matching entries first, at most 20 per call, with the total number of matches.',
+    inputSchema: { properties: { query: { type: 'string' }, service: { type: 'string' } }, required: [] } }];
+  const entries = await collectMcpMaterial({ id: 'PI-03', type: 'PI', title: 'Scheduled transactions posted with wrong amounts', description: 'The schedules service logs every posting.' }, async req => {
+    if (req.action === 'tools') return { ok: true, tools: advertised };
+    const terms = String(req.args?.query || '').split(/\s+/).filter(Boolean);
+    const hit = all.filter(e => (!req.args.service || e.service === req.args.service) && terms.every(term => JSON.stringify(e).includes(term)));
+    const newest = hit.slice().reverse().slice(0, 20);
+    return text({ total: hit.length, returned: newest.length, entries: newest });
+  }, 65000);
+  const merged = entries.find(e => e.tool === 'search_logs-merged');
+  assert.equal(merged.result.entries.filter(e => e.service === 'schedules').length, 300, JSON.stringify(merged.result.truncated));
+});

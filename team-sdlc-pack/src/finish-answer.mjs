@@ -8,6 +8,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { checkSubmit } from './validate-answer.mjs';
+import { sendQuery, readyText } from './ready-ping.mjs';
 
 const git = (cwd, args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
@@ -42,13 +43,20 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const take = (flag) => { const i = args.indexOf(flag); if (i < 0) return null; const v = args[i + 1]; args.splice(i, 2); return v ?? ''; };
   const required = String(take('--required') || '').split(',').filter(Boolean);
   const message = take('--message');
+  const readyToken = take('--ready-token');
   const files = args.filter((a) => a !== '--schema');
   if (files.length === 2 && /schema\.json$/i.test(files[0])) files.reverse();
   const [answer, schema] = files;
   if (!answer || !fs.existsSync(answer)) { console.error('usage: finish-answer.mjs <submit.json> [schema.json] [--required a,b] [--message msg]'); process.exit(2); }
-  try {
-    const r = finishAnswer(answer, schema, { required, message });
-    console.log(r.block);
-    process.exit(r.ok ? 0 : 1);
-  } catch (e) { console.log(`FINISH FAILED: ${e.message.split('\n')[0]}\nCommit answers/<ID>/ yourself and reply READY with the SHA.`); process.exit(3); }
+  let r;
+  try { r = finishAnswer(answer, schema, { required, message }); }
+  catch (e) { console.log(`FINISH FAILED: ${e.message.split('\n')[0]}\nCommit answers/<ID>/ yourself and reply READY with the SHA.`); process.exit(3); }
+  if (!r.ok || !readyToken) { console.log(r.block); process.exit(r.ok ? 0 : 1); }
+  // Ready handshake: the kit checks the commit and starts shipping it without waiting for an orchestrator turn.
+  let out;
+  try { const auth = JSON.parse(fs.readFileSync(readyToken, 'utf8')); out = await sendQuery(auth, { item: auth.item, kind: 'ready' }, { timeoutMs: 60000 }); }
+  catch (e) { out = { ok: false, error: 'READY_TOKEN', message: e.message }; }
+  if (out.error === 'NOT_READY') { console.log(`${readyText(out)}\nThen run this command again.`); process.exit(1); }
+  console.log(out.ok && out.shipping ? `${r.block}\nKIT: SHIPPING\n\n${readyText(out)}` : `${r.block}\n\n${readyText(out)}`);
+  process.exit(0);
 }

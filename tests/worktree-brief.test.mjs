@@ -722,7 +722,11 @@ test('dispatch_ready dispatches every open item in one call and respawns workers
   assert.match(task(first.spawn.find(sp => sp.id === 'BUG-31')), /query it yourself with `node ".*mtm-query\.mjs" --token-file ".*query-token\.json" --item BUG-31/, 'code workers can read KB/logs themselves');
   assert.equal(first.spawn.find(sp => sp.id === 'PI-33').reasoningEffort, 'medium');
   assert.match(task(first.spawn.find(sp => sp.id === 'BUG-31')), /Redirect long output .* print only its last 20 lines/);
-  assert.match(task(first.spawn.find(sp => sp.id === 'PI-33')), /PI: whatever the item asks for, such as a build, browser check or evidence, is done; beyond that run only the tests for the changed code, no full suite/);
+  assert.match(task(first.spawn.find(sp => sp.id === 'PI-33')), /PI: whatever the item asks for, such as a build, browser check or evidence, is done; beyond that run only the tests for the changed code and the typecheck, since the gate rolls back a type error even in a test file; no full suite/);
+  // TMNXWBA9 PI-03 was refused for a missing test log; the ready handshake reports it while the worker still runs.
+  assert.match(task(first.spawn.find(sp => sp.id === 'PI-33')), /evidence\/test\.log and cite it in submit\.json/);
+  assert.match(task(first.spawn.find(sp => sp.id === 'PI-33')), /READY HANDSHAKE[^`]*`node "[^"]+mtm-query\.mjs" --token-file "[^"]+query-token\.json" --item PI-33 --ready`/);
+  assert.match(task(first.spawn.find(sp => sp.id === 'PI-33')), /finish-answer\.mjs"[^`]*--ready-token "[^"]+query-token\.json"`/);
   assert.match(task(first.spawn.find(sp => sp.id === 'BUG-31')), /Item text, KB articles, test data and logs: read .*digest\.md, not the raw files\/mcp\/\*\.json\./, 'code workers read the digest');
   assert.match(first.next, /reasoning_effort/);
   assert.match(first.next, /model = entry\.model/);

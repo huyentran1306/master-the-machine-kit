@@ -74,13 +74,35 @@ export function dispatchPolicy(item, items, parallel = {}, freeBytes = available
   const liveWorkers = items.filter(i => i.id !== item.id && i.local?.worktree && !i.local?.parked && !i.local?.ready && !i.local?.submittedAt && !i.local?.receiptId && !i.local?.worktree?.integratedSha).length;
   const maxWorkerThreads = Math.max(2, Math.floor(Number(parallel.maxWorkerThreads) || 10));
   const urgent = item.type === 'PI' || item.deadlineAt != null || !!item.local?.parked || !!item.local?.orphaned;
-  const threadCap = urgent ? maxWorkerThreads : maxWorkerThreads - 2;
+  // Flood guard: ordinary items never take the last urgentThreadReserve threads, and fewer still while the Codex usage
+  // window is projected to run out (every live worker burns it), so a PI or deadline item revealed after a flood of
+  // ordinary items still starts at once and still has usage left to finish.
+  const reserve = Math.min(maxWorkerThreads - 1, Math.max(0, Math.floor(Number(parallel.urgentThreadReserve ?? 2))));
+  const tier = Number(parallel.usageTier) || 0;
+  const usageCap = tier >= 2 ? Number(parallel.normalThreadsCritical ?? 3) : tier === 1 ? Number(parallel.normalThreadsTight ?? 5) : Infinity;
+  const normalCap = Math.max(1, Math.min(maxWorkerThreads - reserve, usageCap));
+  const threadCap = urgent ? maxWorkerThreads : normalCap;
+  // A deadline code item may run past the ordinary code-worker cap by urgentCodeExtra instead of waiting for, or
+  // preempting, an ordinary worker's slot.
+  const codeCap = item.deadlineAt != null ? maxCodeWorkers + Math.max(0, Math.floor(Number(parallel.urgentCodeExtra ?? 0))) : maxCodeWorkers;
   // Machine guard for every lane: below 1.5 GB available nothing new starts except PI (answer workers are
   // light, but each still holds a Codex thread and may open a browser). Running workers are never stopped.
   const reason = liveWorkers >= threadCap ? 'THREAD_LIMIT'
     : item.type !== 'PI' && freeRamGB < Math.min(minFreeRamGB, Number(parallel.minFreeRamGBAll) || 1.5) ? 'LOW_RAM'
-    : item.type === 'PI' ? null : isAnswer ? answerWorkers >= maxAnswerWorkers ? 'ANSWER_WORKER_LIMIT' : null : codeWorkers >= maxCodeWorkers ? 'CODE_WORKER_LIMIT' : freeRamGB < minFreeRamGB ? 'LOW_RAM' : null;
-  return { allowed: !reason, reason, codeWorkers, maxCodeWorkers, answerWorkers, maxAnswerWorkers, liveWorkers, maxWorkerThreads, freeRamGB, minFreeRamGB };
+    : item.type === 'PI' ? null : isAnswer ? answerWorkers >= maxAnswerWorkers ? 'ANSWER_WORKER_LIMIT' : null : codeWorkers >= codeCap ? 'CODE_WORKER_LIMIT' : freeRamGB < minFreeRamGB ? 'LOW_RAM' : null;
+  return { allowed: !reason, reason, codeWorkers, maxCodeWorkers, codeCap, answerWorkers, maxAnswerWorkers, liveWorkers, maxWorkerThreads, threadCap, freeRamGB, minFreeRamGB };
+}
+
+/**
+ * Porcelain lines that make a worker copy dirty, without the files the kit itself puts there: dependency links, notes
+ * and the checklist written beside submit.json. TMNXWBA9: TASK-07 (45 pts) and CR-08 (110 pts) were committed and done,
+ * but an untracked answers/<ID>/checklist.md (and CR-08's <folder>/.mtm-notes/) refused both as WORKER_DIRTY.
+ */
+export function workerDirtyFiles(lines = []) {
+  return (lines || []).filter((line) => {
+    const p = String(line).slice(3).trim().replace(/^"|"$/g, '').replace(/\\/g, '/');
+    return !/(^|\/)node_modules(\/|$)/.test(p) && !/(^|\/)\.mtm-(notes|briefs)(\/|$)/.test(p) && !/(^|\/)answers\/[^/]+\/checklist\.md$/.test(p);
+  });
 }
 
 export function integrationGate(item, { codeChanged } = {}) {

@@ -76,6 +76,7 @@ async function handle(msg) {
     if (method === 'tools/call') {
       const tool = TOOLS.find((t) => t.name === params?.name);
       if (!tool) return send({ jsonrpc: '2.0', id, result: toolResult({ ok: false, error: 'UNKNOWN_TOOL', tools: TOOLS.map((t) => t.name) }, true) });
+      session.lastToolCallAt = Date.now(); // the autopilot treats a long silence as an orchestrator that stopped (usage limit, crash)
       const value = await tool.handler(session, params?.arguments || {});
       return send({ jsonrpc: '2.0', id, result: toolResult(value, value?.ok === false && !!value?.error && /^(NOT_CONFIGURED|NO_LIFECYCLE_INPUT|UNKNOWN_TOOL)$/.test(value.error)) });
     }

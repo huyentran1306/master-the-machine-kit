@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import { execFile } from 'node:child_process';
 import crypto from 'node:crypto';
 import os from 'node:os';
-import { answerOnly, answerClassification, dispatchPolicy, integrationGate, mapBounded, BuildQueue, availableMemory } from './dispatch.mjs';
+import { answerOnly, answerClassification, dispatchPolicy, integrationGate, mapBounded, BuildQueue, availableMemory, workerDirtyFiles } from './dispatch.mjs';
 import { acquire as acquireHeavySlot, release as releaseHeavySlot, slotDirFor } from './build-lock.mjs';
 import { stopWorktreeProcesses } from './process-cleanup.mjs';
 import { PNPM_SAFE_ENV, itemTestFiles, gateCommands, runBounded, runProjects, projectTestSpecs, assertionFailure, testSummary, failingTests } from './gate.mjs';
@@ -92,6 +92,22 @@ function deepMerge(a, b) {
 
 // A deadline this close counts as urgent: its ship interrupts ordinary gates (and is never interrupted by them).
 const URGENT_DEADLINE_MIN = 5;
+// Autopilot: the kit ships committed work without waiting for an orchestrator turn. TMNXWBA9: the orchestrator ran out of
+// Codex usage at 11:13:27 with TASK-07, CR-08 and CR-05 committed and finished; nothing shipped them (200 points).
+export const AUTOPILOT_DEFAULTS = {
+  enabled: true,
+  shipOnReady: true, // a worker's ready handshake ships its commit at once (PI rank, deadlines, no orchestrator turn)
+  sweepMin: 1.75, // a deadline item with committed work ships this many minutes before its deadline ...
+  crowdStepMin: 0.75, // ... plus this per other deadline item due within 2 minutes of it (ships run one at a time)
+  maxSweepMin: 4,
+  minSweepMin: 0.75, // never later than this, and never before the worker's own stop time (+15 s grace)
+  matchEndMin: 3, // in the last minutes of the match every committed item ships
+  staleOrchestratorMin: 3, // no orchestrator tool call for this long (usage limit, crash): ship clean, idle worker commits
+  idleCommitSec: 60,
+  readyGraceSec: 45, // READY reported to the orchestrator but not shipped within this long
+};
+// Submit-preflight errors a worker can fix in its own worktree before READY (the rest belong to the orchestrator or the gate).
+const WORKER_FIXABLE = /^(?:answer\.|evidence (?:references|reference escapes|file )|[A-Z]+ needs MVS evidence|answer is \d+ chars|BASELINE_(?:MIGRATION|TEST)_CHANGED|REQUIRED_EVIDENCE_|UNSCORABLE_ANSWER|challenge\/[^:]*-submit\.schema\.json: (?!cannot validate)|no evidence file holds|the commit changes files that must stay untouched)|answers\/[^ ]*\/submit\.json is not (?:in commit|valid JSON)| still says NOT_RUN|\/evidence\/ exists in the commit/;
 
 export class RuntimeSession {
   /** Failing test rounds on one item before the helper tells the agent to change approach. */
@@ -217,18 +233,20 @@ export class RuntimeSession {
   }
 
   async processQueryQueue() {
+    // Ready handshakes have their own drain: a worker waiting for its READY check must never sit behind a slow MCP read.
+    if (!this.readyDrain) this.readyDrain = this.drainQueryQueue({ only: 'ready' }).catch(() => {}).finally(() => { this.readyDrain = null; });
     // A drain stuck on one hung MCP call must not stop every later worker query: after 45 s start a new one.
     if (this.queryDrain && Date.now() - (this.queryDrainAt || 0) < 45000) return this.queryDrain;
-    const drain = this.drainQueryQueue();
+    const drain = this.drainQueryQueue({ only: 'read' });
     this.queryDrain = drain; this.queryDrainAt = Date.now();
     try { return await drain; }
     finally { if (this.queryDrain === drain) this.queryDrain = null; }
   }
 
-  async drainQueryQueue() {
+  async drainQueryQueue({ only = null } = {}) {
     const dir = this.queryQueueDir(); if (!dir) return;
     fs.mkdirSync(dir, { recursive: true });
-    let names = []; try { names = fs.readdirSync(dir); } catch { return; }
+    let names = []; try { names = only === 'ready' ? [] : fs.readdirSync(dir); } catch { return; }
     // A crashed runtime may leave a claimed request behind. Workers give up after 30 s, so a claim
     // older than 60 s is safe to retry. Old responses contain raw company material; remove them.
     for (const name of names) {
@@ -241,9 +259,10 @@ export class RuntimeSession {
         try { fs.unlinkSync(file); } catch { /* already consumed */ }
       }
     }
-    let files = []; try { files = fs.readdirSync(dir).filter(f => f.endsWith('.request.json')).slice(0, 8); } catch { return; }
+    let files = []; try { files = fs.readdirSync(dir).filter(f => f.endsWith('.request.json')); } catch { return; }
     const claimed = [];
     for (const name of files) {
+      if (claimed.length >= 8) break;
       const requestFile = path.join(dir, name);
       const claimedFile = requestFile.replace(/\.request\.json$/, '.processing.json');
       const responseFile = requestFile.replace(/\.request\.json$/, '.response.json');
@@ -254,13 +273,21 @@ export class RuntimeSession {
       if (peek) {
         const owner = this.items.get(String(peek.item || ''));
         if (!owner?.local?.queryToken) continue; // not ours: leave it for the session that owns the item
-      }
+        if (only && (peek.kind === 'ready' ? 'ready' : 'read') !== only) continue; // the other drain takes it
+      } else if (only === 'ready') continue;
       try { fs.renameSync(requestFile, claimedFile); } catch { continue; } // atomic claim across pollers/processes
       let q; try { q = JSON.parse(fs.readFileSync(claimedFile, 'utf8')); }
       catch { writeJson(responseFile, { ok: false, error: 'QUERY_INVALID', message: 'Request JSON is invalid.' }); try { fs.unlinkSync(claimedFile); } catch { /* gone */ } continue; }
       claimed.push({ q, claimedFile, responseFile });
     }
-    await mapBounded(claimed, 4, ({ q, claimedFile, responseFile }) => this.limitedItemQuery(String(q.item || ''), async () => {
+    // Ready handshakes are local git checks, not MCP reads: answer them outside the MCP pool.
+    const readyRun = Promise.all(claimed.filter(c => c.q?.kind === 'ready').map(async ({ q, claimedFile, responseFile }) => {
+      let out;
+      try { out = await this.workerReady(q); } catch (e) { out = { ok: false, error: 'READY_CHECK_FAILED', message: e.message, next: 'Reply STATUS READY; the orchestrator ships it.' }; }
+      writeJson(responseFile, out);
+      try { fs.unlinkSync(claimedFile); } catch { /* next poll */ }
+    }));
+    await mapBounded(claimed.filter(c => c.q?.kind !== 'ready'), 4, ({ q, claimedFile, responseFile }) => this.limitedItemQuery(String(q.item || ''), async () => {
       try {
         const it = this.items.get(String(q.item || ''));
         if (!it || !it.local?.queryToken || q.token !== it.local.queryToken) throw Object.assign(new Error('Token does not belong to this item.'), { code: 'ITEM_FORBIDDEN' });
@@ -278,9 +305,17 @@ export class RuntimeSession {
       } catch (e) { writeJson(responseFile, { ok: false, error: e.code || 'QUERY_FAILED', message: e.message }); }
       try { fs.unlinkSync(claimedFile); } catch { /* next poll */ }
     }));
+    await readyRun.catch(() => {});
   }
 
   plannerOpts() { return { ...this.adapter.planner, heavyTask: heavyOptions(this.adapter.heavyTask) }; }
+
+  /** Dispatch limits plus the live usage tier: fewer ordinary workers while the Codex window is projected to run out. */
+  parallelOpts() {
+    let usageTier = 0;
+    try { usageTier = this.phase === 'GAME' ? this.usageBudget().tier || 0 : 0; } catch { usageTier = 0; }
+    return { ...this.adapter.parallel, usageTier };
+  }
 
   refreshHeavyFlags() {
     const items = [...this.items.values()];
@@ -323,13 +358,13 @@ export class RuntimeSession {
       // "Còn worker là chạy": an item that cannot start now anyway (its own lane full, e.g. ANSWER_WORKER_LIMIT)
       // must not hold a heavy item that has a free slot. Shared limits (threads, code slots, RAM) block both.
       if (cfg.startAfter === 'othersDispatched') return !x.local?.worktree && !x.local?.spawnEntry && rankedIds.has(x.id)
-        && dispatchPolicy(x, items.filter(i => !isSubmitted(i)), this.adapter.parallel, this.freeMemory()).allowed;
+        && dispatchPolicy(x, items.filter(i => !isSubmitted(i)), this.parallelOpts(), this.freeMemory()).allowed;
       const activeWorker = x.local?.worktree && !x.local?.parked;
       return activeWorker || rankedIds.has(x.id);
     });
     if (blocks.length) return { allowed: false, reason: 'HEAVY_DEFERRED', detail: `${cfg.startAfter}: ${blocks.map(x => x.id).join(', ')} not done` };
     const deadlinePending = items.some(x => x !== it && !unavailable(x) && x.deadlineAt != null && !isSubmitted(x) && !isClosed(x, now) && !x.local?.ready && !x.local?.worktree && !staleParked(x)
-      && dispatchPolicy(x, items.filter(i => !isSubmitted(i)), this.adapter.parallel, this.freeMemory()).allowed);
+      && dispatchPolicy(x, items.filter(i => !isSubmitted(i)), this.parallelOpts(), this.freeMemory()).allowed);
     if (deadlinePending) return { allowed: false, reason: 'HEAVY_DEFERRED', detail: 'deadline item is pending' };
     return { allowed: true };
   }
@@ -919,6 +954,8 @@ export class RuntimeSession {
       }
       if (action === 'call') {
         if (!name) return { ok: false, error: 'NAME_REQUIRED', next: 'action "tools" lists the names.' };
+        const budget = this.relayBudget(backlogItemKey);
+        if (budget) return budget;
         const r = await this.mcp.call(name, args);
         if (backlogItemKey) this.appendMcpMaterial(backlogItemKey, { purpose: 'follow-up', tool: name, args, ok: !r?.isError, result: this.clean(r) });
         if (raw) return this.clean({ ok: !r?.isError, raw: r });
@@ -1173,9 +1210,11 @@ export class RuntimeSession {
       if (this.state.ramMinGB == null || gb < this.state.ramMinGB) { this.state.ramMinGB = gb; this.state.ramMinAt = new Date(now).toISOString(); this.state.ramMinWorkers = live; }
       this.state.peakWorkers = Math.max(this.state.peakWorkers || 0, live);
     }
-    const eligible = r => r.action === 'submit' || this.heavyDispatchDecision(this.items.get(r.id), items).allowed && dispatchPolicy(this.items.get(r.id), items.filter(i => !isSubmitted(i)), this.adapter.parallel, freeBytes).allowed;
-    const ranked = plan.ranked.filter(eligible);
-    const queued = plan.ranked.filter(r => !eligible(r));
+    const eligible = r => r.action === 'submit' || this.heavyDispatchDecision(this.items.get(r.id), items).allowed && dispatchPolicy(this.items.get(r.id), items.filter(i => !isSubmitted(i)), this.parallelOpts(), freeBytes).allowed;
+    // A READY item the kit is already shipping needs no orchestrator action: it shows as SHIPPING in the table only.
+    const open = plan.ranked.filter(r => !(r.action === 'submit' && this.isShipping(r.id)));
+    const ranked = open.filter(eligible);
+    const queued = open.filter(r => !eligible(r));
     const skipped = plan.skipped;
     const deferredHeavy = plan.ranked.filter(r => r.action !== 'submit' && r.heavy).map(r => {
       const d = this.heavyDispatchDecision(this.items.get(r.id), items);
@@ -1211,8 +1250,8 @@ export class RuntimeSession {
       const { left } = effectiveLeft(it, now, this.match.endsAt);
       return {
         id: it.id, type: it.type, pts: it.maxPoints ?? null, title: it.title ? truncate(it.title, 90) : null, avail: it.availability || null,
-        ours: isSubmitted(it) ? 'SUBMITTED' : it.local?.parked ? 'PARKED' : it.local?.ready ? 'READY' : it.local?.startedAt ? (it.local.owner && it.local.owner !== 'orchestrator' ? `WORKING(${it.local.owner})` : 'WORKING') : isClosed(it, now) ? 'CLOSED' : 'NOT_STARTED',
-        action: it.local?.parked ? 'resume' : it.local?.ready ? 'submit' : null, parked: it.local?.parked || null,
+        ours: isSubmitted(it) ? 'SUBMITTED' : this.isShipping(it.id) ? 'SHIPPING' : it.local?.parked ? 'PARKED' : it.local?.ready ? 'READY' : it.local?.startedAt ? (it.local.owner && it.local.owner !== 'orchestrator' ? `WORKING(${it.local.owner})` : 'WORKING') : isClosed(it, now) ? 'CLOSED' : 'NOT_STARTED',
+        action: it.local?.parked ? 'resume' : it.local?.ready && !this.isShipping(it.id) ? 'submit' : null, parked: it.local?.parked || null,
         left: left == null ? null : Math.round(left * 10) / 10, result: it.result || null,
       };
     });
@@ -1243,7 +1282,7 @@ export class RuntimeSession {
     if (this.lastParse && !this.lastParse.structured) out.parse = `page structure unknown (${this.lastParse.warnings.join('; ')}): read pageText; pass matchUuid to start_work if needed`;
     if (pageText && this.lastPageText) out.pageText = truncate(this.lastPageText, 12000);
     out.maxCodeWorkers = this.adapter.parallel.maxCodeWorkers;
-    if (this.phase === 'GAME' && this.match.status !== 'FINISHED') out.keepAlive = 'Match running: spawn returned entries first; submit imminent-deadline/READY PI work next; relay worker queries last and never relay what mtm-query can do. With workers, service completions first. Before the next wait_agent, call wait_for_update timeoutMs:1000 only when dispatch.lastDrainSecAgo is null or >=20; otherwise wait_agent <=20s. If a known reveal is due within 45s, use wait_for_update instead. Never guess reveal waves or use generic wait. Without workers: wait_for_update with no timeoutMs.';
+    if (this.phase === 'GAME' && this.match.status !== 'FINISHED') out.keepAlive = 'Match running: spawn returned entries first; the kit ships READY commits itself (AUTO_SHIP events: never call ship for those), so ship only READY items without an AUTO_SHIP next; relay worker queries last and never relay what mtm-query can do. With workers, service completions first. Before the next wait_agent, call wait_for_update timeoutMs:1000 only when dispatch.lastDrainSecAgo is null or >=20; otherwise wait_agent <=20s. If a known reveal is due within 45s, use wait_for_update instead. Never guess reveal waves or use generic wait. Without workers: wait_for_update with no timeoutMs.';
     return out;
   }
 
@@ -1320,6 +1359,7 @@ export class RuntimeSession {
       this.saveState();
     }
     await this.prestartNew();
+    await this.autopilotSweep().catch(() => []);
   }
 
   /**
@@ -1340,7 +1380,7 @@ export class RuntimeSession {
       const ids = rank(items, this.now(), this.match.endsAt, this.plannerOpts()).ranked
         .filter(r => r.action !== 'submit').map(r => this.items.get(r.id))
         .filter(it => it && !it.local?.worktree && (!it.local?.startedAt || !this.readMaterial(it.id)) && (it.local?.startRefusals || 0) < 2)
-        .filter(it => this.heavyDispatchDecision(it, items).allowed && dispatchPolicy(it, live, this.adapter.parallel, this.freeMemory()).allowed)
+        .filter(it => this.heavyDispatchDecision(it, items).allowed && dispatchPolicy(it, live, this.parallelOpts(), this.freeMemory()).allowed)
         .slice(0, limit).map(it => it.id);
       if (!ids.length) return;
       await mapBounded(ids, limit, id => this.startOnce(id));
@@ -1511,8 +1551,8 @@ export class RuntimeSession {
     return { ok: true, ...best };
   }
 
-  async integratedChangeScope(it, revision = it?.local?.worktree?.integratedSha) {
-    const wt = it?.local?.worktree; let base = wt?.mainBefore || wt?.integrationBase || this.environmentRevision || this.state.envReady?.revision;
+  async integratedChangeScope(it, revision = it?.local?.worktree?.integratedSha, baseOverride = null) {
+    const wt = it?.local?.worktree; let base = baseOverride || wt?.mainBefore || wt?.integrationBase || this.environmentRevision || this.state.envReady?.revision;
     if (!base && revision) base = (await G.git(this.checkoutRoot, ['rev-parse', `${revision}^`])).stdout.trim() || null;
     if (!base || !revision) return { codeChanged: true, changed: [], codeFiles: [], reason: 'diff base unavailable' };
     const result = await G.git(this.checkoutRoot, ['diff', '--name-only', base, revision]);
@@ -1640,7 +1680,7 @@ export class RuntimeSession {
     }) : null;
     if (compact) return this.clean({
       ok: !!brief, ...(brief ? {} : { error: 'MATCH_ROOT_MISSING' }), id, type: it.type,
-      answerOnly: it.local.answerOnly, classifiedBy: it.local.classifiedBy, dispatch: dispatchPolicy(it, [...this.items.values()], this.adapter.parallel, this.freeMemory()),
+      answerOnly: it.local.answerOnly, classifiedBy: it.local.classifiedBy, dispatch: dispatchPolicy(it, [...this.items.values()], this.parallelOpts(), this.freeMemory()),
       points: it.maxPoints ?? null, deadlineAt: it.deadlineAt ?? null, workerStopAt: context?.workerStopAt ?? null,
       briefFile: brief?.briefFile ?? null, filesDir: brief?.filesDir ?? null,
       answer: context?.answer ?? null, checklistFile, playbook: context?.playbook ?? null,
@@ -1757,8 +1797,10 @@ export class RuntimeSession {
     if (SHA_RE.test(sha)) {
       if (!(await G.revParse(cwd, sha))) errors.push(`commit ${sha} does not exist locally`);
       else {
-        const pushed = await G.pushedState(cwd, sha, this.repository.branch);
-        if (!pushed.pushed) errors.push(`commit ${sha.slice(0, 12)} is not on origin/${this.repository.branch}: ${pushed.reason || 'push it first'}`);
+        if (!opts.skipPushed) {
+          const pushed = await G.pushedState(cwd, sha, this.repository.branch);
+          if (!pushed.pushed) errors.push(`commit ${sha.slice(0, 12)} is not on origin/${this.repository.branch}: ${pushed.reason || 'push it first'}`);
+        }
         const folder = this.repository.folder;
         const rel = `${folder}/answers/${id}/submit.json`;
         const raw = await G.fileAt(cwd, sha, rel);
@@ -1841,6 +1883,7 @@ export class RuntimeSession {
         // A test file exactly as main had it before this item was integrated is another item's change, not this one's.
         const mainBefore = this.items.get(id)?.local?.worktree?.mainBefore;
         if (mainBefore) submittedRevisions.push(mainBefore);
+        if (opts.base) submittedRevisions.push(opts.base); // a worker commit inherits whatever main had when its worktree was made
         const guarded = await guardBaseline({ cwd, folder, sha, baseline, answer, submittedRevisions });
         const { errors: guardErrors, ...touched } = guarded;
         touchedBaseline = touched;
@@ -1860,7 +1903,7 @@ export class RuntimeSession {
         if (dirty?.length) warnings.push(`uncommitted changes under answers/${id}: they will NOT be submitted (${dirty.slice(0, 3).join(', ')})`);
       }
     }
-    if (it && SHA_RE.test(sha)) codeChanged = (await this.integratedChangeScope(it, sha)).codeChanged;
+    if (it && SHA_RE.test(sha)) codeChanged = (await this.integratedChangeScope(it, sha, opts.base || null)).codeChanged;
     // Verification gate. Across agentic coding work the bottleneck is not writing the change, it is
     // proving it; an item submitted without the suite having run is the single cheapest way to lose
     // points. So "tests ran and passed" is a refusal, not a warning. opts.allowUntested is the escape
@@ -2078,6 +2121,7 @@ export class RuntimeSession {
           const wt = it.local.worktree;
           const commit = ev.revision || (wt ? await G.revParse(wt.worktreeRoot, 'HEAD') : null);
           it.local.ready = ev.status === 'COMPLETED';
+          if (it.local.ready) it.local.readyAt = this.now();
           if (ev.status === 'BLOCKED') it.local.parked = { commit, remainingStep: remainingStep || ev.summary, remainingMinutes: Number(remainingMinutes) || null, worktreeRoot: wt?.worktreeRoot || null };
           else delete it.local.parked;
           if (it.type === 'PI' && ev.status === 'BLOCKED' && /NEED_INFO/i.test(`${ev.summary || ''} ${remainingStep || ''}`)) it.local.needInfo = remainingStep || ev.summary;
@@ -2395,14 +2439,18 @@ export class RuntimeSession {
   }
 
   async preemptForDeadline(it, items = [...this.items.values()]) {
-    if (!it?.deadlineAt || it.type === 'PI' || (it.local?.answerOnly ?? answerOnly(it, this.readMaterial(it.id) || {}))) return null;
+    const isPI = it?.type === 'PI';
+    if (!it || (!it.deadlineAt && !isPI)) return null;
     const cfg = this.plannerOpts(); const estimate = cfg.estMinutes?.[it.type] ?? 10;
     const left = effectiveLeft(it, this.now(), this.match.endsAt).left;
-    if (left == null || left > estimate + 2) return null;
-    const policy = dispatchPolicy(it, items.filter(i => !isSubmitted(i)), this.adapter.parallel, this.freeMemory());
-    if (policy.allowed || policy.reason !== 'CODE_WORKER_LIMIT') return null;
-    const candidates = items.filter(x => x.id !== it.id && x.type !== 'PI' && x.deadlineAt == null && x.local?.worktree && !x.local?.answerOnly
-      && !x.local?.ready && !x.local?.parked && !isSubmitted(x));
+    if (!isPI && (left == null || left > estimate + 2)) return null;
+    const policy = dispatchPolicy(it, items.filter(i => !isSubmitted(i)), this.parallelOpts(), this.freeMemory());
+    // A code slot for a deadline code item, or a Codex thread for any PI or deadline item revealed after a flood of
+    // ordinary items (the thread reserve is already used up).
+    const needsCode = policy.reason === 'CODE_WORKER_LIMIT' && !isPI && !(it.local?.answerOnly ?? answerOnly(it, this.readMaterial(it.id) || {}));
+    if (policy.allowed || !(needsCode || policy.reason === 'THREAD_LIMIT')) return null;
+    const candidates = items.filter(x => x.id !== it.id && x.type !== 'PI' && x.deadlineAt == null && x.local?.worktree && (!needsCode || !x.local?.answerOnly)
+      && !x.local?.ready && !x.local?.parked && !x.local?.worktree?.integratedSha && !isSubmitted(x));
     candidates.sort((a, b) => {
       const ea = cfg.estMinutes?.[a.type] ?? 10; const eb = cfg.estMinutes?.[b.type] ?? 10;
       const va = (Number(a.maxPoints) || 0) / ea; const vb = (Number(b.maxPoints) || 0) / eb;
@@ -2490,6 +2538,12 @@ export class RuntimeSession {
         writeJson(queryTokenFile, { item: it.id, token: it.local.queryToken, queueDir: this.queryQueueDir() });
       }
       const queryCmd = queryTokenFile ? `node "${MTM_QUERY}" --token-file "${queryTokenFile}" --item ${it.id} --tool <read-tool> [--service <s>] [--query "<words>"]` : null;
+      const readyCmd = queryTokenFile ? `node "${MTM_QUERY}" --token-file "${queryTokenFile}" --item ${it.id} --ready` : null;
+      // TMNXWBA9: problems the submit check finds (untracked files, missing evidence or test log) reached the worker only
+      // after it had stopped; the handshake reports them while it still runs and starts the ship without an orchestrator turn.
+      const readyText = readyCmd ? `READY HANDSHAKE (last step, after your final commit${c.answerOnly ? '; for SCOPE: answer the finish-answer command does it for you' : ''}): run \`${readyCmd}\` (append --waits-for <ID> when you report WAITS-FOR). It checks the commit (clean worktree, answer schema, evidence, test log) and the kit starts shipping it at once. On NOT_READY fix every listed error, commit and run it again; then reply STATUS READY. ` : '';
+      // A deadline item is shipped by the kit at its cutoff with whatever is committed, so a verified core fix must be committed early.
+      const safetyText = it.deadlineAt != null ? `SAFETY COMMIT (deadline item): as soon as the core change passes its own tests, commit it with submit.json filled and its evidence; if you are not READY by the cutoff, the kit submits your latest commit by itself (uncommitted work is lost). Keep improving in further commits. ` : '';
       const stop = c.workerStopAt ? new Date(c.workerStopAt).toISOString() : 'match end minus 5 minutes';
       const heavyText = it.local.heavy ? 'HEAVY item: deliver the highest-value part first, commit working increments, and at workerStopAt return what passes with honest PARTIAL rows and real evidence; never start a broad refactor. ' : '';
       const baselineFixText = !c.answerOnly && !this.state.baselineFixAssigned && sharedDefects.length && r.id === baselineFixTarget
@@ -2520,7 +2574,7 @@ export class RuntimeSession {
       const entry = {
         id: r.id, type: it.type, answerOnly: !!c.answerOnly,
         taskName: `${r.id.toLowerCase().replace(/[^a-z0-9]/g, '')}${it.local.dispatches > 1 ? `r${it.local.dispatches}` : ''}`,
-        message: `${resumeText}${baselineFixText}${baselineWaitText}${doEverything}${mutationGuide}${piQueryGuide}${testChange}${frugal}Item ${r.id} (${it.type}${c.answerOnly ? ', answer-first hint' : ''}).${c.answerOnly ? ` FAST PATH (points drop with every minute${it.type === 'PI' ? ', PI is ranked by submit order: every turn counts' : ''}). No preamble, no progress or send_message updates. 1) ${answerRead} 2) Decide every field (UTC-normalise mixed offsets, dedupe retries, keep corrected entries, ignore decoys), then write ${c.answer?.submitJson || 'submit.json'} in one edit, keeping every template key. 3) For SCOPE: answer run \`${c.finishAnswer || c.validateAnswer}\`${c.finishAnswer ? ' (validates the schema and commits the answer folder); on ANSWER INVALID fix and rerun' : ', then commit'}; for SCOPE: answer+code run the relevant tests and commit code, tests and answer together instead${it.type === 'PI' ? ' (PI: whatever the item asks for, such as a build, browser check or evidence, is done; beyond that run only the tests for the changed code, no full suite, full build or reinstall: the main gate re-checks)' : ''}. 4) Reply with the STATUS block including SCOPE. Only if your mtm-query command cannot answer, reply NEED_INFO: <what> (logs: service + narrowing word). No extra evidence or test.log unless requiredEvidence lists it; never install validators.` : `${c.brief?.digestPath ? ` Item text, KB articles, test data and logs: read ${c.brief.digestPath}, not the raw files/mcp/*.json.` : ''}${c.brief?.likelyFilesPath ? ` Code search: start from ${c.brief.likelyFilesPath} (files ranked by this item's words, with symbols, imports and related tests); confirm with \`rg -n -m 20 <term> <those paths>\` before any repo-wide search.` : ''}${queryCmd ? ` If a fact (KB rule, log line, test data) is missing, query it yourself with \`${queryCmd}\`; NEED_INFO only if the read tool cannot answer.` : ''} Check the answer with \`${c.validateAnswer}\` (no installs). Builds, full test suites and browser/e2e runs: \`node "${BUILD_LOCK}" --slots ${this.adapter.parallel.maxHeavySteps || 2} --max-wait-ms ${heavyWaitMs} -- <command>\` (takes a free slot itself; after ${Math.round(heavyWaitMs / 1000)} s it runs anyway; never ask the orchestrator for build_slot). Single test files run directly. Stop dev servers and browsers as soon as the evidence is captured. Redirect long output (builds, full suites, image tools such as sips) to a file under .mtm-notes/ and print only its last 20 lines.`} checkoutRoot = worktreeRoot = ${c.worktreeRoot}; folder ${c.folder}; matchRoot ${c.matchRoot}; briefFile ${c.brief?.briefFile}; filesDir ${c.brief?.filesDir}; answer ${c.answer?.submitJson || ''} (evidence in ${c.answer?.evidenceDir || ''}); ports dev=${c.ports?.dev} production=${c.ports?.production} (override fixed runner ports). ${c.answerOnly && c.brief?.digestPath ? 'Start with digestPath; if the requirements need app changes, then read briefFile and its code-lifecycle material.' : 'Read briefFile first: it has the commands, playbook, checklist and organizer files.'} Work only in this worktree. Stop and return by ${stop} (Game Master clock). Commit the complete item (code, tests, evidence, answer) and reply STATUS READY or PARKED with COMMIT <sha> and SCOPE. Never push, submit, delegate or call Game APIs.`,
+        message: `${resumeText}${baselineFixText}${baselineWaitText}${doEverything}${mutationGuide}${piQueryGuide}${testChange}${frugal}${safetyText}${readyText}Item ${r.id} (${it.type}${c.answerOnly ? ', answer-first hint' : ''}).${c.answerOnly ? ` FAST PATH (points drop with every minute${it.type === 'PI' ? ', PI is ranked by submit order: every turn counts' : ''}). No preamble, no progress or send_message updates. 1) ${answerRead} 2) Decide every field (UTC-normalise mixed offsets, dedupe retries, keep corrected entries, ignore decoys), then write ${c.answer?.submitJson || 'submit.json'} in one edit, keeping every template key. 3) For SCOPE: answer run \`${c.finishAnswer || c.validateAnswer}\`${c.finishAnswer ? ' (validates the schema and commits the answer folder); on ANSWER INVALID fix and rerun' : ', then commit'}; for SCOPE: answer+code run the relevant tests and commit code, tests and answer together instead${it.type === 'PI' ? ' (PI: whatever the item asks for, such as a build, browser check or evidence, is done; beyond that run only the tests for the changed code and the typecheck, since the gate rolls back a type error even in a test file; no full suite, full build or reinstall. Save that test output as evidence/test.log and cite it in submit.json: a code change without a test log is refused)' : ''}. 4) Reply with the STATUS block including SCOPE. Only if your mtm-query command cannot answer, reply NEED_INFO: <what> (logs: service + narrowing word). No extra evidence unless requiredEvidence lists it (a code change still needs its test log); never install validators.` : `${c.brief?.digestPath ? ` Item text, KB articles, test data and logs: read ${c.brief.digestPath}, not the raw files/mcp/*.json.` : ''}${c.brief?.likelyFilesPath ? ` Code search: start from ${c.brief.likelyFilesPath} (files ranked by this item's words, with symbols, imports and related tests); confirm with \`rg -n -m 20 <term> <those paths>\` before any repo-wide search.` : ''}${queryCmd ? ` If a fact (KB rule, log line, test data) is missing, query it yourself with \`${queryCmd}\`; NEED_INFO only if the read tool cannot answer.` : ''} Check the answer with \`${c.validateAnswer}\` (no installs). Builds, full test suites and browser/e2e runs: \`node "${BUILD_LOCK}" --slots ${this.adapter.parallel.maxHeavySteps || 2} --max-wait-ms ${heavyWaitMs} -- <command>\` (takes a free slot itself; after ${Math.round(heavyWaitMs / 1000)} s it runs anyway; never ask the orchestrator for build_slot). Single test files run directly. Stop dev servers and browsers as soon as the evidence is captured. Redirect long output (builds, full suites, image tools such as sips) to a file under .mtm-notes/ and print only its last 20 lines.`} checkoutRoot = worktreeRoot = ${c.worktreeRoot}; folder ${c.folder}; matchRoot ${c.matchRoot}; briefFile ${c.brief?.briefFile}; filesDir ${c.brief?.filesDir}; answer ${c.answer?.submitJson || ''} (evidence in ${c.answer?.evidenceDir || ''}); ports dev=${c.ports?.dev} production=${c.ports?.production} (override fixed runner ports). ${c.answerOnly && c.brief?.digestPath ? 'Start with digestPath; if the requirements need app changes, then read briefFile and its code-lifecycle material.' : 'Read briefFile first: it has the commands, playbook, checklist and organizer files.'} Work only in this worktree. Stop and return by ${stop} (Game Master clock). Commit the complete item (code, tests, evidence, answer) and reply STATUS READY or PARKED with COMMIT <sha> and SCOPE. Never push, submit, delegate or call Game APIs.`,
       };
       entry.reasoningEffort = this.workerEffort(it, c);
       const model = this.workerModel(it, c);
@@ -2703,11 +2757,172 @@ export class RuntimeSession {
    */
   shipPriority(id) {
     const it = this.items.get(id);
-    if (!it) return [3, Infinity];
+    if (!it) return [4, Infinity];
     const left = effectiveLeft(it, this.now(), this.match.endsAt).left;
-    if (it.deadlineAt != null) return [0, left ?? Infinity];
+    // A deadline about to pass first, then PI (ranked by submit order: a minute can cost a place), then the other
+    // deadline items by time left, then the rest.
+    if (it.deadlineAt != null && left != null && left <= 3) return [0, left];
     if (it.type === 'PI') return [1, left ?? Infinity];
-    return [2, Infinity];
+    if (it.deadlineAt != null) return [2, left ?? Infinity];
+    return [3, Infinity];
+  }
+
+  isShipping(id) {
+    return !!(this.inShip?.has(id) || this.backgroundShips?.has(id) || this.shipQueue?.some(j => j.id === id));
+  }
+
+  autopilotConfig() { return { ...AUTOPILOT_DEFAULTS, ...(this.adapter?.autopilot || {}) }; }
+
+  /** Ship without an orchestrator turn; the result arrives as a SHIP_RESULT event like any background ship. */
+  autoShip(id, reason, sha = null) {
+    const it = this.items.get(id);
+    if (!it || isSubmitted(it) || this.isShipping(id)) return false;
+    it.local.autoShip = { reason, sha, at: this.now() };
+    this.state.autoShips = (this.state.autoShips || 0) + 1;
+    this.saveState();
+    const stopNote = reason === 'ready' ? '' : ' Its worker may still be running: once the SHIP_RESULT says shipped, tell it to stop (later commits cannot be submitted).';
+    this.pendingEvents.push({ kind: 'AUTO_SHIP', id, text: `AUTO_SHIP ${id} (${reason})${sha ? ` ${sha.slice(0, 12)}` : ''}: the kit is shipping it now; do not call ship ${id}. Its SHIP_RESULT follows.${stopNote}` });
+    Promise.resolve().then(() => this.ship({ backlogItemKey: id, waitMs: 0, autopilot: reason })).then((r) => {
+      if (r && !r.background) this.pendingEvents.push({ kind: 'SHIP_RESULT', id, text: oneLine(`${id}: ${r.ok ? 'shipped' : `ship stopped at ${r.stage || 'unknown'}${r.error ? ` ${r.error}` : ''}`}. ${r.next || ''}`, 900), result: { ok: r.ok, stage: r.stage, error: r.error ?? null } });
+    }, (e) => this.pendingEvents.push({ kind: 'SHIP_RESULT', id, text: oneLine(`${id}: autopilot ship failed: ${e?.message || e}. Call ship ${id}.`, 600), result: { ok: false, error: e?.message || String(e) } }));
+    return true;
+  }
+
+  /** One process runs the sweep: two runtimes (a restart while the old one lives) must never ship one item twice. */
+  autopilotLease(now = Date.now()) {
+    const dir = this.stateDir; if (!dir) return false;
+    const file = path.join(dir, 'autopilot.json');
+    try {
+      const cur = readJson(file, null);
+      if (cur && cur.pid !== process.pid && now - (Number(cur.at) || 0) < 20000) {
+        let alive = false;
+        try { process.kill(cur.pid, 0); alive = true; } catch (e) { alive = e?.code === 'EPERM'; }
+        if (alive) return false;
+      }
+      fs.mkdirSync(dir, { recursive: true });
+      writeJson(file, { pid: process.pid, at: now });
+      return true;
+    } catch { return false; }
+  }
+
+  /**
+   * Every background poll (~5 s): ship committed work nobody has shipped when waiting longer would lose it.
+   * deadline: within sweepMin of the item deadline (+crowdStepMin per other deadline due within 2 min of it);
+   * match-end: within matchEndMin of the match end; ready: READY reported but not shipped within readyGraceSec;
+   * stale: no orchestrator tool call for staleOrchestratorMin (usage limit, crash), for clean worker commits idle
+   * idleCommitSec. Ships commits only (never uncommitted files), never a commit that already failed the gate, and each
+   * commit at most once per class (early: ready/stale; final: deadline/match-end, which may retry a commit an early
+   * attempt saw refused, because the last-3-minute rules then submit what scores).
+   */
+  async autopilotSweep() {
+    const cfg = this.autopilotConfig();
+    if (!cfg.enabled || this.sweepRunning || this.phase !== 'GAME' || this.match.status !== 'IN_PROGRESS' || !this.bearer) return [];
+    this.sweepRunning = true;
+    try {
+      if (!this.autopilotLease()) return [];
+      const now = this.now();
+      const endsIn = this.match.endsAt ? (this.match.endsAt - now) / 60000 : null;
+      const stale = !!this.lastToolCallAt && (Date.now() - this.lastToolCallAt) / 60000 >= cfg.staleOrchestratorMin;
+      const live = [...this.items.values()].filter(it => it.local?.worktree?.worktreeRoot && it.local?.startedAt && !isSubmitted(it) && !isClosed(it, now));
+      const due = [];
+      for (const it of live) {
+        if (this.isShipping(it.id)) continue;
+        const l = it.local; const wt = l.worktree;
+        const { left } = effectiveLeft(it, now, this.match.endsAt);
+        const crowd = it.deadlineAt == null ? 0 : live.filter(x => x !== it && x.deadlineAt != null && Math.abs(x.deadlineAt - it.deadlineAt) <= 120000).length;
+        let cut = Math.min(cfg.maxSweepMin, cfg.sweepMin + cfg.crowdStepMin * crowd);
+        // A short item's worker may legitimately work until 1.5 min before its deadline: sweep only after that stop time.
+        const stopLead = it.deadlineAt != null && Number.isFinite(l.workerStopAt) ? (it.deadlineAt - l.workerStopAt) / 60000 : null;
+        if (stopLead != null) cut = Math.min(cut, Math.max(cfg.minSweepMin, stopLead - 0.25));
+        const reason = it.deadlineAt != null && left != null && left <= cut ? 'deadline'
+          : endsIn != null && endsIn <= cfg.matchEndMin ? 'match-end'
+          : l.ready && l.readyAt && now - l.readyAt >= cfg.readyGraceSec * 1000 ? 'ready'
+          : stale ? 'stale' : null;
+        if (!reason || !fs.existsSync(wt.worktreeRoot)) continue;
+        const sha = await G.revParse(wt.worktreeRoot, 'HEAD').catch(() => null);
+        if (!sha || sha === wt.baseSha) continue; // nothing committed
+        if (l.failedShip?.workerSha === sha) continue; // the gate already failed this commit
+        const cls = reason === 'deadline' || reason === 'match-end' ? 'final' : 'early';
+        if (l.autoTried?.[cls] === sha) continue;
+        if (cls === 'early' && wt.integratedWorkerSha === sha) continue; // integrated and refused: a fix-up is the orchestrator's
+        if (reason === 'stale') {
+          const porcelain = await G.statusPorcelain(wt.worktreeRoot);
+          if (!porcelain || workerDirtyFiles(porcelain).length) continue; // still editing
+          const ct = Number((await G.git(wt.worktreeRoot, ['log', '-1', '--format=%ct', 'HEAD'])).stdout.trim()) * 1000;
+          if (!ct || Date.now() - ct < cfg.idleCommitSec * 1000) continue;
+        }
+        l.autoTried = { ...(l.autoTried || {}), [cls]: sha };
+        due.push({ id: it.id, reason, sha });
+      }
+      due.sort((a, b) => { const x = this.shipPriority(a.id), y = this.shipPriority(b.id); return x[0] - y[0] || x[1] - y[1]; });
+      for (const d of due) this.autoShip(d.id, d.reason, d.sha);
+      if (due.length) this.saveState();
+      return due;
+    } finally { this.sweepRunning = false; }
+  }
+
+  /**
+   * Ready handshake from the worker's own shell (mtm-query --ready, or finish-answer --ready-token): check the commit the
+   * way integrate and the submit preflight will, answer the worker while it still runs, then ship at once.
+   * TMNXWBA9: PI-03 lost 70 s to a refusal for a missing test log, CR-07 its deadline to a missing evidence file and
+   * TASK-07/CR-08 their points to an untracked checklist, each found only after the worker had stopped.
+   */
+  async workerReady(q = {}) {
+    const id = String(q.item || '');
+    const it = this.items.get(id);
+    if (!it || !it.local?.queryToken || q.token !== it.local.queryToken) return { ok: false, error: 'ITEM_FORBIDDEN', message: 'Token does not belong to this item.' };
+    if (isSubmitted(it)) return { ok: true, submitted: true, next: `${id} is already submitted. Reply STATUS READY and stop.` };
+    const wt = it.local.worktree;
+    if (!wt?.worktreeRoot) return { ok: true, shipping: false, next: 'Reply STATUS READY with your commit; the orchestrator ships it.' };
+    const sha = await G.revParse(wt.worktreeRoot, 'HEAD');
+    if (!sha || sha === wt.baseSha) return { ok: false, error: 'NOT_READY', errors: ['NO_WORKER_COMMIT: nothing is committed in this worktree yet'], next: 'Commit the complete item (code, tests, answer, evidence), then run this command again.' };
+    const errors = [];
+    const porcelain = await G.statusPorcelain(wt.worktreeRoot);
+    const dirty = porcelain ? workerDirtyFiles(porcelain) : [];
+    if (dirty.length) errors.push(`WORKER_DIRTY: commit what belongs to the item and delete the rest: ${dirty.slice(0, 8).map(l => String(l).slice(3).trim()).join(', ')}`);
+    let pre = null;
+    try { pre = await until(this.preflight(id, sha, { base: wt.retryBaseSha || wt.baseSha, skipPushed: true }), Date.now() + 20000); } catch { pre = null; }
+    errors.push(...(pre?.errors || []).filter(e => WORKER_FIXABLE.test(String(e))).map(e => oneLine(String(e), 400)));
+    const warnings = (pre?.warnings || []).slice(0, 4).map(w => oneLine(String(w), 300));
+    if (errors.length) {
+      it.local.readyRefusals = (it.local.readyRefusals || 0) + 1; this.saveState();
+      return { ok: false, error: 'NOT_READY', sha, errors, warnings, next: 'Fix every error in this worktree, commit, and run this command again. Then reply STATUS READY.' };
+    }
+    const waitsFor = /^[A-Z]+-\d+$/.test(String(q.waitsFor || '')) ? String(q.waitsFor) : null;
+    it.local.workerReady = { sha, at: this.now(), waitsFor };
+    it.local.ready = true; it.local.readyAt = this.now();
+    this.saveState();
+    const dep = waitsFor && this.items.get(waitsFor);
+    if (dep && !isSubmitted(dep)) {
+      this.pendingEvents.push({ kind: 'READY', id, text: `${id}: READY (kit check passed) but WAITS-FOR ${waitsFor}: ship ${waitsFor} first, then have ${id}'s worker rebase onto main.` });
+      return { ok: true, shipping: false, sha, warnings, next: `Reply STATUS READY with WAITS-FOR: ${waitsFor}; the orchestrator ships ${waitsFor} first.` };
+    }
+    const cfg = this.autopilotConfig();
+    if (cfg.enabled && cfg.shipOnReady && this.phase === 'GAME' && this.match.status === 'IN_PROGRESS' && this.autoShip(id, 'ready', sha)) {
+      return { ok: true, shipping: true, sha, warnings, next: `The kit is shipping ${sha.slice(0, 12)} now. Reply STATUS READY with COMMIT ${sha} and the line KIT: SHIPPING, then stop; make no further commits.` };
+    }
+    this.pendingEvents.push({ kind: 'READY', id, text: `${id}: READY (kit check passed): ship ${id}.` });
+    return { ok: true, shipping: false, sha, warnings, next: 'Reply STATUS READY; the orchestrator ships it.' };
+  }
+
+  /**
+   * UDLWEWFR and TMNXWBA9: the orchestrator relayed 103 and 20+ worker reads through match_mcp, one model turn each,
+   * while READY items and new reveals waited. With live workers it gets a few reads per window; workers read the match
+   * MCP themselves with mtm-query.
+   */
+  relayBudget(backlogItemKey) {
+    const cfg = { calls: 5, windowMs: 120000, ...(this.adapter?.relayBudget || {}) };
+    if (!cfg.calls || this.phase !== 'GAME') return null;
+    const live = [...this.items.values()].some(i => i.local?.worktree && i.local?.queryToken && !isSubmitted(i) && !i.local?.parked);
+    if (!live) return null;
+    const now = Date.now();
+    this.relayCalls = (this.relayCalls || []).filter(t => now - t < cfg.windowMs);
+    if (this.relayCalls.length >= cfg.calls) {
+      return { ok: false, error: 'RELAY_BUDGET', retryAfterSec: Math.ceil((cfg.windowMs - (now - this.relayCalls[0])) / 1000),
+        next: `${cfg.calls} match_mcp reads in ${Math.round(cfg.windowMs / 1000)} s while workers run. Tell ${backlogItemKey ? `${backlogItemKey}'s worker` : 'the worker'} to run the mtm-query command in its task; spend your turns on spawns, SHIP_RESULT and fix-ups.` };
+    }
+    this.relayCalls.push(now);
+    return null;
   }
 
   enqueueShip(id, work) {
@@ -2742,16 +2957,24 @@ export class RuntimeSession {
     // 0OD2WHNM: PI-02 (10-min deadline) was READY at 20:54 while the orchestrator sat inside a blocking
     // ship(TASK-08) whose full-suite gate ran until 20:55:57; PI-02 shipped at 20:57:31, after its deadline.
     // An urgent item now interrupts any gate that is not itself urgent (no rollback; it ships again after).
-    if (urgent(incoming) && this.activeGate && this.activeGate.id !== id && !urgent(this.items.get(this.activeGate.id))) {
+    // A deadline about to pass (the autopilot ships it at ~1.75 min) also interrupts an urgent gate that is not itself that
+    // close, such as a PI's: the PI loses at most a place, the deadline item would lose everything.
+    const critical = (item) => item?.deadlineAt != null && (effectiveLeft(item, this.now(), this.match.endsAt).left ?? Infinity) <= 2.5;
+    const active = this.activeGate && this.activeGate.id !== id ? this.items.get(this.activeGate.id) : null;
+    if (active && (urgent(incoming) && !urgent(active) || critical(incoming) && !critical(active))) {
       this.activeGate.controller.abort();
     }
     this.backgroundShips ||= new Map();
-    if (this.backgroundShips.has(id)) {
+    this.inShip ||= new Set();
+    if (this.backgroundShips.has(id) || this.inShip.has(id)) {
+      const auto = this.items.get(id)?.local?.autoShip;
       return this.clean({ ok: true, stage: 'shipping', backlogItemKey: id, background: true,
-        next: `${id} is already shipping in the background; its SHIP_RESULT arrives through wait_for_update. Service other workers meanwhile.` });
+        next: `${id} is already shipping${auto ? ` (kit autopilot: ${auto.reason})` : ''}; its SHIP_RESULT arrives through wait_for_update. Do not call ship ${id} again; service other workers meanwhile.` });
     }
+    this.inShip.add(id);
     const go = async () => this.clean(await this.withAutoDispatch(await this.shipOne(args)));
     const run = this.enqueueShip(id, go);
+    run.then(() => this.inShip.delete(id), () => this.inShip.delete(id));
     // Short ships (answer-only, small gates) still return their result in this call. A long one keeps going in the
     // background so the orchestrator can ship a PI or deadline item meanwhile instead of being blocked for minutes.
     const inlineMs = Math.max(0, Number(args.waitMs ?? this.adapter.parallel?.shipInlineMs ?? 20000));
@@ -2773,7 +2996,7 @@ export class RuntimeSession {
       this.backgroundShips.delete(id);
       // Interrupted for an urgent item: queue it again behind that item instead of asking the orchestrator.
       if (r?.verdict === 'INTERRUPTED' && !isSubmitted(this.items.get(id))) {
-        this.ship({ backlogItemKey: id, waitMs: 0 }).then(again => { if (!again?.background) report(again); }, () => {});
+        this.ship({ ...args, backlogItemKey: id, waitMs: 0 }).then(again => { if (!again?.background) report(again); }, () => {});
         return;
       }
       report(r);
@@ -2785,19 +3008,26 @@ export class RuntimeSession {
       next: `${id} is still in its gate and keeps shipping in the background. Do not wait for it: service workers, and ship any other READY item now (a PI or a deadline within ${URGENT_DEADLINE_MIN} min interrupts this gate). Its SHIP_RESULT arrives through wait_for_update.` });
   }
 
-  async shipOne({ backlogItemKey, force = false } = {}) {
+  async shipOne({ backlogItemKey, force = false, autopilot = null } = {}) {
     const id = String(backlogItemKey || '').trim();
     const t0 = Date.now();
     const it = this.items.get(id);
     if (!it) return { ok: false, error: 'UNKNOWN_ITEM' };
     if (isSubmitted(it)) return this.clean({ ok: true, stage: 'already-submitted', next: `${id} already has a receipt. Take NEXT.` });
     if (!it.local?.worktree) return { ok: false, stage: 'integrate', error: 'NO_WORKTREE', next: `No worker copy for ${id}: dispatch_ready.` };
+    // An autopilot ship never re-gates a commit that already failed: that is a fix-up for the worker. (A hand-called ship
+    // may retry it, e.g. once main has the dependency that made it fail.)
+    if (!force && autopilot && it.local.failedShip?.workerSha) {
+      const head = await G.revParse(it.local.worktree.worktreeRoot, 'HEAD').catch(() => null);
+      if (head && head === it.local.failedShip.workerSha) return this.clean({ ok: false, stage: 'gate', error: 'SAME_COMMIT_FAILED', verdict: it.local.failedShip.verdict,
+        next: `${id}'s commit ${head.slice(0, 12)} already failed the gate (${it.local.failedShip.verdict}). Send the worker .mtm-notes/gate-${id}-*.log for a fix-up commit, then ship ${id} again.` });
+    }
     const steps = [];
     // Always integrate: an unchanged worker HEAD is a replay (no-op), while a fix-up commit made after a
     // gate failure or a submit refusal is cherry-picked on top. Skipping integrate when integratedSha
     // was set resubmitted the stale commit after every refusal.
     {
-      const r = await this.worktree({ action: 'integrate', backlogItemKey: id });
+      const r = await this.worktree({ action: 'integrate', backlogItemKey: id, fromShip: true, allowDirty: !!autopilot });
       steps.push({ step: 'integrate', ok: r.ok, error: r.error || null, replay: !!r.replay });
       if (!r.ok) return this.clean({ ok: false, stage: 'integrate', error: r.error, message: r.message, conflicts: r.conflicts, steps, next: r.next || 'Resolve as the integrate result says, then ship again.' });
     }
@@ -2805,7 +3035,7 @@ export class RuntimeSession {
     // Answer/evidence problems do not depend on the gate: find them before spending 20 s-2 min in it, so the worker gets
     // them back while it still has time (TMNXWBA9 CR-07 learned of a missing evidence file only after its gate).
     if (!force && wt?.integratedSha && typeof this.preflight === 'function') {
-      const pre = await until(this.preflight(id, wt.integratedSha, {}), Date.now() + 15000).catch(() => null);
+      const pre = await until(this.preflight(id, wt.integratedSha, { skipPushed: true }), Date.now() + 15000).catch(() => null);
       const early = (pre?.errors || []).filter(e => /^(REQUIRED_EVIDENCE_|UNSCORABLE_ANSWER|NO_ITEM_TEXT|BASELINE_TEST_CHANGED|BASELINE_MIGRATION_CHANGED|ANSWER_)/.test(String(e)));
       if (early.length) {
         steps.push({ step: 'preflight', ok: false, errors: early.length });
@@ -2827,6 +3057,7 @@ export class RuntimeSession {
         it.local.heavyGateFailures = (it.local.heavyGateFailures || 0) + 1;
         if (it.local.heavyGateFailures >= 2) it.local.heavyGaveUp = true;
       }
+      it.local.failedShip = { workerSha: wt.integratedWorkerSha || null, verdict: g.verdict, at: this.now() };
       // Roll back now (still inside the ship chain, before anything else is integrated): left in main,
       // the failing commits would be pushed by the next ship and could then never be rolled back.
       const rb = await this.worktree({ action: 'rollback', backlogItemKey: id }).catch((e) => ({ ok: false, error: e.message }));
@@ -2930,7 +3161,7 @@ export class RuntimeSession {
     this.refreshHeavyFlags();
     const items = [...this.items.values()];
     return rank(items, this.now(), this.match.endsAt, this.plannerOpts()).ranked.some(r =>
-      r.action === 'submit' || this.heavyDispatchDecision(this.items.get(r.id), items).allowed && dispatchPolicy(this.items.get(r.id), items.filter(i => !isSubmitted(i)), this.adapter.parallel, this.freeMemory()).allowed);
+      r.action === 'submit' ? !this.isShipping(r.id) : this.heavyDispatchDecision(this.items.get(r.id), items).allowed && dispatchPolicy(this.items.get(r.id), items.filter(i => !isSubmitted(i)), this.parallelOpts(), this.freeMemory()).allowed);
   }
 
   build_slot({ action, backlogItemKey } = {}) {
@@ -2978,11 +3209,11 @@ export class RuntimeSession {
     return true;
   }
 
-  async worktree({ action, backlogItemKey, message } = {}) {
-    return this.withLock(() => this.worktreeAction({ action, backlogItemKey, message }));
+  async worktree({ action, backlogItemKey, message, fromShip = false, allowDirty = false } = {}) {
+    return this.withLock(() => this.worktreeAction({ action, backlogItemKey, message, fromShip, allowDirty }));
   }
 
-  async worktreeAction({ action, backlogItemKey } = {}) {
+  async worktreeAction({ action, backlogItemKey, fromShip = false, allowDirty = false } = {}) {
     const id = backlogItemKey;
     if (!this.checkoutRoot) return { ok: false, error: 'NOT_CONFIGURED' };
     const base = path.join(this.checkoutRoot, '.mtm-wt');
@@ -2997,7 +3228,7 @@ export class RuntimeSession {
       it.local.answerOnly = classification.answerOnly; it.local.classifiedBy = classification.classifiedBy; it.local.classificationReason = classification.reason;
       it.local.answerSource = answerNeedsSource(it);
       it.local.answerImage = answerNeedsImage(it);
-      const policy = dispatchPolicy(it, [...this.items.values()].filter(i => !isSubmitted(i)), this.adapter.parallel, this.freeMemory());
+      const policy = dispatchPolicy(it, [...this.items.values()].filter(i => !isSubmitted(i)), this.parallelOpts(), this.freeMemory());
       if ((!it.local.worktree || it.local.parked) && !policy.allowed) {
         it.local.queued = true; this.saveState();
         return { ok: false, error: policy.reason, queued: true, dispatch: policy, next: this.view().next };
@@ -3017,6 +3248,9 @@ export class RuntimeSession {
       // `node_modules/` in the app .gitignore matches directories only; the worktree's node_modules is a
       // symlink and showed as untracked: integrate refused WORKER_DIRTY (PI-01 and TASK-03 in DZCZCBAT).
       G.ensureExcluded(this.checkoutRoot, 'node_modules');
+      // Worker scratch notes and the kit checklist beside submit.json are never deliverables (TMNXWBA9 TASK-07, CR-08).
+      G.ensureExcluded(this.checkoutRoot, '.mtm-notes/');
+      G.ensureExcluded(this.checkoutRoot, '**/answers/*/checklist.md');
       const wtRoot = path.join(base, id);
       if (!fs.existsSync(wtRoot)) {
         const r = await G.worktreeAdd(this.checkoutRoot, wtRoot, `mtm-wt/${id}`, resume?.commit || 'HEAD');
@@ -3055,7 +3289,13 @@ export class RuntimeSession {
       const schemaRel = Object.keys(material.files || {}).find((k) => k.endsWith(`${id}-submit.schema.json`)) || Object.keys(material.files || {}).find((k) => /submit\.schema\.json$/.test(k));
       const mustCite = (material.requiredEvidence || []).filter((r) => r && r.reference !== false && r.name).map((r) => r.name);
       const validateAnswer = `node "${VALIDATE_ANSWER}" "${answerPaths(wtMatchRoot, id).submitJson}"${schemaRel ? ` "${path.join(brief.filesDir, ...schemaRel.split('/'))}"` : ''}${mustCite.length ? ` --required ${mustCite.join(',')}` : ''}`;
-      const finishAnswer = `node "${FINISH_ANSWER}" "${answerPaths(wtMatchRoot, id).submitJson}"${schemaRel ? ` "${path.join(brief.filesDir, ...schemaRel.split('/'))}"` : ''}${mustCite.length ? ` --required ${mustCite.join(',')}` : ''} --message "${id}: answer"`;
+      // The worker's read/ready token is issued with the worktree so finish-answer can run the ready handshake itself.
+      const queryTokenFile = brief?.briefFile && this.queryQueueDir() ? path.join(path.dirname(brief.briefFile), 'query-token.json') : null;
+      if (queryTokenFile) {
+        it.local.queryToken ||= crypto.randomBytes(24).toString('hex');
+        writeJson(queryTokenFile, { item: id, token: it.local.queryToken, queueDir: this.queryQueueDir() });
+      }
+      const finishAnswer = `node "${FINISH_ANSWER}" "${answerPaths(wtMatchRoot, id).submitJson}"${schemaRel ? ` "${path.join(brief.filesDir, ...schemaRel.split('/'))}"` : ''}${mustCite.length ? ` --required ${mustCite.join(',')}` : ''} --message "${id}: answer"${queryTokenFile ? ` --ready-token "${queryTokenFile}"` : ''}`;
       this.saveState();
       return {
         validateAnswer, finishAnswer,
@@ -3067,11 +3307,15 @@ export class RuntimeSession {
     }
     if (action === 'integrate') {
       const urgent = rank([...this.items.values()], this.now(), this.match.endsAt, this.plannerOpts()).ranked.find(r => r.tier === -3);
-      if (urgent && urgent.id !== id) return { ok: false, error: 'DEADLINE_READY_FIRST', next: `Integrate and submit ${urgent.id} first.` };
+      // ship() already runs the most urgent item first; this guard is for a hand-called integrate.
+      if (urgent && urgent.id !== id && !fromShip) return { ok: false, error: 'DEADLINE_READY_FIRST', next: `Integrate and submit ${urgent.id} first.` };
       const wt = it.local.worktree;
       if (!wt) return { ok: false, error: 'NO_WORKTREE' };
-      const workerDirty = (await G.statusPorcelain(wt.worktreeRoot))?.filter((l) => !/(^|\/)node_modules\/?$/.test(l.slice(3).trim())) ?? null;
-      if (!workerDirty || workerDirty.length) return { ok: false, error: 'WORKER_DIRTY', next: 'Ask the worker to finish evidence, self-review and commit before READY.' };
+      const porcelain = await G.statusPorcelain(wt.worktreeRoot);
+      const workerDirty = porcelain ? workerDirtyFiles(porcelain) : null;
+      // The autopilot ships the worker's commits (a cherry-pick never reads the working tree): a worker still editing
+      // after its last commit must not cost the item its deadline.
+      if (!workerDirty || (workerDirty.length && !allowDirty)) return { ok: false, error: 'WORKER_DIRTY', files: (workerDirty || []).slice(0, 8), next: 'Ask the worker to finish evidence, self-review and commit before READY.' };
       const sha = await G.revParse(wt.worktreeRoot, 'HEAD');
       if (sha === wt.integratedWorkerSha) return { ok: true, integratedSha: wt.integratedSha, replay: true };
       const common = (await G.git(this.checkoutRoot, ['merge-base', 'HEAD', sha])).stdout.trim();

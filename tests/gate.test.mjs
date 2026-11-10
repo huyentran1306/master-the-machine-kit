@@ -339,7 +339,7 @@ test('0OD2WHNM: a long ship goes to the background; an urgent PI interrupts it a
   assert.ok(!s.pendingEvents.some(e => e.kind === 'SHIP_RESULT' && /INTERRUPTED/.test(e.text)), 'an interruption is re-queued, not reported');
 });
 
-test('PI and deadline items READY together ship nearest deadline first, then PI, then ordinary work', async () => {
+test('READY together: a deadline within 3 min first, then PI (ranked by submit order), then later deadlines, then ordinary work', async () => {
   const s = new RuntimeSession(); s.phase = 'IDLE'; const now = Date.now(); s.match.endsAt = now + 30 * 60000;
   s.items.set('TASK-01', { id: 'TASK-01', type: 'TASK', local: {} });
   s.items.set('CR-07', { id: 'CR-07', type: 'CR', deadlineAt: now + 6 * 60000, local: {} });
@@ -355,7 +355,7 @@ test('PI and deadline items READY together ship nearest deadline first, then PI,
   await new Promise(done => setTimeout(done, 10));
   release();
   await Promise.all([running, ...queued]);
-  assert.deepEqual(order, ['TASK-01', 'PI-02', 'CR-07', 'PI-09', 'BUG-11']);
+  assert.deepEqual(order, ['TASK-01', 'PI-02', 'PI-09', 'CR-07', 'BUG-11']);
 });
 
 test('a deadline under 90 s skips the gate and submits the worker-verified commit', async () => {

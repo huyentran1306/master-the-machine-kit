@@ -369,3 +369,15 @@ test('a deadline under 90 s skips the gate and submits the worker-verified commi
   assert.equal(gated, false, 'no gate inside the last 90 s');
   assert.equal(r.steps?.find(x => x.step === 'gate')?.verdict, 'ENVIRONMENT', JSON.stringify(r).slice(0, 300));
 });
+
+test('TMNXWBA9: missing required evidence is returned before the gate, not after it', async () => {
+  const s = new RuntimeSession(); const now = Date.now(); s.now = () => now; s.match.endsAt = now + 20 * 60000;
+  s.items.set('CR-07', { id: 'CR-07', type: 'CR', deadlineAt: now + 8 * 60000, local: { worktree: { worktreeRoot: '/x', integratedSha: 'abc' } } });
+  s.worktree = async () => ({ ok: true });
+  let gated = false; s.gate = async () => { gated = true; return { verdict: 'GREEN' }; };
+  s.preflight = async () => ({ errors: ['REQUIRED_EVIDENCE_MISSING: X/answers/CR-07/evidence/report.csv is not a regular file', 'no test run reported'], warnings: [] });
+  const r = await s.shipOne({ backlogItemKey: 'CR-07' });
+  assert.equal(gated, false);
+  assert.equal(r.stage, 'preflight');
+  assert.deepEqual(r.errors.map(e => e.split(':')[0]), ['REQUIRED_EVIDENCE_MISSING'], 'gate-dependent errors are not reported early');
+});

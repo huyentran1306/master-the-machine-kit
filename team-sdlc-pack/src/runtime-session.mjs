@@ -1819,12 +1819,16 @@ export class RuntimeSession {
           const ref = `evidence/${name}`;
           const file = `${folder}/answers/${id}/${ref}`;
           const object = await G.git(cwd, ['ls-tree', sha, '--', file]);
-          if (!/^100(?:644|755) blob /m.test(object.stdout)) errors.push(`REQUIRED_EVIDENCE_MISSING: ${file} is not a regular file in commit ${sha.slice(0, 12)}; add answers/${id}/${ref} and commit it.`);
+          // TMNXWBA9 CR-07: refused at 11:06:16 for a missing evidence CSV, 22 s before its deadline, and scored nothing.
+          // In the item's last 3 minutes the rest of the evidence still scores: ship with a warning.
+          const lastMinutes = (() => { const l = it ? effectiveLeft(it, this.now(), this.match.endsAt).left : null; return l != null && l <= 3; })();
+          const report = (m) => (lastMinutes ? warnings.push(`DEADLINE_PARTIAL: ${m}`) : errors.push(m));
+          if (!/^100(?:644|755) blob /m.test(object.stdout)) report(`REQUIRED_EVIDENCE_MISSING: ${file} is not a regular file in commit ${sha.slice(0, 12)}; add answers/${id}/${ref} and commit it.`);
           if (!refs.has(ref)) {
             const message = `REQUIRED_EVIDENCE_UNREFERENCED: add "${ref}" to at least one evidence array in answers/${id}/submit.json and commit it.`;
             // Only test-case evidence must be cited; a saved data file just has to exist.
             if (reference === false) warnings.push(message.replace('REQUIRED_EVIDENCE_UNREFERENCED', 'EVIDENCE_NOT_CITED'));
-            else errors.push(message);
+            else report(message);
           }
         }
         // Compare against the revision the match started from, not the moving branch head.
@@ -2796,6 +2800,17 @@ export class RuntimeSession {
       if (!r.ok) return this.clean({ ok: false, stage: 'integrate', error: r.error, message: r.message, conflicts: r.conflicts, steps, next: r.next || 'Resolve as the integrate result says, then ship again.' });
     }
     const wt = it.local.worktree;
+    // Answer/evidence problems do not depend on the gate: find them before spending 20 s-2 min in it, so the worker gets
+    // them back while it still has time (TMNXWBA9 CR-07 learned of a missing evidence file only after its gate).
+    if (!force && wt?.integratedSha && typeof this.preflight === 'function') {
+      const pre = await until(this.preflight(id, wt.integratedSha, {}), Date.now() + 15000).catch(() => null);
+      const early = (pre?.errors || []).filter(e => /^(REQUIRED_EVIDENCE_|UNSCORABLE_ANSWER|NO_ITEM_TEXT|BASELINE_TEST_CHANGED|BASELINE_MIGRATION_CHANGED|ANSWER_)/.test(String(e)));
+      if (early.length) {
+        steps.push({ step: 'preflight', ok: false, errors: early.length });
+        return this.clean({ ok: false, stage: 'preflight', error: 'SUBMIT_REFUSED', errors: early, steps,
+          next: `Before the gate: send ${id}'s worker these errors to fix in its worktree, commit, reply READY; then ship ${id} again. Ship other READY items now.` });
+      }
+    }
     // Under ~90 s to an item deadline a gate (~20-40 s) plus push and submit no longer fits: submit the worker-verified
     // commit untested instead of missing the deadline inside the gate (APBLZN38 PI-02/TASK-07/CR-08).
     const leftAtGate = effectiveLeft(it, this.now(), this.match.endsAt).left;

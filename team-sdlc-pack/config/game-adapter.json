@@ -92,6 +92,7 @@
         "gpt-6.1-sol"
       ],
       "cr": [
+        "gpt-6.1-terra",
         "gpt-6.1-sol"
       ],
       "answerOnly": [
@@ -99,12 +100,15 @@
         "gpt-6.1-sol"
       ],
       "answerOnlySource": [
+        "gpt-6.1-terra",
         "gpt-6.1-sol"
       ],
       "code": [
+        "gpt-6.1-terra",
         "gpt-6.1-sol"
       ],
       "retry": [
+        "gpt-6.1-terra",
         "gpt-6.1-sol"
       ]
     }

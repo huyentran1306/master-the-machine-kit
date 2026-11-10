@@ -48,18 +48,20 @@ const PLAYBOOK = { PI: 'backlog-pi', BUG: 'backlog-bug', CR: 'backlog-cr', TASK:
 const IDLE_WORKER_MS = 4 * 60000;
 const MAX_RESPAWNS = 2;
 const DEFAULT_WORKER_MODELS = {
+  // TMNXWBA9 (Plus window): Terra workers scored full points (BUG-12 70/70, TASK-11 70/70, TASK-12 45/45) at about
+  // half Sol's usage, and the all-Sol code lanes ran the 5-hour window out with 5 minutes left. Default: Terra
+  // everywhere except PI (ranked by submit order, exact-match fields), which keeps Sol until the budget gets tight.
   pi: ['gpt-6.1-sol'],
-  cr: ['gpt-6.1-sol'],
+  cr: ['gpt-6.1-terra', 'gpt-6.1-sol'],
   answerOnly: ['gpt-6.1-terra', 'gpt-6.1-sol'],
-  answerOnlySource: ['gpt-6.1-sol'],
-  code: ['gpt-6.1-sol'],
-  retry: ['gpt-6.1-sol'],
+  answerOnlySource: ['gpt-6.1-terra', 'gpt-6.1-sol'],
+  code: ['gpt-6.1-terra', 'gpt-6.1-sol'],
+  retry: ['gpt-6.1-terra', 'gpt-6.1-sol'],
 };
-// Usage-budget tiers (see usage-budget.mjs): when the 5-hour window is projected past ~85% by the end of the match,
-// new workers move to cheaper models; past ~92% everything but PI goes to the cheapest. PI keeps the stronger model
-// longest: its points are ranked by submit order and every field is exact-match.
+// Usage-budget tiers (see usage-budget.mjs): projected past ~85% by the end of the match -> PI moves to Terra and
+// answer-only items to Luna; past ~92% everything but PI goes to Luna.
 const TIGHT_WORKER_MODELS = {
-  pi: ['gpt-6.1-sol'], cr: ['gpt-6.1-terra', 'gpt-6.1-sol'], code: ['gpt-6.1-terra', 'gpt-6.1-sol'], retry: ['gpt-6.1-terra', 'gpt-6.1-sol'],
+  pi: ['gpt-6.1-terra', 'gpt-6.1-sol'], cr: ['gpt-6.1-terra', 'gpt-6.1-sol'], code: ['gpt-6.1-terra', 'gpt-6.1-sol'], retry: ['gpt-6.1-terra', 'gpt-6.1-sol'],
   answerOnlySource: ['gpt-6.1-terra', 'gpt-6.1-sol'], answerOnly: ['gpt-6-luna', 'gpt-6.1-terra'],
 };
 const CRITICAL_WORKER_MODELS = {

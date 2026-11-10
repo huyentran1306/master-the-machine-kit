@@ -218,19 +218,19 @@ test('worker model routing protects PI, avoids Luna by default, and falls back s
   s.adapter = DEFAULT_ADAPTER;
   const it = (type = 'TASK', dispatches = 1) => ({ id: 'X-1', type, local: { dispatches } });
   s.modelPolicy = { orchestratorModel: 'gpt-6.1-sol', allowedModels: ['gpt-6-luna', 'gpt-6.1-terra', 'gpt-6.1-sol'] };
-  assert.equal(s.workerModel(it('PI'), { answerOnly: true }), 'gpt-6.1-sol');
-  assert.equal(s.workerModel(it('CR'), {}), 'gpt-6.1-sol');
-  assert.equal(s.workerModel(it(), { answerOnly: true }), 'gpt-6.1-terra', 'answer-only items run on Terra (half the usage of Sol)');
-  assert.equal(s.workerModel({ ...it(), local: { dispatches: 1, answerSource: true } }, { answerOnly: true }), 'gpt-6.1-sol');
-  assert.equal(s.workerModel(it(), {}), 'gpt-6.1-sol', 'final run: code workers use sol too');
-  assert.equal(s.workerModel(it('TASK', 2), { answerOnly: true }), 'gpt-6.1-sol');
+  assert.equal(s.workerModel(it('PI'), { answerOnly: true }), 'gpt-6.1-sol', 'PI keeps Sol');
+  assert.equal(s.workerModel(it('CR'), {}), 'gpt-6.1-terra');
+  assert.equal(s.workerModel(it(), { answerOnly: true }), 'gpt-6.1-terra');
+  assert.equal(s.workerModel({ ...it(), local: { dispatches: 1, answerSource: true } }, { answerOnly: true }), 'gpt-6.1-terra');
+  assert.equal(s.workerModel(it(), {}), 'gpt-6.1-terra', 'code workers on Terra');
+  assert.equal(s.workerModel(it('TASK', 2), { answerOnly: true }), 'gpt-6.1-terra');
   // Usage budget: projected past 85% -> cheaper models for new workers; past 92% -> cheapest, PI keeps Terra/Sol.
   const tierAt = (usage, base) => { s.usageCache = null; s.phase = 'GAME'; s.state = { usageBase: base }; s.match = { endsAt: 40 * 60000 }; s.now = () => 10 * 60000; s.readUsage = () => usage; };
   tierAt({ usedPercent: 40 }, { pct: 0, at: 0 }); // 40% after 10 of 40 minutes -> projected 160%
   assert.equal(s.usageBudget().tier, 1);
   assert.equal(s.workerModel(it('CR'), {}), 'gpt-6.1-terra');
   assert.equal(s.workerModel(it(), { answerOnly: true }), 'gpt-6-luna');
-  assert.equal(s.workerModel(it('PI'), { answerOnly: true }), 'gpt-6.1-sol', 'PI keeps Sol while the window is only tight');
+  assert.equal(s.workerModel(it('PI'), { answerOnly: true }), 'gpt-6.1-terra', 'PI moves to Terra when the window is tight');
   tierAt({ usedPercent: 93 }, { pct: 0, at: 0 });
   assert.equal(s.usageBudget().tier, 2);
   assert.equal(s.workerModel(it(), {}), 'gpt-6-luna');

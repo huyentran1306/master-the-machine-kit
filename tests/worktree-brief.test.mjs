@@ -711,7 +711,7 @@ test('dispatch_ready dispatches every open item in one call and respawns workers
     assert.match(task(sp), /briefFile .*\.json/); assert.match(task(sp), /ports dev=\d+/);
     assert.doesNotMatch(task(sp), /RESUME/);
     assert.equal(sp.reasoningEffort, ['PI-33', 'TASK-34'].includes(sp.id) && s.items.get(sp.id).local.answerOnly !== false ? sp.reasoningEffort : 'medium');
-    assert.equal(sp.model, 'gpt-6.1-sol'); // final run: every lane uses sol
+    assert.equal(sp.model, sp.id.startsWith('PI-') ? 'gpt-6.1-sol' : 'gpt-6.1-terra'); // PI on Sol, other lanes on Terra
   }
   assert.ok(first.spawn.every(sp => ['low', 'medium'].includes(sp.reasoningEffort)));
   assert.equal(first.spawn.find(sp => sp.id === 'BUG-31').reasoningEffort, 'medium');
@@ -738,7 +738,7 @@ test('dispatch_ready dispatches every open item in one call and respawns workers
   for (const sp of again.spawn) {
     assert.match(task(sp), /^RESUME: the previous worker/);
     assert.ok(['high', 'medium'].includes(sp.reasoningEffort), 'a re-dispatch never drops below medium');
-    assert.equal(sp.model, 'gpt-6.1-sol', 'a re-dispatch uses the retry model');
+    assert.equal(sp.model, 'gpt-6.1-terra', 'a re-dispatch uses the retry model');
     assert.match(sp.taskName, /r2$/);
     assert.equal(s.items.get(sp.id).local.worktree.ports.dev, portsBefore[sp.id]);
     assert.equal(s.items.get(sp.id).local.orphaned, undefined);

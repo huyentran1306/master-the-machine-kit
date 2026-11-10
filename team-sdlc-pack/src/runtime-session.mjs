@@ -1821,6 +1821,11 @@ export class RuntimeSession {
         // Compare against the revision the match started from, not the moving branch head.
         const baseline = this.environmentRevision || this.state.envReady?.revision;
         const submittedRevisions = [...this.items.values()].filter((x) => x.id !== id && isSubmitted(x) && x.local?.revision).map((x) => x.local.revision);
+        // APBLZN38: TASK-08's baseline-test edits reached main at 09:09, CR-07/PI-03/BUG-11 integrated on top and were
+        // refused as BASELINE_TEST_CHANGED until TASK-08 had a receipt (09:14); CR-07 and PI-03 missed their deadlines.
+        // A test file exactly as main had it before this item was integrated is another item's change, not this one's.
+        const mainBefore = this.items.get(id)?.local?.worktree?.mainBefore;
+        if (mainBefore) submittedRevisions.push(mainBefore);
         const guarded = await guardBaseline({ cwd, folder, sha, baseline, answer, submittedRevisions });
         const { errors: guardErrors, ...touched } = guarded;
         touchedBaseline = touched;

@@ -18,7 +18,7 @@ description: Dispatches all game items to workers, integrates, gates, pushes and
 12. Never view_image, print item diffs or dump logs. Use `git diff --stat`, exit codes and `Get-Content -Tail 15` / `Select-String` summaries.
 13. NEED_INFO: after all returned spawns and READY submissions, tell the worker to run its own `mtm-query` command (no approval round trip). Call match_mcp yourself only when that command reports failure. Never manually relay a query the worker can run; never submit BLOCKED/all-NOT_RUN/FAIL/zero while time remains.
 14. Heavy items are deferred by the helper as HEAVY_DEFERRED. This is not an error: never call start_work for them, never wait on them, and spawn them only when configure/dispatch/wait/ship returns a spawn entry.
-15. PI NEED_INFO is the first relay, but still comes after spawning newly returned entries and shipping an imminent-deadline/READY PI; tell it to use the mtm-query command in its task.
+15. PI NEED_INFO is the first relay, but still comes after spawning newly returned entries and shipping an imminent-deadline/READY PI; tell it to use the mtm-query command in its task, with `--all` for a truncated log service (the kit then fetches every matching entry into a file).
 
 # Dispatch
 Prioritize passed points, then speed, then credits. Start from configure_session's view without a redundant refresh. Restore NEED_PREPARE_INPUT once with the prior lifecycle input. Never end the turn while the match runs.

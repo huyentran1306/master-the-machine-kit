@@ -32,7 +32,7 @@ import { McpHttpClient, resultText } from './mcp-http.mjs';
 import { buildChecklist, looksLikeTestOutput } from './checklist.mjs';
 import { writeItemBrief, answerNeedsSource, answerNeedsImage } from './item-brief.mjs';
 import { extractRequiredEvidence, evidenceArrayRefs, unscorableAnswer } from './required-evidence.mjs';
-import { collectMcpMaterial, purpose as materialPurpose } from './mcp-material.mjs';
+import { collectMcpMaterial, exhaustiveLogSearch, purpose as materialPurpose } from './mcp-material.mjs';
 import { until, SUBMIT_LIMITS } from './deadline.mjs';
 import { readCodexUsage, usageTier } from './usage-budget.mjs';
 import {
@@ -296,6 +296,11 @@ export class RuntimeSession {
         const tool = tools.find(t => t.name === q.tool);
         const kind = tool && materialPurpose(tool);
         if (!tool || !kind) throw Object.assign(new Error(`Only advertised read-only material tools are allowed (${tools.filter(t => materialPurpose(t)).map(t => t.name).join(', ') || 'none advertised'}).`), { code: 'TOOL_NOT_READ_ONLY' });
+        if (q.all === true && kind === 'logs') {
+          writeJson(responseFile, await this.exhaustiveForWorker(it, tool, q, priority));
+          try { fs.unlinkSync(claimedFile); } catch { /* next poll */ }
+          return;
+        }
         const result = await this.workerMaterialCall({ action: 'call', name: q.tool, args: q.args || {}, raw: true }, priority);
         // Follow-up query results must remain visible in the compact digest.  Raw
         // per-service log captures are otherwise intentionally elided there in
@@ -2570,11 +2575,11 @@ export class RuntimeSession {
       // such call is a model turn that re-sends ~60k tokens of context. Usage, not reasoning, ran the account out.
       const testChange = 'Existing tests: prefer new test files; if you modify or delete an existing test file, add a line `TEST-CHANGE <path>: <item ID or KB/spec source>` to the answer analysis/risks field, or the submission is refused. '
       const frugal = 'Usage: start long commands (builds, suites, e2e) with yield_time_ms of at least 30000 and wait with the same; the call returns as soon as the command ends, so never poll every second. Read large files with rg or sed -n ranges and a max_output_tokens cap; cat only the task and digest files named here. ';
-      const piQueryGuide = it.type === 'PI' ? `Log queries: do not query a service marked complete in the digest; otherwise narrow with a timestamp prefix copied from a real entry, never a guessed ID, and use at most about 30 queries. ` : '';
+      const piQueryGuide = it.type === 'PI' ? `Log queries: do not query a service marked complete in the digest. For a truncated service add --all to your mtm-query command, with --service and the words that define what you need (a message type, release tag or ID): it fetches every matching entry into a file you aggregate with node or jq. Never guess IDs; at most about 30 queries. ` : '';
       const entry = {
         id: r.id, type: it.type, answerOnly: !!c.answerOnly,
         taskName: `${r.id.toLowerCase().replace(/[^a-z0-9]/g, '')}${it.local.dispatches > 1 ? `r${it.local.dispatches}` : ''}`,
-        message: `${resumeText}${baselineFixText}${baselineWaitText}${doEverything}${mutationGuide}${piQueryGuide}${testChange}${frugal}${safetyText}${readyText}Item ${r.id} (${it.type}${c.answerOnly ? ', answer-first hint' : ''}).${c.answerOnly ? ` FAST PATH (points drop with every minute${it.type === 'PI' ? ', PI is ranked by submit order: every turn counts' : ''}). No preamble, no progress or send_message updates. 1) ${answerRead} 2) Decide every field (UTC-normalise mixed offsets, dedupe retries, keep corrected entries, ignore decoys), then write ${c.answer?.submitJson || 'submit.json'} in one edit, keeping every template key. 3) For SCOPE: answer run \`${c.finishAnswer || c.validateAnswer}\`${c.finishAnswer ? ' (validates the schema and commits the answer folder); on ANSWER INVALID fix and rerun' : ', then commit'}; for SCOPE: answer+code run the relevant tests and commit code, tests and answer together instead${it.type === 'PI' ? ' (PI: whatever the item asks for, such as a build, browser check or evidence, is done; beyond that run only the tests for the changed code and the typecheck, since the gate rolls back a type error even in a test file; no full suite, full build or reinstall. Save that test output as evidence/test.log and cite it in submit.json: a code change without a test log is refused)' : ''}. 4) Reply with the STATUS block including SCOPE. Only if your mtm-query command cannot answer, reply NEED_INFO: <what> (logs: service + narrowing word). No extra evidence unless requiredEvidence lists it (a code change still needs its test log); never install validators.` : `${c.brief?.digestPath ? ` Item text, KB articles, test data and logs: read ${c.brief.digestPath}, not the raw files/mcp/*.json.` : ''}${c.brief?.likelyFilesPath ? ` Code search: start from ${c.brief.likelyFilesPath} (files ranked by this item's words, with symbols, imports and related tests); confirm with \`rg -n -m 20 <term> <those paths>\` before any repo-wide search.` : ''}${queryCmd ? ` If a fact (KB rule, log line, test data) is missing, query it yourself with \`${queryCmd}\`; NEED_INFO only if the read tool cannot answer.` : ''} Check the answer with \`${c.validateAnswer}\` (no installs). Builds, full test suites and browser/e2e runs: \`node "${BUILD_LOCK}" --slots ${this.adapter.parallel.maxHeavySteps || 2} --max-wait-ms ${heavyWaitMs} -- <command>\` (takes a free slot itself; after ${Math.round(heavyWaitMs / 1000)} s it runs anyway; never ask the orchestrator for build_slot). Single test files run directly. Stop dev servers and browsers as soon as the evidence is captured. Redirect long output (builds, full suites, image tools such as sips) to a file under .mtm-notes/ and print only its last 20 lines.`} checkoutRoot = worktreeRoot = ${c.worktreeRoot}; folder ${c.folder}; matchRoot ${c.matchRoot}; briefFile ${c.brief?.briefFile}; filesDir ${c.brief?.filesDir}; answer ${c.answer?.submitJson || ''} (evidence in ${c.answer?.evidenceDir || ''}); ports dev=${c.ports?.dev} production=${c.ports?.production} (override fixed runner ports). ${c.answerOnly && c.brief?.digestPath ? 'Start with digestPath; if the requirements need app changes, then read briefFile and its code-lifecycle material.' : 'Read briefFile first: it has the commands, playbook, checklist and organizer files.'} Work only in this worktree. Stop and return by ${stop} (Game Master clock). Commit the complete item (code, tests, evidence, answer) and reply STATUS READY or PARKED with COMMIT <sha> and SCOPE. Never push, submit, delegate or call Game APIs.`,
+        message: `${resumeText}${baselineFixText}${baselineWaitText}${doEverything}${mutationGuide}${piQueryGuide}${testChange}${frugal}${safetyText}${readyText}Item ${r.id} (${it.type}${c.answerOnly ? ', answer-first hint' : ''}).${c.answerOnly ? ` FAST PATH (${it.type === 'PI' ? 'PI is ranked by submit order, but one place costs only 10-25% while an empty or guessed field loses its whole share: fill every field from complete data, then submit at once' : 'points drop with every minute'}). No preamble, no progress or send_message updates. 1) ${answerRead} 2) Decide every field (UTC-normalise mixed offsets, dedupe retries, keep corrected entries, ignore decoys), then write ${c.answer?.submitJson || 'submit.json'} in one edit, keeping every template key. 3) For SCOPE: answer run \`${c.finishAnswer || c.validateAnswer}\`${c.finishAnswer ? ' (validates the schema and commits the answer folder); on ANSWER INVALID fix and rerun' : ', then commit'}; for SCOPE: answer+code run the relevant tests and commit code, tests and answer together instead${it.type === 'PI' ? ' (PI: whatever the item asks for, such as a build, browser check or evidence, is done; beyond that run only the tests for the changed code and the typecheck, since the gate rolls back a type error even in a test file; no full suite, full build or reinstall. Save that test output as evidence/test.log and cite it in submit.json: a code change without a test log is refused)' : ''}. 4) Reply with the STATUS block including SCOPE. Only if your mtm-query command cannot answer, reply NEED_INFO: <what> (logs: service + narrowing word). No extra evidence unless requiredEvidence lists it (a code change still needs its test log); never install validators.` : `${c.brief?.digestPath ? ` Item text, KB articles, test data and logs: read ${c.brief.digestPath}, not the raw files/mcp/*.json.` : ''}${c.brief?.likelyFilesPath ? ` Code search: start from ${c.brief.likelyFilesPath} (files ranked by this item's words, with symbols, imports and related tests); confirm with \`rg -n -m 20 <term> <those paths>\` before any repo-wide search.` : ''}${queryCmd ? ` If a fact (KB rule, log line, test data) is missing, query it yourself with \`${queryCmd}\`; NEED_INFO only if the read tool cannot answer.` : ''} Check the answer with \`${c.validateAnswer}\` (no installs). Builds, full test suites and browser/e2e runs: \`node "${BUILD_LOCK}" --slots ${this.adapter.parallel.maxHeavySteps || 2} --max-wait-ms ${heavyWaitMs} -- <command>\` (takes a free slot itself; after ${Math.round(heavyWaitMs / 1000)} s it runs anyway; never ask the orchestrator for build_slot). Single test files run directly. Stop dev servers and browsers as soon as the evidence is captured. Redirect long output (builds, full suites, image tools such as sips) to a file under .mtm-notes/ and print only its last 20 lines.`} checkoutRoot = worktreeRoot = ${c.worktreeRoot}; folder ${c.folder}; matchRoot ${c.matchRoot}; briefFile ${c.brief?.briefFile}; filesDir ${c.brief?.filesDir}; answer ${c.answer?.submitJson || ''} (evidence in ${c.answer?.evidenceDir || ''}); ports dev=${c.ports?.dev} production=${c.ports?.production} (override fixed runner ports). ${c.answerOnly && c.brief?.digestPath ? 'Start with digestPath; if the requirements need app changes, then read briefFile and its code-lifecycle material.' : 'Read briefFile first: it has the commands, playbook, checklist and organizer files.'} Work only in this worktree. Stop and return by ${stop} (Game Master clock). Commit the complete item (code, tests, evidence, answer) and reply STATUS READY or PARKED with COMMIT <sha> and SCOPE. Never push, submit, delegate or call Game APIs.`,
       };
       entry.reasoningEffort = this.workerEffort(it, c);
       const model = this.workerModel(it, c);
@@ -2880,10 +2885,27 @@ export class RuntimeSession {
     const porcelain = await G.statusPorcelain(wt.worktreeRoot);
     const dirty = porcelain ? workerDirtyFiles(porcelain) : [];
     if (dirty.length) errors.push(`WORKER_DIRTY: commit what belongs to the item and delete the rest: ${dirty.slice(0, 8).map(l => String(l).slice(3).trim()).join(', ')}`);
-    let pre = null;
-    try { pre = await until(this.preflight(id, sha, { base: wt.retryBaseSha || wt.baseSha, skipPushed: true }), Date.now() + 20000); } catch { pre = null; }
+    const base = wt.retryBaseSha || wt.baseSha;
+    const [pre, conflict, types] = await Promise.all([
+      until(this.preflight(id, sha, { base, skipPushed: true }), Date.now() + 20000).catch(() => null),
+      this.predictConflict(wt, sha).catch(() => null),
+      dirty.length ? null : this.workerTypecheck(it, wt, sha, base).catch(() => null),
+    ]);
     errors.push(...(pre?.errors || []).filter(e => WORKER_FIXABLE.test(String(e))).map(e => oneLine(String(e), 400)));
     const warnings = (pre?.warnings || []).slice(0, 4).map(w => oneLine(String(w), 300));
+    if (conflict) errors.push(`CONFLICT_WITH_MAIN: ${conflict.files.join(', ')} also changed on main since your worktree was made. Run \`git -C "${wt.worktreeRoot}" rebase ${conflict.mainHead}\`, keep both changes, rerun your tests and commit.`);
+    if (types) errors.push(...types.errors.map(e => `TYPECHECK: ${e}`), `TYPECHECK: full output in ${types.log}; the integration gate rolls back type errors, even in test files.`);
+    // PI: an empty field scores nothing, while one place in the submit order costs 10-25%. Ask once per commit; the same
+    // commit sent again (the data truly is not there) or the last 2 minutes before the stop time pass with a warning.
+    if (it.type === 'PI' && pre?.answer) {
+      const empty = emptyAnswerFields(pre.answer);
+      if (empty.length) {
+        const stopIn = Number.isFinite(it.local.workerStopAt) ? (it.local.workerStopAt - this.now()) / 60000 : null;
+        const text = `ANSWER_FIELDS_EMPTY: ${empty.slice(0, 6).join(', ')}. An empty field scores nothing, one place in the submit order costs only 10-25%: fetch the data (mtm-query with --all for logs) and fill them, or run this command again unchanged if the data truly is not there.`;
+        if (it.local.emptyFieldsAsked === sha || stopIn != null && stopIn < 2) warnings.push(text);
+        else { it.local.emptyFieldsAsked = sha; errors.push(text); }
+      }
+    }
     if (errors.length) {
       it.local.readyRefusals = (it.local.readyRefusals || 0) + 1; this.saveState();
       return { ok: false, error: 'NOT_READY', sha, errors, warnings, next: 'Fix every error in this worktree, commit, and run this command again. Then reply STATUS READY.' };
@@ -2923,6 +2945,75 @@ export class RuntimeSession {
     }
     this.relayCalls.push(now);
     return null;
+  }
+
+  /** mtm-query --all on a log tool: every matching entry, written to a file in the item's brief folder (TMNXWBA9 PI-02/PI-03). */
+  async exhaustiveForWorker(it, tool, q, priority) {
+    const props = tool.inputSchema?.properties || {};
+    const args = q.args || {};
+    const pick = (re) => { const k = Object.keys(props).find(x => re.test(String(x).toLowerCase())); return k != null && args[k] != null ? args[k] : null; };
+    const query = String(args.query ?? args.q ?? pick(/^(?:q|query|search|text|terms|keywords)$/) ?? '').trim();
+    const service = args.service ?? pick(/^(?:service|source|component|app|application)$/) ?? null;
+    const r = await exhaustiveLogSearch(tool, (a) => this.workerMaterialCall({ action: 'call', name: tool.name, args: a, raw: true }, priority), { service, query, callCap: 120, budgetMs: 75000 });
+    if (!r.ok) return { ok: false, error: r.error, calls: r.calls, next: 'The log search failed; retry once, then answer from the digest and state the gap.' };
+    const dir = path.join(this.itemMatchRoot(it.id) || this.checkoutRoot, '.mtm-briefs', it.id);
+    fs.mkdirSync(dir, { recursive: true });
+    const slug = `${service || 'all'}-${query || 'all'}`.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60) || 'all';
+    const file = path.join(dir, `logs-all-${slug}.json`);
+    writeJson(file, { service, query, total: r.total, fetched: r.fetched, complete: r.complete, reason: r.reason, calls: r.calls, entries: r.entries });
+    return { ok: true, item: it.id, tool: tool.name, service, query, total: r.total, fetched: r.fetched, complete: r.complete, reason: r.reason, calls: r.calls, file,
+      next: r.complete ? `All ${r.total} matching entries are in ${file}, oldest first. Aggregate them with node or jq; do not print the whole file.`
+        : `${r.fetched} of ${r.total} entries are in ${file} (${r.reason}). Run --all again with one more word (a release tag, ID or day) for the rest, or state the gap in the answer.` };
+  }
+
+  /**
+   * Would the worker's commits still cherry-pick onto current main? Tested without touching main or the worktree (git
+   * merge-tree), so the worker rebases while it still runs instead of after an integrate CONFLICT relayed by the
+   * orchestrator (TMNXWBA9 CR-05 against CR-07 in FinancesApp.tsx).
+   */
+  async predictConflict(wt, sha) {
+    if (!this.checkoutRoot || !wt || wt.retryBaseSha || wt.integratedWorkerSha) return null; // after a rollback or refusal the range differs: integrate decides
+    const mainHead = await G.revParse(this.checkoutRoot, 'HEAD');
+    if (!mainHead || mainHead === wt.baseSha || await G.isAncestor(this.checkoutRoot, mainHead, sha)) return null;
+    let files = null;
+    const modern = await G.git(this.checkoutRoot, ['merge-tree', '--write-tree', '--name-only', '--no-messages', mainHead, sha], { timeoutMs: 15000 });
+    if (modern.code === 0) return null;
+    if (modern.code === 1) files = modern.stdout.split(/\r?\n/).slice(1).map(s => s.trim()).filter(Boolean);
+    else { // git before 2.38: the three-way "trivial merge" output marks conflicts inline
+      const base = (await G.git(this.checkoutRoot, ['merge-base', mainHead, sha])).stdout.trim();
+      if (!base) return null;
+      const legacy = await G.git(this.checkoutRoot, ['merge-tree', base, mainHead, sha], { timeoutMs: 15000 });
+      if (legacy.code !== 0) return null;
+      files = legacyMergeTreeConflicts(legacy.stdout);
+    }
+    return files?.length ? { files: [...new Set(files)].slice(0, 8), mainHead } : null;
+  }
+
+  /**
+   * Typecheck the worker's own copy before READY. TMNXWBA9 PI-04: its tests passed, but three strict-mode errors in a new
+   * test file rolled it back at the main gate (11:12:57) and its 90 points were lost. Only errors naming a file the item
+   * changed count; time-boxed; skipped in an item's last 3 minutes, when there is no time left to fix anyway.
+   */
+  async workerTypecheck(it, wt, sha, base) {
+    const cfg = { typecheck: true, timeoutSec: 75, ...(this.adapter?.readyCheck || {}) };
+    if (!cfg.typecheck || !this.checkoutRoot || !wt?.matchRoot) return null;
+    const left = effectiveLeft(it, this.now(), this.match.endsAt).left;
+    if (left != null && left <= 3) return null;
+    const scope = await this.integratedChangeScope(it, sha, base);
+    if (!scope.codeChanged) return null;
+    const appDir = this.appPath && this.matchRoot ? path.join(wt.matchRoot, path.relative(this.matchRoot, this.appPath)) : wt.matchRoot;
+    if (!fs.existsSync(appDir)) return null;
+    const { types } = gateCommands(appDir, { recon: this.commands || {} });
+    if (!types) return null;
+    const notes = path.join(this.checkoutRoot, '.mtm-notes'); fs.mkdirSync(notes, { recursive: true });
+    const logFile = path.join(notes, `ready-${it.id}-types.log`);
+    const env = { ...process.env, ...PNPM_SAFE_ENV, FORCE_COLOR: '0', NO_COLOR: '1' }; delete env.NODE_TEST_CONTEXT;
+    const ty = await runBounded(types, { cwd: appDir, env, timeoutMs: cfg.timeoutSec * 1000, logFile });
+    if (!assertionFailure(ty, 'types')) return null; // green, timed out or tooling trouble: the main gate decides
+    const touched = new Set(scope.codeFiles.map(f => path.basename(f)));
+    const ours = String(ty.text || '').split('\n').filter(l => /error TS\d+/.test(l))
+      .filter(l => { const m = l.match(/([\w./@-]+\.[cm]?[jt]sx?)[(:]\d+/); return m && touched.has(path.basename(m[1])); });
+    return ours.length ? { errors: ours.slice(0, 6).map(l => oneLine(l.trim(), 240)), log: logFile } : null;
   }
 
   enqueueShip(id, work) {
@@ -3610,3 +3701,29 @@ function unlinkDependencies(root) {
 
 // Test-only access to module-private helpers.
 export const __test = { linkDependencies, unlinkDependencies };
+
+/** Files a pre-2.38 `git merge-tree <base> <ours> <theirs>` (trivial merge) reports with conflict markers. */
+export function legacyMergeTreeConflicts(text = '') {
+  const sections = []; let cur = null;
+  for (const line of String(text).split('\n')) {
+    if (line && !/^[ +\-@\\]/.test(line)) { cur = { paths: [], conflict: false }; sections.push(cur); continue; }
+    if (!cur) continue;
+    const m = line.match(/^ {2}(?:base|our|their|result)\s+\d+\s+[0-9a-f]+\s+(.+)$/);
+    if (m) cur.paths.push(m[1]);
+    if (/^\+<{7} /.test(line)) cur.conflict = true;
+  }
+  return [...new Set(sections.filter(s => s.conflict).flatMap(s => s.paths))];
+}
+
+/** Answer fields still empty ("" / null / []), skipping evidence lists and bookkeeping keys. */
+export function emptyAnswerFields(answer, prefix = '') {
+  const out = [];
+  if (!answer || typeof answer !== 'object' || Array.isArray(answer)) return out;
+  for (const [k, v] of Object.entries(answer)) {
+    if (/^(?:schemaVersion|backlogId|status)$/.test(k) || /evidence|attachment|screenshot|note|risk|reference|link/i.test(k)) continue;
+    const key = prefix ? `${prefix}.${k}` : k;
+    if (v == null || (typeof v === 'string' && !v.trim()) || (Array.isArray(v) && !v.length)) out.push(key);
+    else if (typeof v === 'object' && !Array.isArray(v)) out.push(...emptyAnswerFields(v, key));
+  }
+  return out;
+}

@@ -7,7 +7,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { RuntimeSession } from '../team-sdlc-pack/src/runtime-session.mjs';
+import { RuntimeSession, legacyMergeTreeConflicts, emptyAnswerFields } from '../team-sdlc-pack/src/runtime-session.mjs';
+import { exhaustiveLogSearch } from '../team-sdlc-pack/src/mcp-material.mjs';
 import { dispatchPolicy, workerDirtyFiles } from '../team-sdlc-pack/src/dispatch.mjs';
 import { sendQuery, readyText } from '../team-sdlc-pack/src/ready-ping.mjs';
 
@@ -30,11 +31,15 @@ function fixture(t) {
   const modeFile = path.join(app, 'node_modules', 'mode');
   for (const [dir, file] of [['vitest', 'vitest.mjs'], ['typescript/bin', 'tsc']]) {
     const d = path.join(app, 'node_modules', dir); fs.mkdirSync(d, { recursive: true });
-    fs.writeFileSync(path.join(d, file), file === 'tsc' ? `console.log('ok')` : `import fs from 'node:fs'; const m=fs.readFileSync(${JSON.stringify(modeFile)},'utf8').trim();
+    fs.writeFileSync(path.join(d, file), file === 'tsc' ? `const fs = require('fs'); const f = ${JSON.stringify(path.join(app, 'node_modules', 'types-mode'))};
+const m = fs.existsSync(f) ? fs.readFileSync(f, 'utf8').trim() : 'ok';
+if (m.startsWith('fail:')) { console.log(m.slice(5) + "(1,7): error TS2322: Type 'string' is not assignable to type 'number'."); process.exit(2); }
+console.log('ok');` : `import fs from 'node:fs'; const m=fs.readFileSync(${JSON.stringify(modeFile)},'utf8').trim();
 if(m==='fail'){console.log(' FAIL x\\n      Tests  1 failed | 2 passed (3)');process.exit(1)}
 console.log(' Test Files  1 passed (1)\\n      Tests  4 passed (4)');`);
   }
   const mode = (m) => fs.writeFileSync(modeFile, m);
+  const typesMode = (m) => fs.writeFileSync(path.join(app, 'node_modules', 'types-mode'), m);
   const ws = path.join(tmp, 'team-workspace'); fs.mkdirSync(ws, { recursive: true }); // the query queue lives outside the match checkout
   const s = new RuntimeSession({ teamWorkspace: ws });
   s.checkoutRoot = root; s.matchRoot = path.join(root, 'assigned'); s.appPath = app; s.repository = { folder: 'assigned', branch: 'main' };
@@ -61,7 +66,13 @@ console.log(' Test Files  1 passed (1)\\n      Tests  4 passed (4)');`);
     if (commit) { git(c.worktreeRoot, 'add', '-A'); git(c.worktreeRoot, 'commit', '-qm', `${id}: fix`); }
     return c;
   };
-  return { s, root, mode, mk, answer, submits };
+  const ready = async (c, id, extra = {}) => {
+    const auth = JSON.parse(fs.readFileSync(path.join(path.dirname(c.brief.briefFile), 'query-token.json'), 'utf8'));
+    const p = sendQuery(auth, { item: id, kind: 'ready', ...extra }, { timeoutMs: 30000, pollMs: 20 });
+    for (let i = 0; i < 400; i += 1) { await s.drainQueryQueue({ only: 'ready' }); const done = await Promise.race([p, sleep(40).then(() => null)]); if (done) return done; }
+    return p;
+  };
+  return { s, root, mode, typesMode, mk, answer, submits, ready };
 }
 
 test('kit-owned files never make a worker copy dirty (TMNXWBA9 TASK-07, CR-08)', () => {
@@ -233,4 +244,111 @@ test('ready requests have their own drain: a hung MCP read never delays a READY 
     assert.equal((await read).error, 'TOOL_NOT_READ_ONLY');
     await waitFor(() => submits.length === 1);
   } finally { clearInterval(ticker); }
+});
+
+// A log server like the match MCP: every query word must appear in the entry, newest 20 first, with the total.
+function logServer(entries, { tokens = false } = {}) {
+  const tok = (s) => String(s).toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  const text = entries.map(e => JSON.stringify(e).toLowerCase());
+  const toks = entries.map(e => new Set(tok(JSON.stringify(e))));
+  let calls = 0;
+  const call = async ({ query = '', service = null }) => {
+    calls += 1;
+    const words = String(query).toLowerCase().split(/\s+/).filter(Boolean);
+    const hit = entries.map((e, i) => i).filter(i => (!service || entries[i].service === service)
+      && words.every(w => tokens ? tok(w).every(t => toks[i].has(t)) : text[i].includes(w)));
+    hit.sort((a, b) => entries[b].ts.localeCompare(entries[a].ts));
+    const page = hit.slice(0, 20).map(i => entries[i]);
+    return { ok: true, raw: { content: [{ type: 'text', text: JSON.stringify({ total: hit.length, returned: page.length, entries: page }) }] } };
+  };
+  return { call, calls: () => calls };
+}
+const LOG_TOOL = { name: 'search_logs', inputSchema: { properties: { query: { type: 'string' }, service: { type: 'string' } } } };
+function scheduleLogs() {
+  const out = []; let seq = 0;
+  for (let day = 1; day <= 30; day += 1) {
+    for (let k = 0; k < 9; k += 1) {
+      seq += 1;
+      const d = `2025-11-${String(day).padStart(2, '0')}`;
+      out.push({ ts: `${d}T${String(6 + k).padStart(2, '0')}:13:00.000Z`, service: 'schedules', level: k % 4 ? 'INFO' : 'WARN', requestId: `req-${seq.toString(36)}x`,
+        message: k % 3 ? 'schedule.posted' : 'schedule.post_failed', context: { release: day < 12 ? '2025.11.3' : '2025.11.4', scheduleId: `SCH-${1001 + (seq % 6)}`, dueDate: d, postedMinor: -1000 * seq } });
+    }
+  }
+  for (let i = 0; i < 60; i += 1) out.push({ ts: `2025-12-${String(1 + (i % 20)).padStart(2, '0')}T21:00:${String(i % 60).padStart(2, '0')}.000Z`, service: 'schedules', level: 'INFO', requestId: `dec-${i}z`, message: 'schedule.posted', context: { release: '2025.12.5', scheduleId: `SCH-${1001 + (i % 6)}`, dueDate: '2025-11-30', postedMinor: -5 } });
+  return out;
+}
+
+test('--all collects every matching log entry by splitting on words from the entries (substring server)', async () => {
+  const srv = logServer(scheduleLogs());
+  const r = await exhaustiveLogSearch(LOG_TOOL, srv.call, { service: 'schedules', query: '2025.11.4 schedule.posted', callCap: 80, budgetMs: 20000 });
+  const want = scheduleLogs().filter(e => e.context.release === '2025.11.4' && e.message === 'schedule.posted').length;
+  assert.equal(r.total, want);
+  assert.equal(r.complete, true, JSON.stringify({ fetched: r.fetched, total: r.total, calls: r.calls, reason: r.reason }));
+  assert.equal(r.fetched, want);
+  assert.ok(r.entries[0].ts < r.entries.at(-1).ts, 'oldest first');
+});
+
+test('--all also works on a whole-word server, and reports what it could not reach', async () => {
+  // Whole-word matching splits "2025-11-13" into 2025/11/13, and every entry here has those words somewhere, so some
+  // days cannot narrow at all; the value splits still reach almost everything within the call cap.
+  const srv = logServer(scheduleLogs(), { tokens: true });
+  const r = await exhaustiveLogSearch(LOG_TOOL, srv.call, { service: 'schedules', query: 'schedule.post_failed', callCap: 120, budgetMs: 20000 });
+  assert.equal(r.total, scheduleLogs().filter(e => e.message === 'schedule.post_failed').length);
+  assert.ok(r.fetched >= r.total * 0.95, JSON.stringify({ fetched: r.fetched, total: r.total, calls: r.calls, reason: r.reason }));
+  assert.equal(r.complete, r.fetched >= r.total);
+  const capped = await exhaustiveLogSearch(LOG_TOOL, logServer(scheduleLogs(), { tokens: true }).call, { service: 'schedules', query: '', callCap: 3, budgetMs: 20000 });
+  assert.equal(capped.complete, false); assert.equal(capped.reason, 'CALL_CAP'); assert.ok(capped.fetched > 20);
+});
+
+test('legacy merge-tree output: only sections with conflict markers count', () => {
+  const out = ['changed in both', '  base   100644 de98 f.txt', '  our    100644 0978 f.txt', '  their  100644 42ef f.txt', '@@ -1,3 +1,7 @@', ' a', '+<<<<<<< .our', ' B-main', '+=======', '+B-worker', '+>>>>>>> .their', ' c',
+    'merged', '  result 100644 b77b g.txt', '  our    100644 587b g.txt', '@@ -1 +1,2 @@', ' x', '+y'].join('\n');
+  assert.deepEqual(legacyMergeTreeConflicts(out), ['f.txt']);
+});
+
+test('ready handshake: a conflict with main and a type error in the item are sent back to the worker', async (t) => {
+  const { s, mk, mode, typesMode, submits, ready, root } = fixture(t);
+  mode('green'); typesMode('ok');
+  const a = await mk('BUG-90');
+  const b = await mk('BUG-91', { commit: false });
+  for (const c of [a, b]) fs.writeFileSync(path.join(c.matchRoot, 'src', 'a.ts'), `export const a = '${c === a ? 'A' : 'B'}';\n`);
+  git(a.worktreeRoot, 'add', '-A'); git(a.worktreeRoot, 'commit', '-qm', 'BUG-90: shared file');
+  git(b.worktreeRoot, 'add', '-A'); git(b.worktreeRoot, 'commit', '-qm', 'BUG-91: shared file');
+  const ra = await ready(a, 'BUG-90');
+  assert.equal(ra.ok, true, JSON.stringify(ra));
+  await waitFor(() => submits.length === 1);
+  const rb = await ready(b, 'BUG-91');
+  assert.equal(rb.error, 'NOT_READY', JSON.stringify(rb));
+  assert.ok(rb.errors.some(e => /^CONFLICT_WITH_MAIN: .*a\.ts/.test(e)), rb.errors.join('\n'));
+  assert.equal(submits.length, 1);
+  const c = await mk('BUG-92');
+  typesMode('fail:src/bug-92.ts');
+  const rc = await ready(c, 'BUG-92');
+  assert.equal(rc.error, 'NOT_READY', JSON.stringify(rc));
+  assert.ok(rc.errors.some(e => /^TYPECHECK: src\/bug-92\.ts\(1,7\): error TS2322/.test(e)), rc.errors.join('\n'));
+  typesMode('fail:src/elsewhere.ts');
+  const rd = await ready(c, 'BUG-92');
+  assert.equal(rd.ok, true, 'an error in a file the item did not touch is not the worker\'s');
+  await waitFor(() => submits.length === 2).catch(() => {});
+  assert.ok(fs.existsSync(path.join(root, '.mtm-notes', 'ready-BUG-92-types.log')));
+});
+
+test('PI handshake asks once for empty answer fields, then lets the same commit through', async (t) => {
+  const { s, mk, mode, submits, ready } = fixture(t);
+  mode('green');
+  const c = await mk('PI-93', { type: 'PI', mins: 20, evidence: false, commit: false });
+  const ans = path.join(c.matchRoot, 'answers', 'PI-93');
+  fs.mkdirSync(path.join(ans, 'evidence'), { recursive: true });
+  fs.writeFileSync(path.join(ans, 'evidence', 'test.log'), TEST_LOG);
+  fs.writeFileSync(path.join(ans, 'submit.json'), JSON.stringify({ backlogId: 'PI-93', status: 'DONE', evidenceFiles: ['evidence/test.log'], firstWrongPostingTs: '', affectedSchedules: [], incidentRecord: { rootCause: 'x', impact: '' } }));
+  git(c.worktreeRoot, 'add', '-A'); git(c.worktreeRoot, 'commit', '-qm', 'PI-93: answer');
+  s.items.get('PI-93').local.workerStopAt = Date.now() + 10 * 60000;
+  const first = await ready(c, 'PI-93');
+  assert.equal(first.error, 'NOT_READY', JSON.stringify(first));
+  assert.ok(first.errors.some(e => /ANSWER_FIELDS_EMPTY: firstWrongPostingTs, affectedSchedules, incidentRecord\.impact/.test(e)), first.errors.join('\n'));
+  const again = await ready(c, 'PI-93');
+  assert.equal(again.ok, true, JSON.stringify(again));
+  assert.ok(again.warnings.some(w => /ANSWER_FIELDS_EMPTY/.test(w)));
+  await waitFor(() => submits.length === 1);
+  assert.deepEqual(emptyAnswerFields({ backlogId: 'X', status: '', evidenceFiles: [], a: 0, b: { c: null, d: 'ok' } }), ['b.c']);
 });

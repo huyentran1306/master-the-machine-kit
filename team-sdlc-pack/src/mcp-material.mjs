@@ -263,10 +263,106 @@ async function sweepLogs(tool, fetchOnly, cutoff, { callCap: baseCap = 150, focu
   return {
     purpose: 'logs', tool: `${tool.name}-merged`, args: { services }, ok: true,
     result: {
-      note: 'Every production log entry the kit could fetch, deduplicated, oldest first. Answer from this file; NEED_INFO only for a service in truncated (narrow it by a word such as an invoice number or requestId).',
+      note: 'Every production log entry the kit could fetch, deduplicated, oldest first. Answer from this file. For a service in truncated, fetch every entry you need with your mtm-query command and --all (e.g. --tool <log tool> --service <s> --query "<words>" --all): it writes all matches to a file; aggregate that file with node or jq instead of reading it whole. NEED_INFO only if --all stays incomplete.',
       unique: entries.length, services, completeServices, truncated, calls, entries,
     },
   };
+}
+
+/**
+ * Every entry matching (service, query), not only the newest page. The scope is split by words taken from the entries the
+ * server returned (shared field values such as message types, IDs and release tags, then calendar days) until every part
+ * fits one page. Completeness is judged by the server's own totals, so it works for substring and whole-word servers
+ * alike, and a word that does not narrow a scope (same total) is not followed. TMNXWBA9: PI-02 answered from 20 of 755
+ * rule-engine entries (42/90 points) and PI-03 found none of its November postings (33/80).
+ */
+export async function exhaustiveLogSearch(tool, call, { service = null, query = '', callCap = 80, budgetMs = 45000, maxEntries = 800, concurrency = 2 } = {}) {
+  const props = tool?.inputSchema?.properties || {};
+  const key = re => Object.keys(props).find(k => re.test(words(k)));
+  const queryKey = key(/^(?:q|query|search|search query|search text|search term|search terms|keywords|terms|text)$/);
+  const serviceKey = key(/^(?:service|service name|services|source|component|app|application)$/);
+  if (!queryKey) return { ok: false, error: 'NO_QUERY_ARGUMENT', calls: 0 };
+  const cutoff = Date.now() + budgetMs;
+  const seen = new Map();
+  let calls = 0;
+  const ask = async (ws) => {
+    if (calls >= callCap || Date.now() >= cutoff || seen.size >= maxEntries) return null;
+    calls += 1;
+    const args = {};
+    if (ws.length) args[queryKey] = ws.join(' ');
+    if (service && serviceKey) args[serviceKey] = service;
+    try { return parseLogResult(await until(call(args), cutoff)); } catch { return null; }
+  };
+  const add = (s, e) => { const k = JSON.stringify(e); seen.set(k, e); for (let x = s; x; x = x.parent) x.got.add(k); };
+  const scope = (ws, parsed, parent) => {
+    const s = { words: ws, total: parsed.total, entries: parsed.entries || [], pageSize: parent?.pageSize || parsed.returned || (parsed.entries || []).length, got: new Set(), parent, tried: new Set(ws.map(w => w.toLowerCase())), done: new Set(), empties: 0 };
+    for (const e of s.entries) add(s, e);
+    return s;
+  };
+  // The unseen entries are the older ones (every page is newest first). So walk back in time from the oldest entry this
+  // scope has collected: that boundary day (a page usually stops inside it), then each day before it, until three
+  // empty days. Then split by values from the page: parts estimated to fit one page first, largest first (fewest calls
+  // for the most entries), then the smallest parts that still need splitting; last the words every returned entry has
+  // (older entries may differ) and the days already seen. One-off IDs only for a tiny scope.
+  const candidates = (s) => {
+    const counts = new Map();
+    // A word whose part was already fetched whole in an enclosing scope cannot add anything here.
+    for (let x = s.parent; x; x = x.parent) for (const w of x.done) s.tried.add(w);
+    const note = (w, kind) => { const k = w.toLowerCase(); if (s.tried.has(k)) return; const c = counts.get(k) || { w, n: 0, kind }; c.n += 1; counts.set(k, c); };
+    for (const e of s.entries) {
+      const walk = (v, depth) => {
+        if (v == null || depth > 3) return;
+        if (typeof v === 'string') {
+          if (/^\d{4}-\d\d-\d\d(?:T|$)/.test(v)) note(v.slice(0, 10), 'day');
+          else if (v.length >= 3 && v.length <= 48 && !/\s/.test(v)) note(v, 'value');
+          return;
+        }
+        if (typeof v === 'object') for (const x of Object.values(v)) walk(x, depth + 1);
+      };
+      walk(e, 0);
+    }
+    const time = [];
+    let oldest = Infinity;
+    for (const k of s.got) { const t = stamp(seen.get(k)); if (t < oldest) oldest = t; }
+    if (Number.isFinite(oldest) && s.empties < 3) {
+      const day0 = Date.parse(`${new Date(oldest).toISOString().slice(0, 10)}T12:00:00Z`);
+      for (let back = 0; back <= 3; back += 1) {
+        const d = new Date(day0 - back * 86400000).toISOString().slice(0, 10);
+        if (!s.tried.has(d)) time.push({ w: d, kind: back ? 'older' : 'boundary', n: 0 });
+      }
+    }
+    const n = Math.max(1, s.entries.length);
+    const page = Math.max(1, s.pageSize || n);
+    const est = c => s.total * c.n / n;
+    const split = [...counts.values()].filter(c => c.kind === 'value' && c.n < n && (c.n >= 2 || n <= 3));
+    const fits = split.filter(c => est(c) <= page).sort((a, b) => est(b) - est(a));
+    const big = split.filter(c => est(c) > page).sort((a, b) => est(a) - est(b));
+    const rest = [...counts.values()].filter(c => !split.includes(c) && !time.some(t => t.w.toLowerCase() === c.w.toLowerCase()) && (c.kind === 'day' || c.n >= n)).sort((a, b) => b.n - a.n);
+    return [...time, ...fits, ...big, ...rest];
+  };
+  const rootParsed = await ask(String(query || '').trim().split(/\s+/).filter(Boolean));
+  if (!rootParsed) return { ok: false, error: 'SEARCH_FAILED', calls };
+  const root = scope(String(query || '').trim().split(/\s+/).filter(Boolean), rootParsed, null);
+  const queue = root.total > root.got.size ? [root] : [];
+  while (queue.length && calls < callCap && Date.now() < cutoff && seen.size < maxEntries && root.got.size < root.total) {
+    queue.sort((a, b) => (b.total - b.got.size) - (a.total - a.got.size));
+    const s = queue[0];
+    if (s.got.size >= s.total) { queue.shift(); continue; }
+    const next = candidates(s).slice(0, Math.max(1, concurrency));
+    if (!next.length) { queue.shift(); continue; }
+    const results = await Promise.all(next.map(async (c) => { s.tried.add(c.w.toLowerCase()); return { c, r: await ask([...s.words, c.w]) }; }));
+    for (const { c, r } of results) {
+      if (!r) continue;
+      if (c.kind === 'older') s.empties = r.total ? 0 : s.empties + 1;
+      if (r.total <= (r.entries || []).length) s.done.add(c.w.toLowerCase());
+      if (r.total >= s.total) { for (const e of r.entries || []) add(s, e); continue; } // the word did not narrow this scope
+      const child = scope([...s.words, c.w], r, s);
+      if (child.total > child.got.size) queue.push(child);
+    }
+  }
+  const entries = [...root.got].map(k => seen.get(k)).sort((a, b) => stamp(a) - stamp(b));
+  return { ok: true, total: root.total, fetched: entries.length, complete: entries.length >= root.total, calls, entries,
+    reason: entries.length >= root.total ? null : calls >= callCap ? 'CALL_CAP' : Date.now() >= cutoff ? 'TIMEOUT' : seen.size >= maxEntries ? 'MAX_ENTRIES' : 'NO_SPLITTING_WORD' };
 }
 
 /** Puts a plain query into the tool's own query property. */

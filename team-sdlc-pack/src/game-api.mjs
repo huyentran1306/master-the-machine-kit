@@ -22,10 +22,13 @@ function apiError(res) {
 }
 
 /** POST start. Returns { ok, httpStatus, replay, data, error }. */
-export async function startWork({ url, bearer, allowedOrigins, backlogItemKey, log, timeoutMs = 20000, beforeRetry = null }) {
+// APBLZN38 wave 2: the server took > 20 s to answer two of four concurrent Start Work calls (PI-02, BUG-11) while
+// CR-07/CR-05 got through; the retry 35 s later came back 200 (replay: the first call had registered). Start Work is
+// idempotent, so a short timeout and an immediate retry hand the worker its files sooner.
+export async function startWork({ url, bearer, allowedOrigins, backlogItemKey, log, timeoutMs = 8000, beforeRetry = null }) {
   const reqInfo = { method: 'POST', url, backlogId: backlogItemKey };
   let lastErr = null;
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  for (let attempt = 1; attempt <= 4; attempt++) {
     if (attempt > 1 && beforeRetry) {
       const stop = await beforeRetry(attempt);
       if (stop) return { ok: false, uncertain: true, halted: stop, ...lastErr, error: lastErr };
@@ -41,7 +44,8 @@ export async function startWork({ url, bearer, allowedOrigins, backlogItemKey, l
     } catch (e) {
       await log('FAILED', reqInfo, null, e);
       lastErr = { httpStatus: null, code: e.code || 'NETWORK', message: e.message };
-      if (attempt < 3) await sleep(1500 * attempt);
+      // A timeout already waited; retry at once (replay-safe). A refused connection backs off briefly.
+      if (attempt < 4 && e.code !== 'TIMEOUT') await sleep(1000 * attempt);
       continue;
     }
     const ok = res.status === 200 || res.status === 201;
